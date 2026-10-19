@@ -1,0 +1,2118 @@
+use crate::ast::*;
+use crate::diagnostic::{RillError, Span};
+use std::collections::VecDeque;
+
+#[derive(Debug, Clone, PartialEq)]
+enum TokenKind {
+    Ident(String),
+    Number(String),
+    Str(String),
+    Regex(String),
+    Substitution {
+        pattern: String,
+        replacement: String,
+        all: bool,
+    },
+    Word(String),
+    CommandText(String),
+    CommandString(String),
+    CommandVar(String),
+    CommandSplat(String),
+    CommandVarDefault(String, String),
+    CommandRedirect(RedirectKind),
+    Let,
+    Use,
+    Args,
+    Input,
+    With,
+    Fn,
+    For,
+    In,
+    If,
+    Else,
+    Return,
+    Continue,
+    Break,
+    While,
+    Var,
+    Emit,
+    On,
+    Run,
+    MatchKw,
+    True,
+    False,
+    Null,
+    TypeIdent(String),
+    Pipe,
+    ValuePipe,
+    Eq,
+    EqEq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Match,
+    FatArrow,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Bang,
+    AndAnd,
+    OrOr,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    Question,
+    Dollar,
+    Dot,
+    DotDot,
+    Comma,
+    Colon,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Newline,
+    Semi,
+    Eof,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Token {
+    kind: TokenKind,
+    span: Span,
+}
+
+pub fn parse(source: &str) -> Result<Program, RillError> {
+    let tokens = lex(source)?;
+    Parser::new(tokens).parse_program()
+}
+
+fn lex(source: &str) -> Result<Vec<Token>, RillError> {
+    let mut tokens = Vec::new();
+    let mut chars = source.char_indices().peekable();
+    let mut at_line_start = true;
+    let mut command_mode = false;
+
+    if source.starts_with("#!") {
+        for (_, ch) in chars.by_ref() {
+            if ch == '\n' {
+                tokens.push(Token {
+                    kind: TokenKind::Newline,
+                    span: Span::new(0, 1),
+                });
+                break;
+            }
+        }
+    }
+
+    while let Some((start, ch)) = chars.next() {
+        if command_mode {
+            match ch {
+                ' ' | '\t' | '\r' => continue,
+                '\n' => {
+                    command_mode = false;
+                    at_line_start = true;
+                    tokens.push(Token {
+                        kind: TokenKind::Newline,
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                ';' => {
+                    command_mode = false;
+                    tokens.push(Token {
+                        kind: TokenKind::Semi,
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                '|' => {
+                    command_mode = false;
+                    let (kind, end) = if matches!(chars.peek(), Some((_, '>'))) {
+                        let (idx, next) = chars.next().expect("peeked token exists");
+                        (TokenKind::ValuePipe, idx + next.len_utf8())
+                    } else {
+                        (TokenKind::Pipe, start + 1)
+                    };
+                    tokens.push(Token {
+                        kind,
+                        span: Span::new(start, end),
+                    });
+                    continue;
+                }
+                '}' => {
+                    command_mode = false;
+                    tokens.push(Token {
+                        kind: TokenKind::RBrace,
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                '{' => {
+                    command_mode = false;
+                    tokens.push(Token {
+                        kind: TokenKind::LBrace,
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                '#' => {
+                    while let Some((_, next)) = chars.peek().copied() {
+                        if next == '\n' {
+                            break;
+                        }
+                        chars.next();
+                    }
+                    continue;
+                }
+                '"' => {
+                    let (text, end) = lex_string_body(&mut chars, start)?;
+                    tokens.push(Token {
+                        kind: TokenKind::CommandString(text),
+                        span: Span::new(start, end),
+                    });
+                    continue;
+                }
+                '>' => {
+                    tokens.push(Token {
+                        kind: TokenKind::CommandRedirect(RedirectKind::Stdout),
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                '<' => {
+                    tokens.push(Token {
+                        kind: TokenKind::CommandRedirect(RedirectKind::Stdin),
+                        span: Span::new(start, start + 1),
+                    });
+                    continue;
+                }
+                '$' => {
+                    // `${NAME}` or `${NAME:-default}` – balanced brace form.
+                    if matches!(chars.peek(), Some((_, '{'))) {
+                        chars.next(); // consume '{'
+                        let (name, default, end) =
+                            lex_braced_var(&mut chars, start)?;
+                        let kind = match default {
+                            Some(d) => TokenKind::CommandVarDefault(name, d),
+                            None => TokenKind::CommandVar(name),
+                        };
+                        tokens.push(Token {
+                            kind,
+                            span: Span::new(start, end),
+                        });
+                        continue;
+                    }
+                    // `$*name` — word-split splat form.
+                    let splat = matches!(chars.peek(), Some((_, '*')));
+                    if splat {
+                        chars.next(); // consume '*'
+                    }
+                    // Plain `$name` or `$*name` form.
+                    let mut name = String::new();
+                    let mut end = start + 1;
+                    while let Some((idx, next)) = chars.peek().copied() {
+                        if next.is_ascii_alphanumeric() || next == '_' {
+                            chars.next();
+                            name.push(next);
+                            end = idx + next.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    if name.is_empty() {
+                        return Err(RillError::spanned(
+                            "expected identifier after $",
+                            Span::new(start, end),
+                        ));
+                    }
+                    tokens.push(Token {
+                        kind: if splat { TokenKind::CommandSplat(name) } else { TokenKind::CommandVar(name) },
+                        span: Span::new(start, end),
+                    });
+                    continue;
+                }
+                _ => {
+                    let mut text = String::from(ch);
+                    let mut end = start + ch.len_utf8();
+                    while let Some((idx, next)) = chars.peek().copied() {
+                        if next.is_whitespace()
+                            || next == '|'
+                            || next == ';'
+                            || next == '}'
+                            || next == '#'
+                            || next == '"'
+                            || next == '$'
+                        {
+                            break;
+                        }
+                        chars.next();
+                        text.push(next);
+                        end = idx + next.len_utf8();
+                    }
+                    tokens.push(Token {
+                        kind: command_text_kind(text),
+                        span: Span::new(start, end),
+                    });
+                    continue;
+                }
+            }
+        }
+
+        match ch {
+            ' ' | '\t' | '\r' => {}
+            '\n' => {
+                at_line_start = true;
+                tokens.push(Token {
+                    kind: TokenKind::Newline,
+                    span: Span::new(start, start + 1),
+                });
+            }
+            '#' => {
+                while let Some((_, next)) = chars.peek().copied() {
+                    if next == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            '"' => {
+                let (out, end) = lex_string_body(&mut chars, start)?;
+                tokens.push(Token {
+                    kind: TokenKind::Str(out),
+                    span: Span::new(start, end),
+                });
+                at_line_start = false;
+            }
+            '/' => {
+                if matches!(chars.peek(), Some((_, '/'))) {
+                    while let Some((_, next)) = chars.peek().copied() {
+                        if next == '\n' {
+                            break;
+                        }
+                        chars.next();
+                    }
+                } else if regex_literal_context(tokens.last().map(|t| &t.kind)) {
+                    let (body, end) = lex_slash_body(&mut chars, start)?;
+                    tokens.push(Token {
+                        kind: TokenKind::Regex(body),
+                        span: Span::new(start, end),
+                    });
+                    at_line_start = false;
+                } else if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    push(&mut tokens, TokenKind::SlashEq, start);
+                    at_line_start = false;
+                } else {
+                    push(&mut tokens, TokenKind::Slash, start);
+                    at_line_start = false;
+                }
+            }
+            '0'..='9' => {
+                let mut text = String::from(ch);
+                let mut end = start + 1;
+                while let Some((idx, next)) = chars.peek().copied() {
+                    let decimal_point = next == '.'
+                        && !text.contains('.')
+                        && text.chars().all(|ch| ch.is_ascii_digit())
+                        && chars
+                            .clone()
+                            .nth(1)
+                            .is_some_and(|(_, ch)| ch.is_ascii_digit());
+                    if next.is_ascii_alphanumeric() || decimal_point {
+                        chars.next();
+                        text.push(next);
+                        end = idx + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Number(text),
+                    span: Span::new(start, end),
+                });
+                at_line_start = false;
+            }
+            'a'..='z' | 'A'..='Z' | '_' => {
+                let mut text = String::from(ch);
+                let mut end = start + 1;
+                while let Some((idx, next)) = chars.peek().copied() {
+                    if next.is_ascii_alphanumeric() || next == '_' || next == '-' {
+                        chars.next();
+                        text.push(next);
+                        end = idx + next.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                // Allow a trailing `?` or `!` suffix (Ruby-style predicate/bang names).
+                // Exception: `run` uses `!` as a command exit-check modifier, not an identifier suffix.
+                if text != "run" {
+                    if let Some((idx, next @ ('?' | '!'))) = chars.peek().copied() {
+                        chars.next();
+                        text.push(next);
+                        end = idx + 1;
+                    }
+                }
+                let after_dot =
+                    matches!(tokens.last().map(|token| &token.kind), Some(TokenKind::Dot));
+                let is_run = text == "run" && !after_dot;
+                if text == "s"
+                    && matches!(tokens.last().map(|t| &t.kind), Some(TokenKind::Match))
+                    && matches!(chars.peek(), Some((_, '/')))
+                {
+                    let (pattern, replacement, all, subst_end) =
+                        lex_substitution(&mut chars, start)?;
+                    tokens.push(Token {
+                        kind: TokenKind::Substitution {
+                            pattern,
+                            replacement,
+                            all,
+                        },
+                        span: Span::new(start, subst_end),
+                    });
+                    at_line_start = false;
+                    continue;
+                }
+
+                let kind = if after_dot {
+                    TokenKind::Ident(text)
+                } else {
+                    match text.as_str() {
+                        "let" => TokenKind::Let,
+                        "use" => TokenKind::Use,
+                        "args" => TokenKind::Args,
+                        "input" => TokenKind::Input,
+                        "with" => TokenKind::With,
+                        "fn" => TokenKind::Fn,
+                        "for" => TokenKind::For,
+                        "in" => TokenKind::In,
+                        "if" => TokenKind::If,
+                        "else" => TokenKind::Else,
+                        "return" => TokenKind::Return,
+                        "continue" => TokenKind::Continue,
+                        "break" => TokenKind::Break,
+                        "while" => TokenKind::While,
+                        "var" => TokenKind::Var,
+                        "emit" => TokenKind::Emit,
+                        "on" => TokenKind::On,
+                        "run" => TokenKind::Run,
+                        "match" => TokenKind::MatchKw,
+                        "true" => TokenKind::True,
+                        "false" => TokenKind::False,
+                        "null" => TokenKind::Null,
+                        "Bool" | "Int" | "Float" | "Str" | "Bytes" | "List" | "Map"
+                        | "Duration" | "Path" | "Regex" | "ProcessResult" | "ProcessHandle"
+                        | "Error" | "Fn" | "Option" | "Result" => TokenKind::TypeIdent(text),
+                        _ => TokenKind::Ident(text),
+                    }
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, end),
+                });
+                if is_run {
+                    command_mode = true;
+                }
+                at_line_start = false;
+            }
+            '|' => {
+                let kind = if matches!(chars.peek(), Some((_, '|'))) {
+                    chars.next();
+                    TokenKind::OrOr
+                } else if matches!(chars.peek(), Some((_, '>'))) {
+                    chars.next();
+                    TokenKind::ValuePipe
+                } else {
+                    TokenKind::Pipe
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '&' => {
+                if matches!(chars.peek(), Some((_, '&'))) {
+                    chars.next();
+                } else {
+                    return Err(RillError::spanned(
+                        "unexpected '&'",
+                        Span::new(start, start + 1),
+                    ));
+                }
+                tokens.push(Token {
+                    kind: TokenKind::AndAnd,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '=' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::EqEq
+                } else if matches!(chars.peek(), Some((_, '~'))) {
+                    chars.next();
+                    TokenKind::Match
+                } else if matches!(chars.peek(), Some((_, '>'))) {
+                    chars.next();
+                    TokenKind::FatArrow
+                } else {
+                    TokenKind::Eq
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '!' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::Ne
+                } else {
+                    TokenKind::Bang
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '>' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::Ge
+                } else {
+                    TokenKind::Gt
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '<' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::Le
+                } else {
+                    TokenKind::Lt
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span::new(start, start + 1),
+                });
+                at_line_start = false;
+            }
+            '+' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::PlusEq
+                } else {
+                    TokenKind::Plus
+                };
+                push(&mut tokens, kind, start);
+                at_line_start = false;
+            }
+            '-' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::MinusEq
+                } else {
+                    TokenKind::Minus
+                };
+                push(&mut tokens, kind, start);
+                at_line_start = false;
+            }
+            '*' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::StarEq
+                } else {
+                    TokenKind::Star
+                };
+                push(&mut tokens, kind, start);
+                at_line_start = false;
+            }
+            '$' => push(&mut tokens, TokenKind::Dollar, start),
+            '?' => push(&mut tokens, TokenKind::Question, start),
+            '.' => {
+                if chars.peek().map(|(_, c)| *c) == Some('.') {
+                    let (end, _) = chars.next().unwrap();
+                    tokens.push(Token {
+                        kind: TokenKind::DotDot,
+                        span: Span::new(start, end + 1),
+                    });
+                } else {
+                    push(&mut tokens, TokenKind::Dot, start);
+                }
+            }
+            ',' => push(&mut tokens, TokenKind::Comma, start),
+            ':' => push(&mut tokens, TokenKind::Colon, start),
+            '(' => push(&mut tokens, TokenKind::LParen, start),
+            ')' => push(&mut tokens, TokenKind::RParen, start),
+            '{' => push(&mut tokens, TokenKind::LBrace, start),
+            '}' => push(&mut tokens, TokenKind::RBrace, start),
+            '[' => push(&mut tokens, TokenKind::LBracket, start),
+            ']' => push(&mut tokens, TokenKind::RBracket, start),
+            ';' => push(&mut tokens, TokenKind::Semi, start),
+            other => {
+                if at_line_start {
+                    return Err(RillError::spanned(
+                        format!("unexpected character '{other}'"),
+                        Span::new(start, start + other.len_utf8()),
+                    ));
+                }
+                push(&mut tokens, TokenKind::Word(other.to_string()), start);
+            }
+        }
+    }
+
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        span: Span::new(source.len(), source.len()),
+    });
+    Ok(tokens)
+}
+
+fn push(tokens: &mut Vec<Token>, kind: TokenKind, start: usize) {
+    tokens.push(Token {
+        kind,
+        span: Span::new(start, start + 1),
+    });
+}
+
+fn lex_string_body<I>(
+    chars: &mut std::iter::Peekable<I>,
+    start: usize,
+) -> Result<(String, usize), RillError>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut out = String::new();
+    let mut end = start + 1;
+    let mut closed = false;
+    while let Some((idx, next)) = chars.next() {
+        end = idx + next.len_utf8();
+        match next {
+            '"' => {
+                closed = true;
+                break;
+            }
+            '\\' => {
+                let Some((esc_idx, esc)) = chars.next() else {
+                    return Err(RillError::spanned(
+                        "unterminated string escape",
+                        Span::new(start, end),
+                    ));
+                };
+                end = esc_idx + esc.len_utf8();
+                out.push(match esc {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    other => other,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    if !closed {
+        return Err(RillError::spanned(
+            "unterminated string",
+            Span::new(start, end),
+        ));
+    }
+    Ok((out, end))
+}
+
+/// Parse `NAME}` or `NAME:-default}` after `${` has been consumed.
+/// Returns `(name, default, end_byte_offset)`.
+fn lex_braced_var<I>(
+    chars: &mut std::iter::Peekable<I>,
+    start: usize,
+) -> Result<(String, Option<String>, usize), RillError>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut name = String::new();
+    let mut end = start + 2; // past '${'
+    loop {
+        match chars.next() {
+            None => {
+                return Err(RillError::spanned(
+                    "unclosed '${'",
+                    Span::new(start, end),
+                ))
+            }
+            Some((idx, '}')) => {
+                end = idx + 1;
+                return Ok((name, None, end));
+            }
+            Some((idx, ':')) => {
+                end = idx + 1;
+                if matches!(chars.peek(), Some((_, '-'))) {
+                    chars.next(); // consume '-'
+                    let (default, end2) = lex_braced_default(chars, start)?;
+                    return Ok((name, Some(default), end2));
+                }
+                name.push(':');
+            }
+            Some((idx, ch)) => {
+                end = idx + ch.len_utf8();
+                name.push(ch);
+            }
+        }
+    }
+}
+
+/// Collect the default text up to the matching `}`, tracking brace depth.
+fn lex_braced_default<I>(
+    chars: &mut std::iter::Peekable<I>,
+    outer_start: usize,
+) -> Result<(String, usize), RillError>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut result = String::new();
+    let mut depth = 1usize;
+    let mut end = outer_start;
+    loop {
+        match chars.next() {
+            None => {
+                return Err(RillError::spanned(
+                    "unclosed '${'",
+                    Span::new(outer_start, end),
+                ))
+            }
+            Some((idx, '{')) => {
+                depth += 1;
+                end = idx + 1;
+                result.push('{');
+            }
+            Some((idx, '}')) => {
+                end = idx + 1;
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((result, end));
+                }
+                result.push('}');
+            }
+            Some((idx, ch)) => {
+                end = idx + ch.len_utf8();
+                result.push(ch);
+            }
+        }
+    }
+}
+
+fn lex_slash_body<I>(
+    chars: &mut std::iter::Peekable<I>,
+    start: usize,
+) -> Result<(String, usize), RillError>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut body = String::new();
+    let mut end = start + 1;
+    let mut escaped = false;
+    let mut closed = false;
+    for (idx, next) in chars.by_ref() {
+        end = idx + next.len_utf8();
+        if escaped {
+            body.push(next);
+            escaped = false;
+            continue;
+        }
+        match next {
+            '\\' => {
+                body.push(next);
+                escaped = true;
+            }
+            '/' => {
+                closed = true;
+                break;
+            }
+            other => body.push(other),
+        }
+    }
+    if !closed {
+        return Err(RillError::spanned(
+            "unterminated regex literal",
+            Span::new(start, end),
+        ));
+    }
+    Ok((body, end))
+}
+
+fn lex_substitution<I>(
+    chars: &mut std::iter::Peekable<I>,
+    start: usize,
+) -> Result<(String, String, bool, usize), RillError>
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let Some((pattern_slash_idx, '/')) = chars.next() else {
+        return Err(RillError::spanned(
+            "expected / after substitution operator",
+            Span::new(start, start + 1),
+        ));
+    };
+    let (pattern, _) = lex_slash_body(chars, pattern_slash_idx)?;
+    let (replacement, mut end) = lex_slash_body(chars, start)?;
+    let mut all = false;
+    while let Some((idx, flag)) = chars.peek().copied() {
+        if !flag.is_ascii_alphabetic() {
+            break;
+        }
+        chars.next();
+        end = idx + flag.len_utf8();
+        if flag == 'g' {
+            all = true;
+        }
+    }
+    Ok((pattern, replacement, all, end))
+}
+
+fn regex_literal_context(previous: Option<&TokenKind>) -> bool {
+    matches!(
+        previous,
+        Some(
+            TokenKind::Match
+                | TokenKind::LParen
+                | TokenKind::LBrace
+                | TokenKind::Comma
+                | TokenKind::FatArrow
+                | TokenKind::Newline
+                | TokenKind::Semi
+        ) | None
+    )
+}
+
+fn command_text_kind(text: String) -> TokenKind {
+    match text.as_str() {
+        "err>" => TokenKind::CommandRedirect(RedirectKind::Stderr),
+        "all>" => TokenKind::CommandRedirect(RedirectKind::All),
+        _ => TokenKind::CommandText(text),
+    }
+}
+
+struct Parser {
+    tokens: VecDeque<Token>,
+    last_end: usize,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens: VecDeque::from(tokens),
+            last_end: 0,
+        }
+    }
+
+    fn parse_program(&mut self) -> Result<Program, RillError> {
+        let mut stmts = Vec::new();
+        self.skip_separators();
+        while !self.at(TokenKind::Eof) {
+            stmts.push(self.parse_stmt()?);
+            self.skip_separators();
+        }
+        Ok(Program { stmts })
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, RillError> {
+        match self.peek_kind() {
+            TokenKind::Let => self.parse_let(false),
+            TokenKind::Var => self.parse_let(true),
+            TokenKind::Use => self.parse_use(),
+            TokenKind::Args if matches!(self.peek_n_kind(1), TokenKind::LBrace) => {
+                self.parse_args_decl()
+            }
+            TokenKind::Input if self.at_input_declaration() => self.parse_input_decl(),
+            TokenKind::With => self.parse_with_env(),
+            TokenKind::On => self.parse_on(),
+            TokenKind::Fn => self.parse_fn(),
+            TokenKind::For => Ok(Stmt::Expr(
+                self.parse_for_expr(ForMode::Sequential, None)?,
+            )),
+            TokenKind::Emit => {
+                self.next();
+                Ok(Stmt::Emit(self.parse_expr(0)?))
+            }
+            TokenKind::If => self.parse_if(),
+            TokenKind::Return => {
+                self.next();
+                if self.at_separator() {
+                    Ok(Stmt::Return(None))
+                } else {
+                    Ok(Stmt::Return(Some(self.parse_expr(0)?)))
+                }
+            }
+            TokenKind::Continue => {
+                self.next();
+                Ok(Stmt::Continue)
+            }
+            TokenKind::Break => {
+                self.next();
+                Ok(Stmt::Break)
+            }
+            TokenKind::While => {
+                self.next();
+                let cond = self.parse_expr(0)?;
+                let body = self.parse_block()?;
+                Ok(Stmt::While { cond: Box::new(cond), body })
+            }
+            TokenKind::Ident(name) if name == "env" && self.is_env_assignment() => {
+                self.parse_env_assignment()
+            }
+            TokenKind::Ident(_) if self.is_assignment() => self.parse_assignment(),
+            _ => Ok(Stmt::Expr(self.parse_expr(0)?)),
+        }
+    }
+
+    fn at_input_declaration(&self) -> bool {
+        matches!(self.peek_n_kind(1), TokenKind::Ident(name) if name == "lines")
+    }
+
+    fn parse_input_decl(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::Input)?;
+        let kind = self.expect_ident()?;
+        if kind != "lines" {
+            return Err(RillError::spanned(
+                "expected 'lines' after input",
+                self.peek().span,
+            ));
+        }
+        Ok(Stmt::InputLines)
+    }
+
+    fn parse_use(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::Use)?;
+        let mut path = String::new();
+        loop {
+            let token = self.next();
+            match token.kind {
+                TokenKind::Ident(name) | TokenKind::TypeIdent(name) | TokenKind::Word(name) => {
+                    path.push_str(&name)
+                }
+                TokenKind::Dot => path.push('.'),
+                TokenKind::DotDot => path.push_str(".."),
+                TokenKind::Slash => path.push('/'),
+                other => {
+                    return Err(RillError::spanned(
+                        format!("expected module name, found {other:?}"),
+                        token.span,
+                    ))
+                }
+            }
+            if self.at_separator() || self.at(TokenKind::Eof) {
+                break;
+            }
+        }
+        Ok(Stmt::Use(path))
+    }
+
+    fn parse_args_decl(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::Args)?;
+        Ok(Stmt::Args(self.parse_arg_group("root".to_string())?))
+    }
+
+    fn parse_arg_group(&mut self, group_name: String) -> Result<ArgGroup, RillError> {
+        self.expect(TokenKind::LBrace)?;
+        self.skip_separators();
+        let mut fields = Vec::new();
+        let mut subcommands = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let name = self.expect_ident()?;
+            if self.at(TokenKind::LBrace) {
+                subcommands.push(self.parse_arg_group(name)?);
+                self.skip_separators();
+                continue;
+            }
+            self.expect(TokenKind::Colon)?;
+            let type_name = self.parse_type_name()?;
+            let default = if self.consume(TokenKind::Eq) {
+                Some(self.parse_expr(0)?)
+            } else {
+                None
+            };
+            let short = if self.at_ident("short") {
+                self.next();
+                self.expect(TokenKind::Eq)?;
+                Some(Self::static_string(self.parse_expr(0)?)?)
+            } else {
+                None
+            };
+            let description = if self.at_ident("description") {
+                self.next();
+                self.expect(TokenKind::Eq)?;
+                Some(Self::static_string(self.parse_expr(0)?)?)
+            } else {
+                None
+            };
+            fields.push(ArgDecl {
+                name,
+                type_name,
+                default,
+                short,
+                description,
+            });
+            self.skip_separators();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(ArgGroup {
+            name: group_name,
+            fields,
+            subcommands,
+        })
+    }
+
+    fn at_ident(&self, expected: &str) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(name) if name == expected)
+    }
+
+    fn static_string(expr: Expr) -> Result<String, RillError> {
+        match expr.unspanned() {
+            Expr::Literal(Literal::Str(value)) => Ok(value.clone()),
+            other => Err(RillError::spanned(
+                format!("expected string literal, found {other:?}"),
+                Span::new(0, 0),
+            )),
+        }
+    }
+
+    fn is_env_assignment(&self) -> bool {
+        matches!(
+            (
+                self.peek_n_kind(1),
+                self.peek_n_kind(2),
+                self.peek_n_kind(3)
+            ),
+            (TokenKind::Dot, TokenKind::Ident(_), TokenKind::Eq)
+        )
+    }
+
+    fn is_assignment(&self) -> bool {
+        let next = self.peek_n_kind(1);
+        if matches!(next, TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq) {
+            return true;
+        }
+        // index-assignment: ident[...] op= value — scan forward past matching bracket
+        if matches!(next, TokenKind::LBracket) {
+            let mut depth = 0usize;
+            let mut i = 2;
+            loop {
+                match self.peek_n_kind(i) {
+                    TokenKind::LBracket => depth += 1,
+                    TokenKind::RBracket => {
+                        if depth == 0 {
+                            return matches!(
+                                self.peek_n_kind(i + 1),
+                                TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq
+                            );
+                        }
+                        depth -= 1;
+                    }
+                    TokenKind::Eof | TokenKind::Newline | TokenKind::Semi => return false,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        false
+    }
+
+    fn parse_assign_op(&mut self) -> Result<AssignOp, RillError> {
+        let token = self.next();
+        Ok(match token.kind {
+            TokenKind::Eq => AssignOp::Assign,
+            TokenKind::PlusEq => AssignOp::Add,
+            TokenKind::MinusEq => AssignOp::Sub,
+            TokenKind::StarEq => AssignOp::Mul,
+            TokenKind::SlashEq => AssignOp::Div,
+            other => return Err(RillError::spanned(
+                format!("expected assignment operator, got {other:?}"),
+                token.span,
+            )),
+        })
+    }
+
+    fn parse_assignment(&mut self) -> Result<Stmt, RillError> {
+        let name = self.expect_ident()?;
+        if matches!(self.peek_kind(), TokenKind::LBracket) {
+            self.next(); // consume [
+            let index = self.parse_expr(0)?;
+            self.expect(TokenKind::RBracket)?;
+            let op = self.parse_assign_op()?;
+            self.skip_newlines();
+            let expr = self.parse_expr(0)?;
+            return Ok(Stmt::IndexAssign { name, index: Box::new(index), op, expr: Box::new(expr) });
+        }
+        let op = self.parse_assign_op()?;
+        self.skip_newlines();
+        let expr = self.parse_expr(0)?;
+        Ok(Stmt::Assign { name, op, expr })
+    }
+
+    fn parse_env_assignment(&mut self) -> Result<Stmt, RillError> {
+        self.expect_ident()?;
+        self.expect(TokenKind::Dot)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Eq)?;
+        self.skip_newlines();
+        Ok(Stmt::AssignEnv {
+            name,
+            expr: self.parse_expr(0)?,
+        })
+    }
+
+    fn parse_with_env(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::With)?;
+        let target = self.expect_ident()?;
+        if target != "env" {
+            return Err(RillError::spanned(
+                "with currently supports only env",
+                self.peek().span,
+            ));
+        }
+        self.expect(TokenKind::LBrace)?;
+        self.skip_separators();
+        let mut bindings = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let name = self.expect_ident()?;
+            self.expect(TokenKind::Eq)?;
+            self.skip_newlines();
+            bindings.push((name, self.parse_expr(0)?));
+            self.skip_separators();
+        }
+        self.expect(TokenKind::RBrace)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::WithEnv { bindings, body })
+    }
+
+    fn parse_let(&mut self, mutable: bool) -> Result<Stmt, RillError> {
+        self.next(); // consume let or var
+        let pattern = self.parse_binding_pattern()?;
+        let type_name = if self.consume(TokenKind::Colon) {
+            Some(self.parse_type_name()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::Eq)?;
+        self.skip_newlines();
+        let expr = self.parse_expr(0)?;
+        Ok(Stmt::Let {
+            pattern,
+            type_name,
+            expr,
+            mutable,
+        })
+    }
+
+    fn parse_binding_pattern(&mut self) -> Result<LetPattern, RillError> {
+        Ok(match self.peek_kind() {
+            TokenKind::LBracket => {
+                self.next();
+                self.skip_newlines();
+                let mut names = Vec::new();
+                while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                    names.push(self.expect_ident()?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RBracket)?;
+                LetPattern::List(names)
+            }
+            TokenKind::LParen => {
+                let start = self.next().span;
+                self.skip_newlines();
+                let mut names = Vec::new();
+                while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                    names.push(self.expect_ident()?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RParen)?;
+                if names.len() < 2 {
+                    return Err(RillError::spanned(
+                        "tuple destructuring needs at least 2 bindings",
+                        start,
+                    ));
+                }
+                LetPattern::Tuple(names)
+            }
+            TokenKind::LBrace => {
+                self.next();
+                self.skip_newlines();
+                let mut pairs = Vec::new();
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    let key = self.expect_ident()?;
+                    let alias = if self.consume(TokenKind::Colon) {
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+                    pairs.push((key, alias));
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RBrace)?;
+                LetPattern::Map(pairs)
+            }
+            _ => LetPattern::Ident(self.expect_ident()?),
+        })
+    }
+
+    fn parse_fn(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::Fn)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::LParen)?;
+        self.skip_newlines();
+        let mut params = Vec::new();
+        if !self.at(TokenKind::RParen) {
+            loop {
+                let name = self.expect_ident()?;
+                let type_name = if self.consume(TokenKind::Colon) {
+                    Some(self.parse_type_name()?)
+                } else {
+                    None
+                };
+                params.push(Param { name, type_name });
+                self.skip_newlines();
+                if !self.consume(TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        let return_type = if self.consume(TokenKind::Minus) {
+            self.expect(TokenKind::Gt)?;
+            Some(self.parse_type_name()?)
+        } else {
+            None
+        };
+        let body = self.parse_block()?;
+        Ok(Stmt::Fn {
+            name,
+            function: Function {
+                params,
+                return_type,
+                body,
+            },
+        })
+    }
+
+    fn parse_for_expr(
+        &mut self,
+        mode: ForMode,
+        workers: Option<Box<Expr>>,
+    ) -> Result<Expr, RillError> {
+        self.expect(TokenKind::For)?;
+        let destructuring = self.consume(TokenKind::Let);
+        let pattern = self.parse_binding_pattern()?;
+        let iter = if self.consume(TokenKind::In) {
+            self.parse_expr(0)?
+        } else if !destructuring && matches!(pattern, LetPattern::Ident(_)) {
+            Expr::Field {
+                base: Box::new(Expr::Ident("input".to_string())),
+                name: "lines".to_string(),
+            }
+        } else {
+            return Err(RillError::spanned(
+                "destructuring for loops require 'in' followed by an expression",
+                self.peek().span,
+            ));
+        };
+        let body = self.parse_block()?;
+        Ok(Expr::For {
+            mode,
+            workers,
+            pattern,
+            iter: Box::new(iter),
+            body,
+        })
+    }
+
+    fn parse_if(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::If)?;
+        let (cond, pattern) = if self.consume(TokenKind::Let) {
+            let pattern = self.parse_binding_pattern()?;
+            self.expect(TokenKind::Eq)?;
+            (self.parse_expr(0)?, Some(pattern))
+        } else {
+            (self.parse_expr(0)?, None)
+        };
+        let then_body = self.parse_block()?;
+        let else_body = if self.consume(TokenKind::Else) {
+            if self.at(TokenKind::If) {
+                vec![self.parse_if()?]
+            } else {
+                self.parse_block()?
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::If {
+            cond,
+            pattern,
+            then_body,
+            else_body,
+        })
+    }
+
+    fn parse_on(&mut self) -> Result<Stmt, RillError> {
+        self.expect(TokenKind::On)?;
+        let host = self.parse_expr(0)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::On { host: Box::new(host), body })
+    }
+
+    fn parse_block(&mut self) -> Result<Vec<Stmt>, RillError> {
+        self.expect(TokenKind::LBrace)?;
+        self.skip_separators();
+        let mut stmts = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            stmts.push(self.parse_stmt()?);
+            self.skip_separators();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(stmts)
+    }
+
+    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, RillError> {
+        let start = self.peek().span.start;
+        let mut left = self.parse_prefix()?;
+        loop {
+            if self.at(TokenKind::Newline)
+                && matches!(self.peek_n_kind(1), TokenKind::Pipe | TokenKind::ValuePipe | TokenKind::Dot)
+            {
+                self.next();
+            }
+            if self.at_separator()
+                || self.at(TokenKind::RParen)
+                || self.at(TokenKind::RBracket)
+                || self.at(TokenKind::RBrace)
+                || self.at(TokenKind::Comma)
+                || self.at(TokenKind::FatArrow)
+            {
+                break;
+            }
+
+            if self.consume(TokenKind::Dot) {
+                let name = self.expect_ident()?;
+                left = Expr::Field {
+                    base: Box::new(left),
+                    name,
+                };
+                continue;
+            }
+
+            if self.at(TokenKind::LParen) {
+                self.next();
+                self.skip_newlines();
+                let mut args = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    loop {
+                        args.push(self.parse_call_arg()?);
+                        self.skip_newlines();
+                        if !self.consume(TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                left = Expr::Call {
+                    callee: Box::new(left),
+                    args,
+                };
+                continue;
+            }
+
+            if self.consume(TokenKind::Question) {
+                left = Expr::Try(Box::new(left));
+                continue;
+            }
+
+            let Some((op, lbp, rbp)) = self.infix_binding_power() else {
+                break;
+            };
+            if lbp < min_bp {
+                break;
+            }
+            self.next();
+
+            if op == ParsedOp::Match {
+                let next = self.next();
+                match next.kind {
+                    TokenKind::Regex(pattern) => {
+                        left = Expr::RegexMatch {
+                            value: Box::new(left),
+                            pattern,
+                        };
+                    }
+                    TokenKind::Substitution {
+                        pattern,
+                        replacement,
+                        all,
+                    } => {
+                        left = Expr::RegexSubstitution {
+                            value: Box::new(left),
+                            pattern,
+                            replacement,
+                            all,
+                        };
+                    }
+                    other => {
+                        return Err(RillError::spanned(
+                            format!(
+                                "expected regex literal or substitution after =~, found {other:?}"
+                            ),
+                            next.span,
+                        ))
+                    }
+                };
+                continue;
+            }
+
+            if op == ParsedOp::Index {
+                let index = self.parse_expr(0)?;
+                self.expect(TokenKind::RBracket)?;
+                left = Expr::Index {
+                    base: Box::new(left),
+                    index: Box::new(index),
+                };
+                continue;
+            }
+            let right = self.parse_expr(rbp)?;
+            left = match op {
+                ParsedOp::Pipe(kind) => Expr::Pipe {
+                    kind,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                ParsedOp::Binary(op) => Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                ParsedOp::Match | ParsedOp::Index => unreachable!(),
+            };
+        }
+        Ok(Expr::Located {
+            expr: Box::new(left),
+            span: Span::new(start, self.last_end),
+        })
+    }
+
+    fn parse_prefix(&mut self) -> Result<Expr, RillError> {
+        let token = self.next();
+        match token.kind {
+            TokenKind::Args => Ok(Expr::Ident("args".to_string())),
+            TokenKind::Input => Ok(Expr::Ident("input".to_string())),
+            TokenKind::Number(text) => Ok(Expr::Literal(parse_number(&text)?)),
+            TokenKind::Str(text) => Ok(Expr::Literal(Literal::Str(text))),
+            TokenKind::Regex(text) => Ok(Expr::Literal(Literal::Regex(text))),
+            TokenKind::True => Ok(Expr::Literal(Literal::Bool(true))),
+            TokenKind::False => Ok(Expr::Literal(Literal::Bool(false))),
+            TokenKind::Null => Ok(Expr::Literal(Literal::Null)),
+            TokenKind::Bang => {
+                let operand = self.parse_expr(13)?;
+                Ok(Expr::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                })
+            }
+            TokenKind::Minus => {
+                let operand = self.parse_expr(13)?;
+                Ok(Expr::Binary {
+                    op: BinaryOp::Sub,
+                    left: Box::new(Expr::Literal(Literal::Int(0))),
+                    right: Box::new(operand),
+                })
+            }
+            TokenKind::Ident(ref name) if name == "not" => {
+                let operand = self.parse_expr(13)?;
+                Ok(Expr::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                })
+            }
+            TokenKind::Ident(ref name) if name == "parallel" || name == "race" => {
+                let mode = if name == "parallel" {
+                    ForMode::Parallel
+                } else {
+                    ForMode::Race
+                };
+                let workers = if self.consume(TokenKind::LParen) {
+                    let workers = self.parse_expr(0)?;
+                    self.expect(TokenKind::RParen)?;
+                    Some(Box::new(workers))
+                } else {
+                    None
+                };
+                if workers.is_some() || self.at(TokenKind::For) {
+                    self.parse_for_expr(mode, workers)
+                } else {
+                    let arg = self.parse_expr(6)?;
+                    Ok(Expr::Call {
+                        callee: Box::new(Expr::Ident(name.clone())),
+                        args: vec![arg],
+                    })
+                }
+            }
+            TokenKind::Ident(name) => {
+                if self.starts_bare_call() {
+                    let arg = self.parse_expr(6)?;
+                    Ok(Expr::Call {
+                        callee: Box::new(Expr::Ident(name)),
+                        args: vec![arg],
+                    })
+                } else {
+                    Ok(Expr::Ident(name))
+                }
+            }
+            TokenKind::TypeIdent(name) => Ok(Expr::Ident(name)),
+            TokenKind::For => {
+                // `for` in expression position — `For` token already consumed by self.next().
+                let destructuring = self.consume(TokenKind::Let);
+                let pattern = self.parse_binding_pattern()?;
+                let iter = if self.consume(TokenKind::In) {
+                    self.parse_expr(0)?
+                } else if !destructuring && matches!(pattern, LetPattern::Ident(_)) {
+                    Expr::Field {
+                        base: Box::new(Expr::Ident("input".to_string())),
+                        name: "lines".to_string(),
+                    }
+                } else {
+                    return Err(RillError::spanned(
+                        "destructuring for loops require 'in' followed by an expression",
+                        self.peek().span,
+                    ));
+                };
+                let body = self.parse_block()?;
+                Ok(Expr::For {
+                    mode: ForMode::Sequential,
+                    workers: None,
+                    pattern,
+                    iter: Box::new(iter),
+                    body,
+                })
+            }
+            TokenKind::MatchKw => self.parse_match_expr(),
+            TokenKind::Run => self.parse_command(token.span),
+            TokenKind::Pipe => {
+                let mut params = Vec::new();
+                if !self.at(TokenKind::Pipe) {
+                    loop {
+                        params.push(self.expect_ident()?);
+                        if !self.consume(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::Pipe)?;
+                let body = if self.at(TokenKind::LBrace) {
+                    self.parse_block()?
+                } else {
+                    vec![Stmt::Expr(self.parse_expr(0)?)]
+                };
+                Ok(Expr::Closure { params, body })
+            }
+            TokenKind::Dot => {
+                if let TokenKind::Ident(name) = self.peek_kind() {
+                    self.next();
+                    Ok(Expr::ImplicitField(name))
+                } else {
+                    Ok(Expr::Implicit)
+                }
+            }
+            TokenKind::LParen => {
+                self.skip_newlines();
+                if self.at(TokenKind::RParen) {
+                    return Err(RillError::spanned(
+                        "empty tuples are not supported",
+                        token.span,
+                    ));
+                }
+                let first = self.parse_expr(0)?;
+                self.skip_newlines();
+                if !self.consume(TokenKind::Comma) {
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(first);
+                }
+                self.skip_newlines();
+                if self.at(TokenKind::RParen) {
+                    return Err(RillError::spanned(
+                        "tuple literals need at least 2 elements",
+                        token.span,
+                    ));
+                }
+                let mut values = vec![first];
+                loop {
+                    values.push(self.parse_expr(0)?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                    if self.at(TokenKind::RParen) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Tuple(values))
+            }
+            TokenKind::LBracket => {
+                let mut values = Vec::new();
+                self.skip_newlines();
+                if !self.at(TokenKind::RBracket) {
+                    loop {
+                        values.push(self.parse_expr(0)?);
+                        self.skip_newlines();
+                        if !self.consume(TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                        if self.at(TokenKind::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Ok(Expr::List(values))
+            }
+            TokenKind::LBrace => {
+                let mut pairs = Vec::new();
+                self.skip_separators();
+                if !self.at(TokenKind::RBrace) {
+                    loop {
+                        let key = self.expect_ident()?;
+                        self.expect(TokenKind::Colon)?;
+                        let value = self.parse_expr(0)?;
+                        pairs.push((key, value));
+                        self.skip_newlines();
+                        if !self.consume(TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_separators();
+                        if self.at(TokenKind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBrace)?;
+                Ok(Expr::Map(pairs))
+            }
+            other => Err(RillError::spanned(
+                format!("expected expression, found {other:?}"),
+                token.span,
+            )),
+        }
+    }
+
+    fn parse_call_arg(&mut self) -> Result<Expr, RillError> {
+        if let TokenKind::Ident(name) = self.peek_kind() {
+            if matches!(self.peek_n_kind(1), TokenKind::Eq) {
+                self.next();
+                self.next();
+                let value = self.parse_expr(0)?;
+                return Ok(Expr::NamedArg {
+                    name,
+                    value: Box::new(value),
+                });
+            }
+        }
+        self.parse_expr(0)
+    }
+
+    fn parse_match_expr(&mut self) -> Result<Expr, RillError> {
+        let value = self.parse_expr(0)?;
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace)?;
+        self.skip_separators();
+        let mut arms = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let token = self.next();
+            let pattern = match token.kind {
+                TokenKind::Regex(pattern) => MatchPattern::Regex(pattern),
+                TokenKind::Ident(name) if name == "_" => MatchPattern::Wildcard,
+                TokenKind::Ident(name) if matches!(name.as_str(), "ok" | "err" | "some" | "none") => {
+                    let binding = if name != "none" && self.peek_kind() == TokenKind::LParen {
+                        self.next(); // consume (
+                        let tok = self.next();
+                        let b = match tok.kind {
+                            TokenKind::Ident(n) if n == "_" => None,
+                            TokenKind::Ident(n) => Some(n),
+                            other => return Err(RillError::spanned(
+                                format!("expected binding name or _ in match arm, found {other:?}"),
+                                tok.span,
+                            )),
+                        };
+                        self.expect(TokenKind::RParen)?;
+                        b
+                    } else {
+                        None
+                    };
+                    match name.as_str() {
+                        "ok"   => MatchPattern::Ok(binding),
+                        "err"  => MatchPattern::Err(binding),
+                        "some" => MatchPattern::Some(binding),
+                        "none" => MatchPattern::None,
+                        _      => unreachable!(),
+                    }
+                }
+                other => {
+                    return Err(RillError::spanned(
+                        format!("expected regex pattern or _ in match arm, found {other:?}"),
+                        token.span,
+                    ))
+                }
+            };
+            self.expect(TokenKind::FatArrow)?;
+            let expr = self.parse_expr(0)?;
+            arms.push(MatchArm { pattern, expr });
+            self.consume(TokenKind::Comma);
+            self.skip_separators();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::Match {
+            value: Box::new(value),
+            arms,
+        })
+    }
+
+    fn parse_command(&mut self, span: Span) -> Result<Expr, RillError> {
+        let check_exit = matches!(self.peek_kind(), TokenKind::CommandText(t) if t == "!");
+        if check_exit {
+            self.next(); // consume the `!`
+        }
+        let mut argv = Vec::new();
+        let mut redirects = Vec::new();
+        let mut current: Vec<CommandPart> = Vec::new();
+        let mut last_end: Option<usize> = None;
+        while !self.at_separator()
+            && !self.at(TokenKind::Pipe)
+            && !self.at(TokenKind::ValuePipe)
+            && !self.at(TokenKind::LBrace)
+            && !self.at(TokenKind::RBrace)
+            && !self.at(TokenKind::Eof)
+        {
+            let token = self.next();
+            if let TokenKind::CommandRedirect(kind) = token.kind {
+                if !current.is_empty() {
+                    argv.push(parts_to_arg(std::mem::take(&mut current)));
+                }
+                last_end = None;
+                let target = self.parse_command_redirect_target(kind, token.span)?;
+                redirects.push(CommandRedirect { kind, target });
+                continue;
+            }
+            if last_end.is_some_and(|end| end < token.span.start) && !current.is_empty() {
+                argv.push(parts_to_arg(std::mem::take(&mut current)));
+            }
+            let end = token.span.end;
+            let part = match token.kind {
+                TokenKind::CommandText(v) | TokenKind::CommandString(v) => CommandPart::Text(v),
+                TokenKind::CommandVar(v) => CommandPart::Var(v),
+                TokenKind::CommandSplat(_) => {
+                    // $*var must stand alone as an arg, not be fused with adjacent parts.
+                    if !current.is_empty() {
+                        argv.push(parts_to_arg(std::mem::take(&mut current)));
+                    }
+                    let TokenKind::CommandSplat(v) = token.kind else { unreachable!() };
+                    argv.push(CommandArg::Splat(v));
+                    last_end = None;
+                    continue;
+                }
+                TokenKind::CommandVarDefault(name, default) => {
+                    CommandPart::VarDefault(name, default)
+                }
+                other => {
+                    return Err(RillError::spanned(
+                        format!("unexpected token in command: {other:?}"),
+                        token.span,
+                    ))
+                }
+            };
+            current.push(part);
+            last_end = Some(end);
+        }
+        if !current.is_empty() {
+            argv.push(parts_to_arg(current));
+        }
+        let config = if self.consume(TokenKind::LBrace) {
+            self.skip_separators();
+            let mut entries = Vec::new();
+            while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expr(0)?;
+                entries.push((name, value));
+                self.skip_separators();
+                self.consume(TokenKind::Comma);
+                self.skip_separators();
+            }
+            self.expect(TokenKind::RBrace)?;
+            entries
+        } else {
+            Vec::new()
+        };
+        Ok(Expr::Command(CommandExpr {
+            argv,
+            redirects,
+            config,
+            check_exit,
+            span,
+        }))
+    }
+
+    fn parse_command_redirect_target(
+        &mut self,
+        kind: RedirectKind,
+        span: Span,
+    ) -> Result<CommandArg, RillError> {
+        if self.at_separator()
+            || self.at(TokenKind::Pipe)
+            || self.at(TokenKind::ValuePipe)
+            || self.at(TokenKind::RBrace)
+            || self.at(TokenKind::Eof)
+        {
+            return Err(RillError::spanned(
+                format!("missing target for {kind:?} redirection"),
+                span,
+            ));
+        }
+        let token = self.next();
+        match token.kind {
+            TokenKind::CommandText(v) => Ok(parse_command_text_arg(v)),
+            TokenKind::CommandString(v) => Ok(CommandArg::String(v)),
+            TokenKind::CommandVar(v) => Ok(CommandArg::Var(v)),
+            other => Err(RillError::spanned(
+                format!("unexpected token after redirection: {other:?}"),
+                token.span,
+            )),
+        }
+    }
+
+    fn infix_binding_power(&self) -> Option<(ParsedOp, u8, u8)> {
+        match self.peek_kind() {
+            TokenKind::Pipe => Some((ParsedOp::Pipe(PipeKind::Byte), 1, 2)),
+            TokenKind::ValuePipe => Some((ParsedOp::Pipe(PipeKind::Value), 1, 2)),
+            TokenKind::OrOr => Some((ParsedOp::Binary(BinaryOp::Or), 3, 4)),
+            TokenKind::Ident(ref name) if name == "or" => {
+                Some((ParsedOp::Binary(BinaryOp::Or), 3, 4))
+            }
+            TokenKind::AndAnd => Some((ParsedOp::Binary(BinaryOp::And), 5, 6)),
+            TokenKind::Ident(ref name) if name == "and" => {
+                Some((ParsedOp::Binary(BinaryOp::And), 5, 6))
+            }
+            TokenKind::Match => Some((ParsedOp::Match, 7, 8)),
+            TokenKind::DotDot => Some((ParsedOp::Binary(BinaryOp::Range), 7, 8)),
+            TokenKind::EqEq => Some((ParsedOp::Binary(BinaryOp::Eq), 7, 8)),
+            TokenKind::Ne => Some((ParsedOp::Binary(BinaryOp::Ne), 7, 8)),
+            TokenKind::Gt => Some((ParsedOp::Binary(BinaryOp::Gt), 7, 8)),
+            TokenKind::Ge => Some((ParsedOp::Binary(BinaryOp::Ge), 7, 8)),
+            TokenKind::Lt => Some((ParsedOp::Binary(BinaryOp::Lt), 7, 8)),
+            TokenKind::Le => Some((ParsedOp::Binary(BinaryOp::Le), 7, 8)),
+            TokenKind::Plus => Some((ParsedOp::Binary(BinaryOp::Add), 9, 10)),
+            TokenKind::Minus => Some((ParsedOp::Binary(BinaryOp::Sub), 9, 10)),
+            TokenKind::Star => Some((ParsedOp::Binary(BinaryOp::Mul), 11, 12)),
+            TokenKind::Slash => Some((ParsedOp::Binary(BinaryOp::Div), 11, 12)),
+            TokenKind::LBracket => Some((ParsedOp::Index, 15, 16)),
+            _ => None,
+        }
+    }
+
+    fn starts_bare_call(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::Str(_)
+                | TokenKind::Number(_)
+                | TokenKind::Ident(_)
+                | TokenKind::TypeIdent(_)
+                | TokenKind::Dollar
+                | TokenKind::Pipe
+                | TokenKind::Run
+        )
+    }
+
+    fn skip_separators(&mut self) {
+        while self.at_separator() {
+            self.next();
+        }
+    }
+
+    fn skip_newlines(&mut self) {
+        while self.at(TokenKind::Newline) {
+            self.next();
+        }
+    }
+
+    fn at_separator(&self) -> bool {
+        self.at(TokenKind::Newline) || self.at(TokenKind::Semi)
+    }
+
+    fn consume(&mut self, kind: TokenKind) -> bool {
+        if self.at(kind) {
+            self.next();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, kind: TokenKind) -> Result<Token, RillError> {
+        if self.at(kind.clone()) {
+            Ok(self.next())
+        } else {
+            let token = self.peek().clone();
+            Err(RillError::spanned(
+                format!("expected {kind:?}, found {:?}", token.kind),
+                token.span,
+            ))
+        }
+    }
+
+    fn expect_ident(&mut self) -> Result<String, RillError> {
+        let token = self.next();
+        match token.kind {
+            TokenKind::Ident(name) => Ok(name),
+            other => Err(RillError::spanned(
+                format!("expected identifier, found {other:?}"),
+                token.span,
+            )),
+        }
+    }
+
+    fn parse_type_name(&mut self) -> Result<TypeName, RillError> {
+        let token = self.next();
+        let name = match token.kind {
+            TokenKind::TypeIdent(name) | TokenKind::Ident(name) => name,
+            other => {
+                return Err(RillError::spanned(
+                    format!("expected type name, found {other:?}"),
+                    token.span,
+                ))
+            }
+        };
+        let type_name = match name.as_str() {
+            "Null" => TypeName::Null,
+            "Bool" => TypeName::Bool,
+            "Int" => TypeName::Int,
+            "Float" => TypeName::Float,
+            "Str" => TypeName::Str,
+            "Bytes" => TypeName::Bytes,
+            "Map" => TypeName::Map,
+            "Duration" => TypeName::Duration,
+            "Path" => TypeName::Path,
+            "Regex" => TypeName::Regex,
+            "Error" => TypeName::Error,
+            "ProcessResult" => TypeName::ProcessResult,
+            "ProcessHandle" => TypeName::ProcessHandle,
+            "Fn" => {
+                let params = if self.at(TokenKind::LBracket) {
+                    self.next();
+                    let mut types = Vec::new();
+                    while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                        types.push(self.parse_type_name()?);
+                        if !self.consume(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RBracket)?;
+                    Some(types)
+                } else {
+                    None
+                };
+                let return_type = if self.consume(TokenKind::Minus) {
+                    self.expect(TokenKind::Gt)?;
+                    Some(Box::new(self.parse_type_name()?))
+                } else {
+                    None
+                };
+                TypeName::Function { params, return_type }
+            }
+            "List" => {
+                if self.consume(TokenKind::LBracket) {
+                    let inner = self.parse_type_name()?;
+                    self.expect(TokenKind::RBracket)?;
+                    TypeName::List(Box::new(inner))
+                } else {
+                    TypeName::ListAny
+                }
+            }
+            "Tuple" => {
+                self.expect(TokenKind::LBracket)?;
+                let mut elements = Vec::new();
+                self.skip_newlines();
+                while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                    elements.push(self.parse_type_name()?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RBracket)?;
+                if elements.len() < 2 {
+                    return Err(RillError::spanned(
+                        "Tuple needs at least 2 element types",
+                        token.span,
+                    ));
+                }
+                TypeName::Tuple(elements)
+            }
+            "Option" => {
+                self.expect(TokenKind::LBracket)?;
+                let inner = self.parse_type_name()?;
+                self.expect(TokenKind::RBracket)?;
+                TypeName::Option(Box::new(inner))
+            }
+            "Result" => {
+                self.expect(TokenKind::LBracket)?;
+                let inner = self.parse_type_name()?;
+                let error = if self.consume(TokenKind::Comma) {
+                    Some(Box::new(self.parse_type_name()?))
+                } else {
+                    None
+                };
+                self.expect(TokenKind::RBracket)?;
+                TypeName::Result(Box::new(inner), error)
+            }
+            other => {
+                return Err(RillError::spanned(
+                    format!("unknown type '{other}'"),
+                    token.span,
+                ))
+            }
+        };
+        if self.consume(TokenKind::LBracket) {
+            return Err(RillError::spanned(
+                "generic arguments are only supported on List, Tuple, Option, and Result",
+                token.span,
+            ));
+        }
+        Ok(type_name)
+    }
+
+    fn at(&self, kind: TokenKind) -> bool {
+        std::mem::discriminant(&self.peek_kind()) == std::mem::discriminant(&kind)
+    }
+
+    fn peek_kind(&self) -> TokenKind {
+        self.peek().kind.clone()
+    }
+
+    fn peek_n_kind(&self, n: usize) -> TokenKind {
+        self.tokens
+            .get(n)
+            .map(|token| token.kind.clone())
+            .unwrap_or(TokenKind::Eof)
+    }
+
+    fn peek(&self) -> &Token {
+        self.tokens.front().expect("parser always has EOF token")
+    }
+
+    fn next(&mut self) -> Token {
+        let token = self
+            .tokens
+            .pop_front()
+            .expect("parser always has EOF token");
+        self.last_end = token.span.end;
+        token
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedOp {
+    Binary(BinaryOp),
+    Pipe(PipeKind),
+    Match,
+    Index,
+}
+
+fn parse_number(text: &str) -> Result<Literal, RillError> {
+    for (suffix, multiplier) in [
+        ("ns", 1.0),
+        ("us", 1_000.0),
+        ("ms", 1_000_000.0),
+        ("s", 1_000_000_000.0),
+        ("m", 60_000_000_000.0),
+        ("h", 3_600_000_000_000.0),
+    ] {
+        if let Some(raw) = text.strip_suffix(suffix) {
+            let nanos = raw
+                .parse::<f64>()
+                .map_err(|_| RillError::new(format!("invalid duration literal '{text}'")))?
+                * multiplier;
+            if !nanos.is_finite() || nanos < 0.0 || nanos > u64::MAX as f64 {
+                return Err(RillError::new(format!("invalid duration literal '{text}'")));
+            }
+            return Ok(Literal::Duration(std::time::Duration::from_nanos(
+                nanos as u64,
+            )));
+        }
+    }
+    for (suffix, multiplier) in [
+        ("KiB", 1024_i64),
+        ("MiB", 1024_i64.pow(2)),
+        ("GiB", 1024_i64.pow(3)),
+        ("KB", 1000),
+        ("MB", 1000_i64.pow(2)),
+        ("GB", 1000_i64.pow(3)),
+        ("B", 1),
+    ] {
+        if let Some(raw) = text.strip_suffix(suffix) {
+            let value = raw
+                .parse::<i64>()
+                .map_err(|_| RillError::new(format!("invalid byte-size literal '{text}'")))?;
+            return value
+                .checked_mul(multiplier)
+                .map(Literal::Int)
+                .ok_or_else(|| RillError::new(format!("byte-size literal '{text}' is too large")));
+        }
+    }
+    if text.contains('.') {
+        Ok(Literal::Float(text.parse::<f64>().map_err(|_| {
+            RillError::new(format!("invalid float literal '{text}'"))
+        })?))
+    } else {
+        Ok(Literal::Int(text.parse::<i64>().map_err(|_| {
+            RillError::new(format!("invalid int literal '{text}'"))
+        })?))
+    }
+}
+
+fn parts_to_arg(parts: Vec<CommandPart>) -> CommandArg {
+    match parts.as_slice() {
+        [CommandPart::Text(text)] => CommandArg::Word(text.clone()),
+        [CommandPart::Var(name)] => CommandArg::Var(name.clone()),
+        // VarDefault and multi-part args both go through Parts.
+        _ => CommandArg::Parts(parts),
+    }
+}
+
+fn parse_command_text_arg(text: String) -> CommandArg {
+    parts_to_arg(vec![CommandPart::Text(text)])
+}
