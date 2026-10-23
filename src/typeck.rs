@@ -25,7 +25,15 @@ enum Type {
     ProcessResult,
     ProcessHandle,
     Stream,
-    Function { arity: Option<usize>, params: Option<Vec<Type>>, return_type: Box<Type> },
+    Function {
+        /// Maximum number of positional arguments.
+        arity: Option<usize>,
+        /// Minimum number of arguments (parameters without defaults).
+        required: Option<usize>,
+        params: Option<Vec<Type>>,
+        names: Option<Vec<String>>,
+        return_type: Box<Type>,
+    },
 }
 
 impl Type {
@@ -106,7 +114,13 @@ impl Env {
             insert(
                 &mut root,
                 builtin.name,
-                Type::Function { arity: None, params: None, return_type: Box::new(Type::Unknown) },
+                Type::Function {
+                    required: None,
+                    names: None,
+                    arity: None,
+                    params: None,
+                    return_type: Box::new(Type::Unknown),
+                },
             );
         }
         Self { scopes: vec![root] }
@@ -188,6 +202,7 @@ pub(crate) fn check_module(
         return_expected: None,
         try_kinds: Vec::new(),
         loop_depth: 0,
+        loop_stack: Vec::new(),
         for_body_depth: 0,
         function_depth: 0,
         parallel_floor: None,
@@ -208,6 +223,9 @@ struct Checker {
     /// The kinds of `?` and `run!` seen in the function body being checked.
     try_kinds: Vec<TryKind>,
     loop_depth: usize,
+    /// Enclosing loops, innermost last; `Some` collects `break` value types
+    /// for a `loop {}` and `None` marks `while`/`for`.
+    loop_stack: Vec<Option<Type>>,
     /// While checking a parallel body: scopes below this index belong to the
     /// enclosing sequential code and may not be assigned to.
     parallel_floor: Option<usize>,
@@ -270,6 +288,10 @@ impl Checker {
                 self.env.set(
                     name.clone(),
                     Type::Function {
+                        required: Some(
+                            function.params.iter().filter(|p| p.default.is_none()).count(),
+                        ),
+                        names: Some(function.params.iter().map(|p| p.name.clone()).collect()),
                         arity: Some(function.params.len()),
                         params: Some(
                             function
@@ -296,6 +318,24 @@ impl Checker {
             }
         }
         Ok(ModuleExports { symbols })
+    }
+
+    /// Type-check parameter defaults against their annotations, inside the
+    /// function scope so defaults may refer to earlier parameters.
+    fn check_param_defaults(&mut self, function: &Function) -> Result<(), RillError> {
+        for param in &function.params {
+            let Some(default) = &param.default else { continue };
+            let default_ty = self.check_expr(default)?;
+            if let Some(annotation) = &param.type_name {
+                ensure_assignable(&type_from_name(annotation), &default_ty).map_err(|error| {
+                    match default.span() {
+                        Some(span) => error.with_span(span),
+                        None => error,
+                    }
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn unknown_identifier(&self, name: &str) -> RillError {
@@ -361,6 +401,12 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::Let { pattern, type_name, expr, mutable } => {
+                if let Expr::If { else_body, .. } = expr.unspanned() {
+                    if else_body.is_empty() {
+                        return Err(RillError::new("an if used as a value needs an else branch")
+                            .with_help("add `else { ... }`, or use a statement instead"));
+                    }
+                }
                 let inferred = self.check_expr(expr)?;
                 let ty = if let Some(type_name) = type_name {
                     let annotated = type_from_name(type_name);
@@ -466,6 +512,10 @@ impl Checker {
                 self.env.set(
                     name.clone(),
                     Type::Function {
+                        required: Some(
+                            function.params.iter().filter(|p| p.default.is_none()).count(),
+                        ),
+                        names: Some(function.params.iter().map(|p| p.name.clone()).collect()),
                         arity: Some(function.params.len()),
                         params: Some(
                             function
@@ -491,10 +541,14 @@ impl Checker {
                 }
                 let previous_return = self.return_expected.take();
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let previous_loop_stack = std::mem::take(&mut self.loop_stack);
                 let previous_tries = std::mem::take(&mut self.try_kinds);
                 self.function_depth += 1;
                 self.return_expected = function.return_type.as_ref().map(type_from_name);
-                let checked = self.check_stmts(&function.body).and_then(|body_ty| {
+                let checked = self
+                    .check_param_defaults(function)
+                    .and_then(|()| self.check_stmts(&function.body))
+                    .and_then(|body_ty| {
                     if let Some(return_type) = &function.return_type {
                         let declared = type_from_name(return_type);
                         let last_span = function.body.last().and_then(|s| match s.unspanned() {
@@ -520,6 +574,7 @@ impl Checker {
                 let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
                 self.return_expected = previous_return;
                 self.loop_depth = previous_loop;
+                self.loop_stack = previous_loop_stack;
                 self.function_depth -= 1;
                 self.env.pop();
                 let body_ty = checked?;
@@ -532,6 +587,10 @@ impl Checker {
                 self.env.set(
                     name.clone(),
                     Type::Function {
+                        required: Some(
+                            function.params.iter().filter(|p| p.default.is_none()).count(),
+                        ),
+                        names: Some(function.params.iter().map(|p| p.name.clone()).collect()),
                         arity: Some(function.params.len()),
                         params: Some(
                             function
@@ -560,29 +619,6 @@ impl Checker {
                 }
                 self.check_expr(expr)?;
                 Ok(Type::Null)
-            }
-            Stmt::If { cond, pattern, then_body, else_body } => {
-                let cond_ty = self.check_expr(cond)?;
-                if pattern.is_none() && !matches!(cond_ty, Type::Bool | Type::Unknown) {
-                    return Err(RillError::new(format!(
-                        "if condition must be Bool, got {cond_ty}"
-                    )));
-                }
-                self.env.push();
-                if let Some(pattern) = pattern {
-                    self.bind_pattern(pattern, cond_ty.clone(), true)?;
-                }
-                if let Expr::RegexMatch { pattern, .. } = cond.unspanned() {
-                    for name in regex_capture_names(pattern)? {
-                        self.env.set(name, Type::Str);
-                    }
-                }
-                let then_ty = self.check_stmts(then_body)?;
-                self.env.pop();
-                self.env.push();
-                let else_ty = self.check_stmts(else_body)?;
-                self.env.pop();
-                Ok(common_type(then_ty, else_ty))
             }
             Stmt::WithEnv { bindings, body } => {
                 for (_, expr) in bindings {
@@ -620,9 +656,29 @@ impl Checker {
                 }
                 Ok(value_ty)
             }
-            Stmt::Continue | Stmt::Break => {
+            Stmt::Continue => {
                 if self.loop_depth == 0 {
                     return Err(RillError::new("break/continue outside loop"));
+                }
+                Ok(Type::Null)
+            }
+            Stmt::Break(value) => {
+                if self.loop_depth == 0 {
+                    return Err(RillError::new("break/continue outside loop"));
+                }
+                if let Some(value) = value {
+                    let ty = self.check_expr(value)?;
+                    match self.loop_stack.last_mut() {
+                        Some(Some(collected)) => {
+                            *collected = common_type(collected.clone(), ty);
+                        }
+                        _ => {
+                            return Err(RillError::new(
+                                "break with a value is only valid inside loop { }",
+                            )
+                            .with_help("while and for loops do not produce a value from break"))
+                        }
+                    }
                 }
                 Ok(Type::Null)
             }
@@ -634,8 +690,11 @@ impl Checker {
                     )));
                 }
                 self.loop_depth += 1;
-                self.check_stmts(body)?;
+                self.loop_stack.push(None);
+                let checked = self.check_stmts(body);
+                self.loop_stack.pop();
                 self.loop_depth -= 1;
+                checked?;
                 Ok(Type::Null)
             }
             Stmt::Expr(expr) => self.check_expr(expr),
@@ -775,9 +834,11 @@ impl Checker {
                     if matches!(iter_ty, Type::Stream) { Type::Map } else { iter_ty.list_item() };
                 self.bind_pattern(pattern, item_ty, true)?;
                 self.loop_depth += 1;
+                self.loop_stack.push(None);
                 self.for_body_depth += 1;
                 let checked = self.check_stmts(body);
                 self.for_body_depth -= 1;
+                self.loop_stack.pop();
                 self.loop_depth -= 1;
                 self.env.pop();
                 self.parallel_floor = previous_floor;
@@ -787,6 +848,40 @@ impl Checker {
                     ForMode::Race => Type::Unknown,
                 })
             }
+            Expr::If { cond, pattern, then_body, else_body } => {
+                let cond_ty = self.check_expr(cond)?;
+                if pattern.is_none() && !matches!(cond_ty, Type::Bool | Type::Unknown) {
+                    return Err(RillError::new(format!(
+                        "if condition must be Bool, got {cond_ty}"
+                    )));
+                }
+                self.env.push();
+                if let Some(pattern) = pattern {
+                    self.bind_pattern(pattern, cond_ty.clone(), true)?;
+                }
+                if let Expr::RegexMatch { pattern, .. } = cond.unspanned() {
+                    for name in regex_capture_names(pattern)? {
+                        self.env.set(name, Type::Str);
+                    }
+                }
+                let then_ty = self.check_stmts(then_body)?;
+                self.env.pop();
+                self.env.push();
+                let else_ty = self.check_stmts(else_body)?;
+                self.env.pop();
+                Ok(common_type(then_ty, else_ty))
+            }
+            Expr::Loop { body } => {
+                self.loop_depth += 1;
+                self.loop_stack.push(Some(Type::Unknown));
+                self.env.push();
+                let checked = self.check_stmts(body);
+                self.env.pop();
+                let breaks = self.loop_stack.pop().flatten().unwrap_or(Type::Unknown);
+                self.loop_depth -= 1;
+                checked?;
+                Ok(breaks)
+            }
             Expr::Block(stmts) => {
                 self.env.push();
                 let ty = self.check_stmts(stmts)?;
@@ -795,6 +890,7 @@ impl Checker {
             }
             Expr::Closure { params, body, propagation } => {
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let previous_loop_stack = std::mem::take(&mut self.loop_stack);
                 let previous_return = self.return_expected.take();
                 let previous_tries = std::mem::take(&mut self.try_kinds);
                 self.return_expected = Some(Type::Unknown);
@@ -806,11 +902,14 @@ impl Checker {
                 let return_type = self.check_stmts(body);
                 let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
                 self.loop_depth = previous_loop;
+                self.loop_stack = previous_loop_stack;
                 self.return_expected = previous_return;
                 self.function_depth -= 1;
                 self.env.pop();
                 let return_type = infer_propagation(propagation, false, &tries, return_type?);
                 Ok(Type::Function {
+                    required: Some(params.len()),
+                    names: Some(params.clone()),
                     arity: Some(params.len()),
                     params: None,
                     return_type: Box::new(return_type),
@@ -1055,19 +1154,10 @@ impl Checker {
             }
             return Ok(Type::Unknown);
         }
-        let Type::Function { arity, return_type, params } = callee_ty else {
+        if !matches!(callee_ty, Type::Function { .. }) {
             return Err(RillError::new(format!("{callee_ty} is not callable")));
-        };
-        if let Some(arity) = arity {
-            ensure_arity("function", arity, args.len())?;
         }
-        for (index, arg) in args.iter().enumerate() {
-            let actual = self.check_expr(arg)?;
-            if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
-                ensure_assignable(expected, &actual)?;
-            }
-        }
-        Ok(*return_type)
+        self.check_call_against("function", &callee_ty, args)
     }
 
     fn check_named_call(&mut self, name: &str, args: &[Expr]) -> Result<Type, RillError> {
@@ -1088,19 +1178,68 @@ impl Checker {
             return Ok(resolve_method_return(builtin.returns, &Type::Unknown, &arg_types));
         }
         let ty = self.env.get(name).ok_or_else(|| self.unknown_function(name))?;
-        let Type::Function { arity, params, return_type } = ty else {
+        if !matches!(ty, Type::Function { .. }) {
             return Err(RillError::new(format!("{name} is not callable")));
-        };
-        if let Some(arity) = arity {
-            ensure_arity(name, arity, args.len())?;
         }
-        for (index, arg) in args.iter().enumerate() {
+        self.check_call_against(name, &ty, args)
+    }
+
+    /// Check positional and named arguments against a function type.
+    fn check_call_against(
+        &mut self,
+        name: &str,
+        ty: &Type,
+        args: &[Expr],
+    ) -> Result<Type, RillError> {
+        let Type::Function { arity, required, params, names, return_type } = ty else {
+            return Ok(Type::Unknown);
+        };
+        let (positional, named) = split_call_args(args)?;
+        if let Some(arity) = arity {
+            let required = required.unwrap_or(*arity);
+            if positional.len() > *arity || named.is_empty() {
+                ensure_arity_range(name, required, *arity, positional.len())?;
+            }
+        }
+        let mut provided = vec![false; arity.unwrap_or(positional.len())];
+        for (index, arg) in positional.iter().enumerate() {
             let actual = self.check_expr(arg)?;
             if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
                 ensure_assignable(expected, &actual)?;
             }
+            if let Some(slot) = provided.get_mut(index) {
+                *slot = true;
+            }
         }
-        Ok(*return_type)
+        for (label, value) in named {
+            let actual = self.check_expr(value)?;
+            let Some(names) = names else {
+                continue;
+            };
+            let Some(index) = names.iter().position(|n| n == label) else {
+                return Err(RillError::new(format!("{name} has no parameter '{label}'"))
+                    .with_optional_help(crate::suggest::did_you_mean(
+                        label,
+                        names.iter().map(String::as_str),
+                    )));
+            };
+            if provided[index] {
+                return Err(RillError::new(format!("parameter '{label}' given twice")));
+            }
+            provided[index] = true;
+            if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
+                ensure_assignable(expected, &actual)?;
+            }
+        }
+        if let (Some(required), Some(names)) = (required, names) {
+            if let Some(index) = provided.iter().take(*required).position(|given| !given) {
+                return Err(RillError::new(format!(
+                    "{name} is missing an argument for parameter '{}'",
+                    names[index]
+                )));
+            }
+        }
+        Ok((**return_type).clone())
     }
 
     fn check_match(&mut self, value: &Expr, arms: &[MatchArm]) -> Result<Type, RillError> {
@@ -1155,6 +1294,8 @@ impl Checker {
             if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
                 if module == "Stream" && name == "tail" {
                     return Ok(Type::Function {
+                        required: None,
+                        names: None,
                         arity: None,
                         params: None,
                         return_type: Box::new(Type::Stream),
@@ -1162,6 +1303,8 @@ impl Checker {
                 }
                 if crate::methods::namespace_method(module, name).is_some() {
                     return Ok(Type::Function {
+                        required: None,
+                        names: None,
                         arity: None,
                         params: None,
                         return_type: Box::new(Type::Unknown),
@@ -1419,7 +1562,13 @@ impl Checker {
     fn check_callback_expr(&mut self, expr: &Expr) -> Result<Type, RillError> {
         let result_type = self.check_expr(expr)?;
         if contains_implicit(expr) {
-            Ok(Type::Function { arity: Some(1), params: None, return_type: Box::new(result_type) })
+            Ok(Type::Function {
+                required: None,
+                names: None,
+                arity: Some(1),
+                params: None,
+                return_type: Box::new(result_type),
+            })
         } else {
             Ok(result_type)
         }
@@ -1553,7 +1702,7 @@ impl Checker {
 }
 
 fn check_typed_call(ty: &Type, args: &[Type]) -> Result<Type, RillError> {
-    if let Type::Function { arity, params, return_type } = ty {
+    if let Type::Function { arity, params, return_type, .. } = ty {
         if let Some(arity) = arity {
             ensure_arity("function", *arity, args.len())?;
         }
@@ -1641,6 +1790,8 @@ fn type_from_value(value: &Value) -> Type {
         Value::ProcessHandle(_) => Type::ProcessHandle,
         Value::Stream(_) => Type::Stream,
         Value::Function(function) => Type::Function {
+            required: Some(function.function.params.iter().filter(|p| p.default.is_none()).count()),
+            names: Some(function.function.params.iter().map(|p| p.name.clone()).collect()),
             arity: Some(function.function.params.len()),
             params: None,
             return_type: Box::new(Type::Unknown),
@@ -1754,6 +1905,8 @@ fn type_from_name(name: &TypeName) -> Type {
         TypeName::ProcessResult => Type::ProcessResult,
         TypeName::ProcessHandle => Type::ProcessHandle,
         TypeName::Function { params, return_type } => Type::Function {
+            required: None,
+            names: None,
             arity: params.as_ref().map(|p| p.len()),
             params: params.as_ref().map(|p| p.iter().map(type_from_name).collect()),
             return_type: Box::new(
@@ -1787,8 +1940,14 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
                 arity: expected_arity,
                 params: expected_params,
                 return_type: expected_rt,
+                ..
             },
-            Type::Function { arity: actual_arity, params: actual_params, return_type: actual_rt },
+            Type::Function {
+                arity: actual_arity,
+                params: actual_params,
+                return_type: actual_rt,
+                ..
+            },
         ) => {
             if let (Some(ea), Some(aa)) = (expected_arity, actual_arity) {
                 if ea != aa {
@@ -1809,11 +1968,44 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
 }
 
 fn ensure_arity(name: &str, expected: usize, actual: usize) -> Result<(), RillError> {
-    if expected == actual {
-        Ok(())
-    } else {
-        Err(RillError::new(format!("{name} needs {expected} args, got {actual}")))
+    ensure_arity_range(name, expected, expected, actual)
+}
+
+fn ensure_arity_range(
+    name: &str,
+    required: usize,
+    maximum: usize,
+    actual: usize,
+) -> Result<(), RillError> {
+    if (required..=maximum).contains(&actual) {
+        return Ok(());
     }
+    let expected =
+        if required == maximum { required.to_string() } else { format!("{required} to {maximum}") };
+    Err(RillError::new(format!("{name} needs {expected} args, got {actual}")))
+}
+
+/// Positional arguments and `name = value` pairs of a call.
+type SplitArgs<'a> = (Vec<&'a Expr>, Vec<(&'a str, &'a Expr)>);
+
+/// Split call arguments into positional and named parts, checking order.
+fn split_call_args(args: &[Expr]) -> Result<SplitArgs<'_>, RillError> {
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for arg in args {
+        match arg.unspanned() {
+            Expr::NamedArg { name, value } => named.push((name.as_str(), &**value)),
+            _ => {
+                if !named.is_empty() {
+                    return Err(RillError::new(
+                        "positional arguments must come before named arguments",
+                    ));
+                }
+                positional.push(arg);
+            }
+        }
+    }
+    Ok((positional, named))
 }
 
 fn function_return(ty: &Type) -> Type {
@@ -1862,7 +2054,6 @@ fn contains_implicit(expr: &Expr) -> bool {
                 contains_implicit(index) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
-            Stmt::If { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),
             Stmt::Return(Some(expr)) => contains_implicit(expr),
             _ => false,
@@ -1874,6 +2065,8 @@ fn contains_implicit(expr: &Expr) -> bool {
             StrPart::Expr(expr) => contains_implicit(expr),
             _ => false,
         }),
+        Expr::If { cond, .. } => contains_implicit(cond),
+        Expr::Loop { .. } => false,
     }
 }
 
@@ -2034,9 +2227,6 @@ fn stmts_always_yield(stmts: &[Stmt]) -> bool {
     match last.unspanned() {
         Stmt::Return(_) => true,
         Stmt::Expr(expr) => expr_always_yields(expr),
-        Stmt::If { then_body, else_body, .. } => {
-            !else_body.is_empty() && stmts_always_yield(then_body) && stmts_always_yield(else_body)
-        }
         Stmt::Located { stmt, .. } => stmts_always_yield(std::slice::from_ref(stmt)),
         _ => false,
     }
@@ -2046,6 +2236,10 @@ fn expr_always_yields(expr: &Expr) -> bool {
     match expr.unspanned() {
         Expr::Match { arms, .. } => arms.iter().all(|arm| expr_always_yields(&arm.expr)),
         Expr::Block(body) => stmts_always_yield(body),
+        Expr::If { then_body, else_body, .. } => {
+            !else_body.is_empty() && stmts_always_yield(then_body) && stmts_always_yield(else_body)
+        }
+        Expr::Loop { .. } => true,
         Expr::Call { callee, .. } => {
             !matches!(callee.unspanned(), Expr::Ident(name) if name == "print" || name == "warn")
         }

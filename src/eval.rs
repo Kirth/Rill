@@ -222,7 +222,7 @@ enum Flow {
     Value(Value),
     Return(Value),
     Propagate(Value),
-    Break,
+    Break(Value),
     Continue,
     Emit(Value),
 }
@@ -592,7 +592,7 @@ impl Evaluator {
                 "cannot propagate {} outside a function",
                 value.type_name()
             ))),
-            Flow::Break => Err(RillError::new("break outside loop")),
+            Flow::Break(_) => Err(RillError::new("break outside loop")),
             Flow::Continue => Err(RillError::new("continue outside loop")),
             Flow::Emit(_) => Err(RillError::new("emit outside for expression")),
         }
@@ -605,7 +605,7 @@ impl Evaluator {
                 "cannot propagate {} outside a function",
                 value.type_name()
             ))),
-            Flow::Break => Err(RillError::new("break outside loop")),
+            Flow::Break(_) => Err(RillError::new("break outside loop")),
             Flow::Continue => Err(RillError::new("continue outside loop")),
             Flow::Emit(_) => Err(RillError::new("emit outside for expression")),
         }
@@ -698,7 +698,7 @@ impl Evaluator {
                     }
                     match catch_parallel_job(|| child.eval_stmts_collecting_emits(body)) {
                         Ok((Flow::Value(_), emits))
-                        | Ok((Flow::Break, emits))
+                        | Ok((Flow::Break(_), emits))
                         | Ok((Flow::Continue, emits)) => Some(emits),
                         Ok((flow @ (Flow::Return(_) | Flow::Propagate(_)), _)) => {
                             record_parallel_terminal(
@@ -791,7 +791,7 @@ impl Evaluator {
             }
             match self.eval_stmt(stmt) {
                 Ok(Flow::Value(_)) => {}
-                Ok(Flow::Break) | Ok(Flow::Continue) => return,
+                Ok(Flow::Break(_)) | Ok(Flow::Continue) => return,
                 Ok(Flow::Emit(value)) => {
                     state.finish(RaceOutcome::Value(value));
                     return;
@@ -955,50 +955,6 @@ impl Evaluator {
                 let value = self.eval_expr(expr)?;
                 Ok(Flow::Emit(value))
             }
-            Stmt::If { cond, pattern, then_body, else_body } => {
-                if let Some(pattern) = pattern {
-                    let value = self.eval_expr(cond)?;
-                    let bindings = Self::matching_bindings(pattern, value)?;
-                    self.env.push();
-                    let flow = if let Some(bindings) = bindings {
-                        for (name, value) in bindings {
-                            self.env.set(name, value);
-                        }
-                        self.eval_stmts(then_body)
-                    } else {
-                        self.eval_stmts(else_body)
-                    };
-                    self.env.pop();
-                    flow
-                } else if let Expr::RegexMatch { value, pattern } = cond.unspanned() {
-                    let input = self.eval_expr(value)?.as_string_lossy();
-                    let captures = regex_captures(&input, pattern)?;
-                    if let Some(captures) = captures {
-                        self.env.push();
-                        for (name, value) in captures {
-                            self.env.set(name, Value::Str(value));
-                        }
-                        let flow = self.eval_stmts(then_body);
-                        self.env.pop();
-                        flow
-                    } else {
-                        self.env.push();
-                        let flow = self.eval_stmts(else_body);
-                        self.env.pop();
-                        flow
-                    }
-                } else {
-                    let cond = self.eval_expr(cond)?;
-                    self.env.push();
-                    let flow = if cond.truthy() {
-                        self.eval_stmts(then_body)
-                    } else {
-                        self.eval_stmts(else_body)
-                    };
-                    self.env.pop();
-                    flow
-                }
-            }
             Stmt::WithEnv { bindings, body } => {
                 let values = bindings
                     .iter()
@@ -1044,14 +1000,20 @@ impl Evaluator {
                 Ok(Flow::Return(value))
             }
             Stmt::Continue => Ok(Flow::Continue),
-            Stmt::Break => Ok(Flow::Break),
+            Stmt::Break(value) => {
+                let value = match value {
+                    Some(expr) => self.eval_expr(expr)?,
+                    None => Value::Null,
+                };
+                Ok(Flow::Break(value))
+            }
             Stmt::While { cond, body } => {
                 loop {
                     if !self.eval_expr(cond)?.truthy() {
                         break;
                     }
                     match self.eval_stmts(body)? {
-                        Flow::Break => break,
+                        Flow::Break(_) => break,
                         Flow::Continue | Flow::Value(_) => {}
                         flow => return Err(EvalError::Control(flow)),
                     }
@@ -1201,6 +1163,7 @@ impl Evaluator {
                                     params: vec![Param {
                                         name: "_arg".to_string(),
                                         type_name: None,
+                                        default: None,
                                     }],
                                     return_type: None,
                                     body: vec![Stmt::Return(Some(call))],
@@ -1285,7 +1248,7 @@ impl Evaluator {
                                 collected.extend(emits);
                                 match flow {
                                     Flow::Value(_) | Flow::Continue => {}
-                                    Flow::Break => break,
+                                    Flow::Break(_) => break,
                                     Flow::Return(v) => {
                                         return Err(EvalError::Control(Flow::Return(v)))
                                     }
@@ -1321,7 +1284,7 @@ impl Evaluator {
                             collected.extend(emits);
                             match flow {
                                 Flow::Value(_) | Flow::Continue => {}
-                                Flow::Break => break,
+                                Flow::Break(_) => break,
                                 Flow::Return(v) => return Err(EvalError::Control(Flow::Return(v))),
                                 Flow::Propagate(v) => {
                                     return Err(EvalError::Control(Flow::Propagate(v)))
@@ -1337,6 +1300,22 @@ impl Evaluator {
                     ForMode::Race => self.eval_for_race(workers.as_deref(), pattern, list, body),
                 }
             }
+            Expr::If { cond, pattern, then_body, else_body } => {
+                let flow = self.eval_if(cond, pattern.as_ref(), then_body, else_body)?;
+                match flow {
+                    Flow::Value(value) => Ok(value),
+                    flow => Err(EvalError::Control(flow)),
+                }
+            }
+            Expr::Loop { body } => loop {
+                self.check_cancelled()?;
+                let flow = self.scoped(|evaluator| evaluator.eval_stmts(body))?;
+                match flow {
+                    Flow::Break(value) => return Ok(value),
+                    Flow::Continue | Flow::Value(_) => {}
+                    flow => return Err(EvalError::Control(flow)),
+                }
+            },
             Expr::Block(stmts) => {
                 self.env.push();
                 let flow = self.eval_stmts(stmts);
@@ -1350,7 +1329,7 @@ impl Evaluator {
                 Function {
                     params: params
                         .iter()
-                        .map(|name| Param { name: name.clone(), type_name: None })
+                        .map(|name| Param { name: name.clone(), type_name: None, default: None })
                         .collect(),
                     return_type: None,
                     body: body.clone(),
@@ -1381,6 +1360,54 @@ impl Evaluator {
                     .ok_or_else(|| RillError::new("implicit argument used outside a callback"))?;
                 Ok(field_value(value, name)?)
             }
+        }
+    }
+
+    fn eval_if(
+        &mut self,
+        cond: &Expr,
+        pattern: Option<&LetPattern>,
+        then_body: &[Stmt],
+        else_body: &[Stmt],
+    ) -> Result<Flow, EvalError> {
+        if let Some(pattern) = pattern {
+            let value = self.eval_expr(cond)?;
+            let bindings = Self::matching_bindings(pattern, value)?;
+            self.env.push();
+            let flow = if let Some(bindings) = bindings {
+                for (name, value) in bindings {
+                    self.env.set(name, value);
+                }
+                self.eval_stmts(then_body)
+            } else {
+                self.eval_stmts(else_body)
+            };
+            self.env.pop();
+            flow
+        } else if let Expr::RegexMatch { value, pattern } = cond.unspanned() {
+            let input = self.eval_expr(value)?.as_string_lossy();
+            let captures = regex_captures(&input, pattern)?;
+            if let Some(captures) = captures {
+                self.env.push();
+                for (name, value) in captures {
+                    self.env.set(name, Value::Str(value));
+                }
+                let flow = self.eval_stmts(then_body);
+                self.env.pop();
+                flow
+            } else {
+                self.env.push();
+                let flow = self.eval_stmts(else_body);
+                self.env.pop();
+                flow
+            }
+        } else {
+            let cond = self.eval_expr(cond)?;
+            self.env.push();
+            let flow =
+                if cond.truthy() { self.eval_stmts(then_body) } else { self.eval_stmts(else_body) };
+            self.env.pop();
+            flow
         }
     }
 
@@ -1688,11 +1715,8 @@ impl Evaluator {
         if let Expr::Ident(name) = callee.unspanned() {
             if let Some(method) = crate::methods::moved_function(name) {
                 if let Some(function) = self.env.get(name) {
-                    let values = args
-                        .iter()
-                        .map(|arg| self.eval_expr(arg))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    return self.call_callable(function, values);
+                    let (positional, named) = self.eval_call_args(args)?;
+                    return self.call_callable_named(function, positional, named);
                 } else {
                     return Err(RillError::new(format!(
                         "{name}(...) was removed; use receiver.{method}(...)"
@@ -1731,8 +1755,8 @@ impl Evaluator {
         }
 
         let value = self.eval_expr(callee)?;
-        let values = args.iter().map(|arg| self.eval_expr(arg)).collect::<Result<Vec<_>, _>>()?;
-        self.call_callable(value, values)
+        let (positional, named) = self.eval_call_args(args)?;
+        self.call_callable_named(value, positional, named)
     }
 
     fn eval_namespace_method(
@@ -2623,11 +2647,8 @@ impl Evaluator {
             }
             _ => {
                 if let Some(value) = self.env.lookup(name)? {
-                    let values = args
-                        .iter()
-                        .map(|arg| self.eval_expr(arg))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    self.call_callable(value, values)
+                    let (positional, named) = self.eval_call_args(args)?;
+                    self.call_callable_named(value, positional, named)
                 } else {
                     Err(RillError::new(format!("unknown function '{name}'")).into())
                 }
@@ -3065,31 +3086,50 @@ impl Evaluator {
         self.call_callable(function, vec![key, value])
     }
 
-    fn call_function_values(
+    /// Bind positional and named arguments to parameters, filling in defaults.
+    fn call_function_named(
         &mut self,
         function: &Function,
-        args: Vec<Value>,
+        positional: Vec<Value>,
+        named: Vec<(String, Value)>,
     ) -> Result<Value, EvalError> {
-        if function.params.len() != args.len() {
+        let params = &function.params;
+        let required = params.iter().filter(|param| param.default.is_none()).count();
+        if positional.len() > params.len() {
+            let expected = if required == params.len() {
+                params.len().to_string()
+            } else {
+                format!("{required} to {}", params.len())
+            };
             return Err(RillError::new(format!(
-                "function expected {} args, got {}",
-                function.params.len(),
-                args.len()
+                "function expected {expected} args, got {}",
+                positional.len()
             ))
             .into());
         }
-        for (param, value) in function.params.iter().zip(&args) {
-            if let Some(annotation) = &param.type_name {
+        let mut bound: Vec<Option<Value>> = positional.into_iter().map(Some).collect();
+        bound.resize(params.len(), None);
+        for (name, value) in named {
+            let Some(index) = params.iter().position(|param| param.name == name) else {
+                return Err(RillError::new(format!("function has no parameter '{name}'")).into());
+            };
+            if bound[index].is_some() {
+                return Err(RillError::new(format!("parameter '{name}' given twice")).into());
+            }
+            bound[index] = Some(value);
+        }
+        for (param, value) in params.iter().zip(&bound) {
+            if let (Some(annotation), Some(value)) = (&param.type_name, value) {
                 crate::typeck::check_value_annotation(value, annotation)?;
             }
         }
-        self.call_function_in_env(function, args)
+        self.call_function_in_env(function, bound)
     }
 
     fn call_function_in_env(
         &mut self,
         function: &Function,
-        args: Vec<Value>,
+        args: Vec<Option<Value>>,
     ) -> Result<Value, EvalError> {
         if self.function_depth >= max_call_depth() {
             return Err(RillError::new(format!(
@@ -3100,8 +3140,34 @@ impl Evaluator {
         }
         self.function_depth += 1;
         self.env.push();
+        let mut bind_result = Ok(());
         for (param, value) in function.params.iter().zip(args) {
+            // Defaults are evaluated in the callee's scope, so they can refer
+            // to earlier parameters.
+            let value = match (value, &param.default) {
+                (Some(value), _) => value,
+                (None, Some(default)) => match self.eval_expr(default) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        bind_result = Err(error);
+                        break;
+                    }
+                },
+                (None, None) => {
+                    bind_result = Err(RillError::new(format!(
+                        "missing argument for parameter '{}'",
+                        param.name
+                    ))
+                    .into());
+                    break;
+                }
+            };
             self.env.set(param.name.clone(), value);
+        }
+        if let Err(error) = bind_result {
+            self.env.pop();
+            self.function_depth -= 1;
+            return Err(error);
         }
         let flow_result = self.eval_stmts(&function.body);
         self.env.pop();
@@ -3110,13 +3176,45 @@ impl Evaluator {
         match flow {
             Flow::Value(value) | Flow::Return(value) => Ok(wrap_declared_result(function, value)),
             Flow::Propagate(value) => Ok(propagated_value(value)),
-            Flow::Break => Err(RillError::new("break outside loop").into()),
+            Flow::Break(_) => Err(RillError::new("break outside loop").into()),
             Flow::Continue => Err(RillError::new("continue outside loop").into()),
             Flow::Emit(_) => Err(RillError::new("emit outside for expression").into()),
         }
     }
 
     fn call_callable(&mut self, value: Value, args: Vec<Value>) -> Result<Value, EvalError> {
+        self.call_callable_named(value, args, Vec::new())
+    }
+
+    /// Evaluate call arguments, separating `name = value` arguments out.
+    fn eval_call_args(&mut self, args: &[Expr]) -> Result<CallArgs, EvalError> {
+        let mut positional = Vec::new();
+        let mut named = Vec::new();
+        for arg in args {
+            match arg.unspanned() {
+                Expr::NamedArg { name, value } => {
+                    named.push((name.clone(), self.eval_expr(value)?));
+                }
+                _ => {
+                    if !named.is_empty() {
+                        return Err(RillError::new(
+                            "positional arguments must come before named arguments",
+                        )
+                        .into());
+                    }
+                    positional.push(self.eval_expr(arg)?);
+                }
+            }
+        }
+        Ok((positional, named))
+    }
+
+    fn call_callable_named(
+        &mut self,
+        value: Value,
+        positional: Vec<Value>,
+        named: Vec<(String, Value)>,
+    ) -> Result<Value, EvalError> {
         match value {
             Value::Function(function) => {
                 // Run the body in the scope chain the function closed over; a
@@ -3126,7 +3224,7 @@ impl Evaluator {
                 let frozen = self.env.frozen.min(function.captured.len());
                 let callee_env = Env { scopes: function.captured.clone(), frozen };
                 let current = std::mem::replace(&mut self.env, callee_env);
-                let result = self.call_function_values(&function.function, args);
+                let result = self.call_function_named(&function.function, positional, named);
                 self.env = current;
                 result
             }
@@ -3155,7 +3253,11 @@ impl Evaluator {
                     };
                     return Ok(self.make_function(
                         Function {
-                            params: vec![Param { name: "_arg".to_string(), type_name: None }],
+                            params: vec![Param {
+                                name: "_arg".to_string(),
+                                type_name: None,
+                                default: None,
+                            }],
                             return_type: None,
                             body: vec![Stmt::Return(Some(call))],
                             propagation: PropagationCell::new(Propagation::None),
@@ -3877,7 +3979,7 @@ fn duration_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Ril
             }
         }
         (Value::Duration(d), Value::Float(f), BinaryOp::Div) => {
-            if !(*f > 0.0) {
+            if f.is_nan() || *f <= 0.0 {
                 return Err(RillError::new("a duration can only be divided by a positive number"));
             }
             scale(*d, 1.0 / *f)
@@ -4205,7 +4307,6 @@ fn contains_implicit(expr: &Expr) -> bool {
                 contains_implicit(index) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
-            Stmt::If { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),
             Stmt::Return(Some(expr)) => contains_implicit(expr),
             _ => false,
@@ -4217,8 +4318,13 @@ fn contains_implicit(expr: &Expr) -> bool {
             StrPart::Expr(expr) => contains_implicit(expr),
             _ => false,
         }),
+        Expr::If { cond, .. } => contains_implicit(cond),
+        Expr::Loop { .. } => false,
     }
 }
+
+/// Positional values and `name = value` pairs of a call.
+type CallArgs = (Vec<Value>, Vec<(String, Value)>);
 
 /// Whether an expression is literal source text, i.e. a string literal or an
 /// interpolation, for the purpose of tilde expansion.

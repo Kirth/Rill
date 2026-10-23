@@ -208,11 +208,6 @@ fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
                 collect_expr_imports(index, imports);
                 collect_expr_imports(expr, imports);
             }
-            ast::Stmt::If { cond, then_body, else_body, .. } => {
-                collect_expr_imports(cond, imports);
-                collect_local_imports(then_body, imports);
-                collect_local_imports(else_body, imports);
-            }
             ast::Stmt::While { cond, body } => {
                 collect_expr_imports(cond, imports);
                 collect_local_imports(body, imports);
@@ -229,11 +224,12 @@ fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
             }
             ast::Stmt::Fn { function, .. } => collect_local_imports(&function.body, imports),
             ast::Stmt::Args(group) => collect_arg_group_imports(group, imports),
+            ast::Stmt::Break(Some(expr)) => collect_expr_imports(expr, imports),
             ast::Stmt::Return(None)
             | ast::Stmt::Use(_)
             | ast::Stmt::InputLines
             | ast::Stmt::Continue
-            | ast::Stmt::Break => {}
+            | ast::Stmt::Break(None) => {}
         }
     }
 }
@@ -302,8 +298,13 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_expr_imports(iter, imports);
             collect_local_imports(body, imports);
         }
-        ast::Expr::Block(body) | ast::Expr::Closure { body, .. } => {
+        ast::Expr::Block(body) | ast::Expr::Closure { body, .. } | ast::Expr::Loop { body } => {
             collect_local_imports(body, imports);
+        }
+        ast::Expr::If { cond, then_body, else_body, .. } => {
+            collect_expr_imports(cond, imports);
+            collect_local_imports(then_body, imports);
+            collect_local_imports(else_body, imports);
         }
         ast::Expr::Located { expr, .. } => collect_expr_imports(expr, imports),
         ast::Expr::Interpolated(parts) => collect_parts_imports(parts, imports),
@@ -498,11 +499,7 @@ fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
         ast::Stmt::IndexAssign { index, expr, .. } => {
             expr_needs_input(index) || expr_needs_input(expr)
         }
-        ast::Stmt::If { cond, then_body, else_body, .. } => {
-            expr_needs_input(cond)
-                || program_needs_input(then_body)
-                || program_needs_input(else_body)
-        }
+        ast::Stmt::Break(Some(expr)) => expr_needs_input(expr),
         ast::Stmt::While { cond, body } => expr_needs_input(cond) || program_needs_input(body),
         ast::Stmt::WithEnv { bindings, body } => {
             bindings.iter().any(|(_, expr)| expr_needs_input(expr)) || program_needs_input(body)
@@ -546,7 +543,14 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         | ast::Expr::Unary { operand: value, .. } => expr_needs_input(value),
         ast::Expr::For { iter, body, .. } => expr_needs_input(iter) || program_needs_input(body),
         ast::Expr::Index { base, index } => expr_needs_input(base) || expr_needs_input(index),
-        ast::Expr::Block(body) | ast::Expr::Closure { body, .. } => program_needs_input(body),
+        ast::Expr::Block(body) | ast::Expr::Closure { body, .. } | ast::Expr::Loop { body } => {
+            program_needs_input(body)
+        }
+        ast::Expr::If { cond, then_body, else_body, .. } => {
+            expr_needs_input(cond)
+                || program_needs_input(then_body)
+                || program_needs_input(else_body)
+        }
         _ => false,
     }
 }

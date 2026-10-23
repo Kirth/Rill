@@ -1239,7 +1239,7 @@ impl Parser {
                 self.next();
                 Ok(Stmt::Emit(self.parse_expr(0)?))
             }
-            TokenKind::If => self.parse_if(),
+            TokenKind::If => Ok(Stmt::Expr(self.parse_if()?)),
             TokenKind::Return => {
                 self.next();
                 if self.at_separator() {
@@ -1254,7 +1254,11 @@ impl Parser {
             }
             TokenKind::Break => {
                 self.next();
-                Ok(Stmt::Break)
+                if self.at_separator() || self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
+                    Ok(Stmt::Break(None))
+                } else {
+                    Ok(Stmt::Break(Some(self.parse_expr(0)?)))
+                }
             }
             TokenKind::While => {
                 self.next();
@@ -1575,13 +1579,25 @@ impl Parser {
         let mut params = Vec::new();
         if !self.at(TokenKind::RParen) {
             loop {
+                let name_token = self.peek().clone();
                 let name = self.expect_ident()?;
                 let type_name = if self.consume(TokenKind::Colon) {
                     Some(self.parse_type_name()?)
                 } else {
                     None
                 };
-                params.push(Param { name, type_name });
+                let default =
+                    if self.consume(TokenKind::Eq) { Some(self.parse_expr(0)?) } else { None };
+                if default.is_none() && params.iter().any(|param: &Param| param.default.is_some()) {
+                    return Err(RillError::spanned(
+                        format!(
+                            "parameter '{name}' without a default follows a parameter with one"
+                        ),
+                        name_token.span,
+                    )
+                    .with_help("move parameters with defaults to the end of the list"));
+                }
+                params.push(Param { name, type_name, default });
                 self.skip_newlines();
                 if !self.consume(TokenKind::Comma) {
                     break;
@@ -1626,8 +1642,13 @@ impl Parser {
         Ok(Expr::For { mode, workers, pattern, iter: Box::new(iter), body })
     }
 
-    fn parse_if(&mut self) -> Result<Stmt, RillError> {
+    fn parse_if(&mut self) -> Result<Expr, RillError> {
         self.expect(TokenKind::If)?;
+        self.parse_if_after_keyword()
+    }
+
+    /// The rest of an `if` once the keyword has been consumed.
+    fn parse_if_after_keyword(&mut self) -> Result<Expr, RillError> {
         let (cond, pattern) = if self.consume(TokenKind::Let) {
             let pattern = self.parse_binding_pattern()?;
             self.expect(TokenKind::Eq)?;
@@ -1638,14 +1659,20 @@ impl Parser {
         let then_body = self.parse_block()?;
         let else_body = if self.consume(TokenKind::Else) {
             if self.at(TokenKind::If) {
-                vec![self.parse_if()?]
+                let start = self.peek().span.start;
+                let nested = self.parse_if()?;
+                let span = Span::new(start, self.last_end);
+                vec![Stmt::Located {
+                    stmt: Box::new(Stmt::Expr(Expr::Located { expr: Box::new(nested), span })),
+                    span,
+                }]
             } else {
                 self.parse_block()?
             }
         } else {
             Vec::new()
         };
-        Ok(Stmt::If { cond, pattern, then_body, else_body })
+        Ok(Expr::If { cond: Box::new(cond), pattern, then_body, else_body })
     }
 
     fn parse_on(&mut self) -> Result<Stmt, RillError> {
@@ -1796,6 +1823,20 @@ impl Parser {
             TokenKind::True => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::False => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Null => Ok(Expr::Literal(Literal::Null)),
+            TokenKind::If => self.parse_if_after_keyword(),
+            TokenKind::OrOr => {
+                let body = if self.at(TokenKind::LBrace) {
+                    self.parse_block()?
+                } else {
+                    vec![Stmt::Expr(self.parse_expr(0)?)]
+                };
+                let propagation = initial_propagation(&body);
+                Ok(Expr::Closure { params: Vec::new(), body, propagation })
+            }
+            TokenKind::Ident(ref name) if name == "loop" && self.at(TokenKind::LBrace) => {
+                let body = self.parse_block()?;
+                Ok(Expr::Loop { body })
+            }
             TokenKind::Bang => {
                 let operand = self.parse_expr(17)?;
                 Ok(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand) })
@@ -2258,7 +2299,9 @@ impl Parser {
             | TokenKind::True
             | TokenKind::False
             | TokenKind::Null
-            | TokenKind::MatchKw => true,
+            | TokenKind::MatchKw
+            | TokenKind::If
+            | TokenKind::For => true,
             TokenKind::LBracket => spaced,
             TokenKind::Minus => {
                 let operand_adjacent =
@@ -2347,16 +2390,23 @@ impl Parser {
             "ProcessResult" => TypeName::ProcessResult,
             "ProcessHandle" => TypeName::ProcessHandle,
             "Fn" => {
-                let params = if self.at(TokenKind::LBracket) {
+                let close = if self.at(TokenKind::LBracket) {
+                    Some(TokenKind::RBracket)
+                } else if self.at(TokenKind::LParen) {
+                    Some(TokenKind::RParen)
+                } else {
+                    None
+                };
+                let params = if let Some(close) = close {
                     self.next();
                     let mut types = Vec::new();
-                    while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+                    while !self.at(close.clone()) && !self.at(TokenKind::Eof) {
                         types.push(self.parse_type_name()?);
                         if !self.consume(TokenKind::Comma) {
                             break;
                         }
                     }
-                    self.expect(TokenKind::RBracket)?;
+                    self.expect(close)?;
                     Some(types)
                 } else {
                     None
@@ -2482,9 +2532,6 @@ fn stmts_propagate(stmts: &[Stmt]) -> bool {
         | Stmt::AssignEnv { expr, .. }
         | Stmt::Return(Some(expr)) => expr_propagates(expr),
         Stmt::IndexAssign { index, expr, .. } => expr_propagates(index) || expr_propagates(expr),
-        Stmt::If { cond, then_body, else_body, .. } => {
-            expr_propagates(cond) || stmts_propagate(then_body) || stmts_propagate(else_body)
-        }
         Stmt::While { cond, body } => expr_propagates(cond) || stmts_propagate(body),
         Stmt::WithEnv { bindings, body } => {
             bindings.iter().any(|(_, expr)| expr_propagates(expr)) || stmts_propagate(body)
@@ -2496,7 +2543,8 @@ fn stmts_propagate(stmts: &[Stmt]) -> bool {
         | Stmt::InputLines
         | Stmt::Return(None)
         | Stmt::Continue
-        | Stmt::Break => false,
+        | Stmt::Break(None) => false,
+        Stmt::Break(Some(expr)) => expr_propagates(expr),
     })
 }
 
@@ -2529,7 +2577,10 @@ fn expr_propagates(expr: &Expr) -> bool {
                 || stmts_propagate(body)
                 || workers.as_deref().is_some_and(expr_propagates)
         }
-        Expr::Block(body) => stmts_propagate(body),
+        Expr::Block(body) | Expr::Loop { body } => stmts_propagate(body),
+        Expr::If { cond, then_body, else_body, .. } => {
+            expr_propagates(cond) || stmts_propagate(then_body) || stmts_propagate(else_body)
+        }
         Expr::Located { expr, .. } => expr_propagates(expr),
         Expr::Interpolated(parts) => parts_propagate(parts),
         Expr::Closure { .. }
@@ -2564,6 +2615,8 @@ fn describe_expr(expr: &Expr) -> &'static str {
     match expr.unspanned() {
         Expr::Literal(Literal::Str(_)) => "a string literal",
         Expr::Interpolated(_) => "an interpolated string",
+        Expr::If { .. } => "an if expression",
+        Expr::Loop { .. } => "a loop",
         Expr::Literal(Literal::Int(_)) => "an integer literal",
         Expr::Literal(Literal::Float(_)) => "a float literal",
         Expr::Literal(Literal::Bool(_)) => "a boolean literal",

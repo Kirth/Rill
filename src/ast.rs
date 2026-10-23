@@ -71,6 +71,8 @@ impl PartialEq for PropagationCell {
 pub struct Param {
     pub name: String,
     pub type_name: Option<TypeName>,
+    /// Default value, evaluated in the callee's scope when the argument is omitted.
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,12 +151,6 @@ pub enum Stmt {
         name: String,
         function: Function,
     },
-    If {
-        cond: Expr,
-        pattern: Option<LetPattern>,
-        then_body: Vec<Stmt>,
-        else_body: Vec<Stmt>,
-    },
     WithEnv {
         bindings: Vec<(String, Expr)>,
         body: Vec<Stmt>,
@@ -166,7 +162,8 @@ pub enum Stmt {
     Emit(Expr),
     Return(Option<Expr>),
     Continue,
-    Break,
+    /// `break` or `break value` (the value is only meaningful inside `loop`).
+    Break(Option<Expr>),
     Assign {
         name: String,
         op: AssignOp,
@@ -260,6 +257,17 @@ pub enum Expr {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// `if`/`else if`/`else`, usable as a statement or as a value.
+    If {
+        cond: Box<Expr>,
+        pattern: Option<LetPattern>,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    },
+    /// `loop { ... }`: runs until `break`, whose value is the loop's value.
+    Loop {
+        body: Vec<Stmt>,
     },
     Block(Vec<Stmt>),
     Closure {

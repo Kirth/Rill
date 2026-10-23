@@ -151,3 +151,66 @@ fn durations_display_like_go() {
     assert_eq!(run("20MiB.human_size()"), Value::Str("20.0 MiB".into()));
     assert_eq!(run("512.human_size()"), Value::Str("512 B".into()));
 }
+
+#[test]
+fn if_is_an_expression() {
+    assert_eq!(run("let x = if true { 1 } else { 2 }\nx"), Value::Int(1));
+    assert_eq!(run("if false { 1 } else if true { 2 } else { 3 }"), Value::Int(2));
+    assert_eq!(
+        run("[1, 2, 3].map(|n| if n > 1 { \"big\" } else { \"small\" })"),
+        Value::List(vec![
+            Value::Str("small".into()),
+            Value::Str("big".into()),
+            Value::Str("big".into())
+        ])
+    );
+    assert_eq!(run("fn f(v) { if v { return 7 }\n9 }\nf(true)"), Value::Int(7));
+    assert_eq!(
+        run("for n in [1, 2] { if n == 2 { emit n * 10 } }"),
+        Value::List(vec![Value::Int(20)])
+    );
+    assert_eq!(run("let m = {a: 1}\nif let {a} = m { a } else { 0 }"), Value::Int(1));
+    assert!(check_err("let z = if true { 1 }").contains("needs an else branch"));
+}
+
+#[test]
+fn loop_breaks_with_value() {
+    assert_eq!(run("var i = 0\nloop { i += 1\nif i == 3 { break i * 10 } }"), Value::Int(30));
+    assert_eq!(run("loop { break }"), Value::Null);
+    assert_eq!(run("var i = 0\nloop { i += 1\nif i < 3 { continue }\nbreak i }"), Value::Int(3));
+    assert_eq!(run("let loop = 1\nloop + 1"), Value::Int(2));
+    assert!(check_err("while true { break 1 }").contains("only valid inside loop"));
+    assert!(check_err("break 1").contains("outside loop"));
+}
+
+#[test]
+fn zero_arg_closures_and_fn_types() {
+    assert_eq!(run("let f = || 42\nf()"), Value::Int(42));
+    assert_eq!(
+        run("let g: Fn() -> Int = || 2\nlet h: Fn(Int) -> Int = |x| x + 1\ng() + h(1)"),
+        Value::Int(4)
+    );
+    assert_eq!(run("let g: Fn[] -> Int = || 2\ng()"), Value::Int(2));
+    assert!(check_err("[1].map(|| 1)").contains("needs 1 arg, got 0"));
+    assert!(check_err("let f = || 1\nf(1)").contains("needs 0 args, got 1"));
+}
+
+#[test]
+fn default_parameters_and_named_arguments() {
+    let prelude = "fn add(a, b = 2) { a + b }\n";
+    assert_eq!(
+        run(&format!("{prelude}[add(1), add(1, 5), add(b = 10, a = 1), add(a = 1)]")),
+        Value::List(vec![Value::Int(3), Value::Int(6), Value::Int(11), Value::Int(3)])
+    );
+    assert_eq!(run("fn scale(x, factor = x * 2) { factor }\nscale(3)"), Value::Int(6));
+    assert!(check_err(&format!("{prelude}add()")).contains("needs 1 to 2 args, got 0"));
+    assert!(check_err(&format!("{prelude}add(1, 2, 3)")).contains("needs 1 to 2 args, got 3"));
+    assert!(check_err(&format!("{prelude}add(1, c = 2)")).contains("no parameter 'c'"));
+    assert!(check_err(&format!("{prelude}add(1, a = 2)")).contains("given twice"));
+    assert!(check_err(&format!("{prelude}add(b = 1)"))
+        .contains("missing an argument for parameter 'a'"));
+    assert!(rill::parser::parse("fn g(a = 1, b) { 1 }").is_err());
+    assert!(check_err("fn k(n: Int = \"x\") { n }\nk()").contains("expected Int"));
+    // Runtime agrees when the checker is bypassed by dynamic types.
+    assert!(fails(&format!("{prelude}let f = add\nf(1, c = 2)")).contains("no parameter 'c'"));
+}

@@ -195,8 +195,8 @@ if let { name: value } = record {
             if names == &["index", "value"]
     ));
     assert!(matches!(
-        program.stmts[1].unspanned(),
-        Stmt::If { pattern: Some(rill::ast::LetPattern::Map(pairs)), .. }
+        expression(&program.stmts[1]),
+        Expr::If { pattern: Some(rill::ast::LetPattern::Map(pairs)), .. }
             if pairs == &[("name".to_string(), Some("value".to_string()))]
     ));
 }
