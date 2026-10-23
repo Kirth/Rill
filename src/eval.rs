@@ -579,7 +579,7 @@ impl Evaluator {
     }
 
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, RillError> {
-        if let Some(group) = program.stmts.iter().find_map(|stmt| match stmt {
+        if let Some(group) = program.stmts.iter().find_map(|stmt| match stmt.unspanned() {
             Stmt::Args(group) => Some(group),
             _ => None,
         }) {
@@ -614,7 +614,7 @@ impl Evaluator {
     /// each other regardless of declaration order.
     fn hoist_functions(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
-            if let Stmt::Fn { name, .. } = stmt {
+            if let Stmt::Fn { name, .. } = stmt.unspanned() {
                 self.env.hoist(name);
             }
         }
@@ -819,6 +819,10 @@ impl Evaluator {
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         self.check_cancelled()?;
         match stmt {
+            Stmt::Located { stmt, span } => self.eval_stmt(stmt).map_err(|error| match error {
+                EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
+                other => other,
+            }),
             Stmt::Use(module) => {
                 let _ = module;
                 Ok(Flow::Value(Value::Null))
@@ -4110,7 +4114,7 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::NamedArg { value, .. } => contains_implicit(value),
         Expr::Try(value) => contains_implicit(value),
         Expr::For { iter, .. } => contains_implicit(iter),
-        Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt {
+        Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt.unspanned() {
             Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
             Stmt::Assign { expr, .. } => contains_implicit(expr),
             Stmt::IndexAssign { index, expr, .. } => {

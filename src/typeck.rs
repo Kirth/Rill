@@ -240,7 +240,7 @@ impl Checker {
 
     fn check_program(&mut self, program: &Program) -> Result<ModuleExports, RillError> {
         for stmt in &program.stmts {
-            if let Stmt::Fn { name, function } = stmt {
+            if let Stmt::Fn { name, function } = stmt.unspanned() {
                 self.env.set(
                     name.clone(),
                     Type::Function {
@@ -304,6 +304,9 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<Type, RillError> {
         match stmt {
+            Stmt::Located { stmt, span } => {
+                self.check_stmt(stmt).map_err(|error| error.with_span(*span))
+            }
             Stmt::Use(module) => {
                 if !matches!(
                     module.as_str(),
@@ -431,7 +434,7 @@ impl Checker {
                 self.return_expected = function.return_type.as_ref().map(type_from_name);
                 let checked = self.check_stmts(&function.body).and_then(|body_ty| {
                     if let Some(return_type) = &function.return_type {
-                        let last_span = function.body.last().and_then(|s| match s {
+                        let last_span = function.body.last().and_then(|s| match s.unspanned() {
                             Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Emit(e) => e.span(),
                             Stmt::Let { expr, .. } => expr.span(),
                             _ => None,
@@ -1396,7 +1399,7 @@ fn top_level_names(stmts: &[Stmt]) -> Vec<String> {
 
     let mut names = Vec::new();
     for stmt in stmts {
-        match stmt {
+        match stmt.unspanned() {
             Stmt::Let { pattern, .. } => pattern_names(pattern, &mut names),
             Stmt::Fn { name, .. } => names.push(name.clone()),
             _ => {}
@@ -1660,7 +1663,7 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::NamedArg { value, .. } => contains_implicit(value),
         Expr::Try(value) => contains_implicit(value),
         Expr::For { iter, .. } => contains_implicit(iter),
-        Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt {
+        Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt.unspanned() {
             Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
             Stmt::Assign { expr, .. } => contains_implicit(expr),
             Stmt::IndexAssign { index, expr, .. } => {

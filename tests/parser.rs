@@ -1,7 +1,7 @@
 use rill::ast::{CommandArg, CommandPart, Expr, PipeKind, RedirectKind, Stmt};
 
 fn expression(stmt: &Stmt) -> &Expr {
-    match stmt {
+    match stmt.unspanned() {
         Stmt::Expr(expr) | Stmt::Let { expr, .. } => expr.unspanned(),
         _ => panic!("expected expression statement or binding"),
     }
@@ -153,7 +153,7 @@ let (number, _) = pair
     .expect("tuple program should parse");
 
     assert!(matches!(
-        &program.stmts[0],
+        program.stmts[0].unspanned(),
         Stmt::Let {
             type_name: Some(rill::ast::TypeName::Tuple(elements)),
             expr,
@@ -162,7 +162,7 @@ let (number, _) = pair
             && matches!(expr.unspanned(), Expr::Tuple(values) if values.len() == 2)
     ));
     assert!(matches!(
-        &program.stmts[1],
+        program.stmts[1].unspanned(),
         Stmt::Let {
             pattern: rill::ast::LetPattern::Tuple(names),
             ..
@@ -190,12 +190,12 @@ if let { name: value } = record {
 "#;
     let program = rill::parser::parse(program).expect("destructuring headers should parse");
     assert!(matches!(
-        &program.stmts[0],
+        program.stmts[0].unspanned(),
         Stmt::Expr(Expr::For { pattern: rill::ast::LetPattern::Tuple(names), .. })
             if names == &["index", "value"]
     ));
     assert!(matches!(
-        &program.stmts[1],
+        program.stmts[1].unspanned(),
         Stmt::If { pattern: Some(rill::ast::LetPattern::Map(pairs)), .. }
             if pairs == &[("name".to_string(), Some("value".to_string()))]
     ));

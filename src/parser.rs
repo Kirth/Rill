@@ -741,6 +741,12 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, RillError> {
+        let start = self.peek().span.start;
+        let stmt = self.parse_stmt_inner()?;
+        Ok(Stmt::Located { stmt: Box::new(stmt), span: Span::new(start, self.last_end) })
+    }
+
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, RillError> {
         match self.peek_kind() {
             TokenKind::Let => self.parse_let(false),
             TokenKind::Var => self.parse_let(true),

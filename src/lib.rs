@@ -88,7 +88,7 @@ impl CompilationSession {
             needs_input: program_needs_input(&program.stmts)
                 || self.order.iter().any(|module| program_needs_input(&module.program.stmts)),
         };
-        let args = program.stmts.iter().find_map(|stmt| match stmt {
+        let args = program.stmts.iter().find_map(|stmt| match stmt.unspanned() {
             ast::Stmt::Args(group) => Some(group.clone()),
             _ => None,
         });
@@ -192,7 +192,10 @@ fn resolve_module_path(base_dir: &Path, import: &str) -> Result<PathBuf, RillErr
 
 fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
     for stmt in stmts {
-        match stmt {
+        match stmt.unspanned() {
+            ast::Stmt::Located { stmt, .. } => {
+                collect_local_imports(std::slice::from_ref(stmt), imports)
+            }
             ast::Stmt::Use(module) if is_local_module(module) => imports.push(module.clone()),
             ast::Stmt::Let { expr, .. }
             | ast::Stmt::Expr(expr)
@@ -461,7 +464,7 @@ fn program_needs_input(stmts: &[ast::Stmt]) -> bool {
 }
 
 fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
-    match stmt {
+    match stmt.unspanned() {
         ast::Stmt::InputLines => true,
         ast::Stmt::Let { expr, .. }
         | ast::Stmt::Expr(expr)

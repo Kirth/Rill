@@ -71,6 +71,12 @@ pub enum LetPattern {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    /// A statement with its source span; every statement the parser produces
+    /// is wrapped in one.  Consumers match on `stmt.unspanned()`.
+    Located {
+        stmt: Box<Stmt>,
+        span: Span,
+    },
     Use(String),
     Let { pattern: LetPattern, type_name: Option<TypeName>, expr: Expr, mutable: bool },
     AssignEnv { name: String, expr: Expr },
@@ -191,6 +197,22 @@ pub enum Literal {
     Duration(std::time::Duration),
     Str(String),
     Regex(String),
+}
+
+impl Stmt {
+    pub fn unspanned(&self) -> &Stmt {
+        match self {
+            Self::Located { stmt, .. } => stmt.unspanned(),
+            other => other,
+        }
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::Located { span, .. } => Some(*span),
+            _ => None,
+        }
+    }
 }
 
 impl Expr {
