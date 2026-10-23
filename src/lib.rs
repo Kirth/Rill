@@ -287,6 +287,15 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_expr_imports(base, imports);
             collect_expr_imports(index, imports);
         }
+        ast::Expr::Slice { base, start, end, .. } => {
+            collect_expr_imports(base, imports);
+            if let Some(start) = start {
+                collect_expr_imports(start, imports);
+            }
+            if let Some(end) = end {
+                collect_expr_imports(end, imports);
+            }
+        }
         ast::Expr::Match { value, arms } => {
             collect_expr_imports(value, imports);
             for arm in arms {
@@ -541,6 +550,11 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         | ast::Expr::Unary { operand: value, .. } => expr_needs_input(value),
         ast::Expr::For { iter, body, .. } => expr_needs_input(iter) || program_needs_input(body),
         ast::Expr::Index { base, index } => expr_needs_input(base) || expr_needs_input(index),
+        ast::Expr::Slice { base, start, end, .. } => {
+            expr_needs_input(base)
+                || start.as_deref().is_some_and(expr_needs_input)
+                || end.as_deref().is_some_and(expr_needs_input)
+        }
         ast::Expr::Block(body) | ast::Expr::Closure { body, .. } | ast::Expr::Loop { body } => {
             program_needs_input(body)
         }

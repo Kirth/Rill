@@ -243,3 +243,46 @@ fn nested_place_assignment() {
     assert!(check_err("var n = 1\nn.a = 2").contains("cannot assign to field 'a' of Int"));
     assert!(check_err("var xs = [1]\nxs[\"a\"] = 2").contains("expected Int"));
 }
+
+#[test]
+fn map_iteration_yields_key_value_tuples() {
+    assert_eq!(
+        run("for (k, v) in {b: 2, a: 1} { emit \"$k=$v\" }"),
+        Value::List(vec![Value::Str("b=2".into()), Value::Str("a=1".into())])
+    );
+    assert_eq!(
+        run("{a: 1}.entries()"),
+        Value::List(vec![Value::Tuple(vec![Value::Str("a".into()), Value::Int(1)])])
+    );
+    assert_eq!(
+        run("for (k, v) in {a: 1}.entries() { emit k }"),
+        Value::List(vec![Value::Str("a".into())])
+    );
+    assert_eq!(
+        run("parallel for (k, v) in {a: 1, b: 2} { emit v * 10 }"),
+        Value::List(vec![Value::Int(10), Value::Int(20)])
+    );
+    assert!(check_err("for x in 5 { }").contains("for loop needs List, Map, or Stream"));
+}
+
+#[test]
+fn ranges_steps_and_slices() {
+    let ints = |values: &[i64]| Value::List(values.iter().map(|v| Value::Int(*v)).collect());
+    assert_eq!(run("(0..10).step(3)"), ints(&[0, 3, 6, 9]));
+    assert!(fails("[1].step(0)").contains("positive step"));
+    assert_eq!(run("[1, 2, 3, 4][1..3]"), ints(&[2, 3]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[..2]"), ints(&[1, 2]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[2..]"), ints(&[3, 4]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[-2..]"), ints(&[3, 4]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[1..=2]"), ints(&[2, 3]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[..]"), ints(&[1, 2, 3, 4]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[3..1]"), ints(&[]));
+    assert_eq!(run("let xs = [1, 2, 3, 4]\nxs[1..100]"), ints(&[2, 3, 4]));
+    assert_eq!(run("\"hello\"[1..3]"), Value::Str("el".into()));
+    assert_eq!(run("\"hello\"[-2..]"), Value::Str("lo".into()));
+    assert_eq!(run("[1, 2, 3].slice(-2, 3)"), ints(&[2, 3]));
+    assert_eq!(run("let xs = [1, 2, 3]\nlet i = 1\nxs[i + 1..]"), ints(&[3]));
+    assert_eq!(run("let xs = [1, 2, 3]\nxs[xs.len() - 1]"), Value::Int(3));
+    assert!(check_err("let t = (1, 2)\nt[0..1]").contains("cannot slice a Tuple"));
+    assert!(check_err("[1][\"a\"..]").contains("slice bounds must be Int"));
+}

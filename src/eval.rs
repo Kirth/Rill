@@ -1135,6 +1135,40 @@ impl Evaluator {
                     }
                 }
             }
+            Expr::Slice { base, start, end, inclusive } => {
+                let base_val = self.eval_expr(base)?;
+                let mut bounds = [None, None];
+                for (slot, bound) in bounds.iter_mut().zip([start, end]) {
+                    if let Some(bound) = bound {
+                        match self.eval_expr(bound)? {
+                            Value::Int(value) => *slot = Some(value),
+                            other => {
+                                return Err(RillError::new(format!(
+                                    "slice bounds must be Int, got {}",
+                                    other.type_name()
+                                ))
+                                .into())
+                            }
+                        }
+                    }
+                }
+                match base_val {
+                    Value::List(items) => {
+                        let (from, to) =
+                            slice_bounds(items.len(), bounds[0], bounds[1], *inclusive);
+                        Ok(Value::List(items[from..to.max(from)].to_vec()))
+                    }
+                    Value::Str(text) => {
+                        let chars: Vec<char> = text.chars().collect();
+                        let (from, to) =
+                            slice_bounds(chars.len(), bounds[0], bounds[1], *inclusive);
+                        Ok(Value::Str(chars[from..to.max(from)].iter().collect()))
+                    }
+                    other => {
+                        Err(RillError::new(format!("cannot slice {}", other.type_name())).into())
+                    }
+                }
+            }
             Expr::Field { base, name } => {
                 if let Expr::Ident(module) = base.unspanned() {
                     if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
@@ -1252,9 +1286,13 @@ impl Evaluator {
                 }
                 let list = match iter_val {
                     Value::List(items) => items,
+                    Value::Map(map) => map
+                        .into_iter()
+                        .map(|(key, value)| Value::Tuple(vec![Value::Str(key), value]))
+                        .collect(),
                     other => {
                         return Err(RillError::new(format!(
-                            "for loop needs List, got {}",
+                            "for loop needs List, Map, or Stream, got {}",
                             other.type_name()
                         ))
                         .into())
@@ -2545,20 +2583,22 @@ impl Evaluator {
             }
             "slice" => {
                 let list = self.eval_expr(&args[0])?;
-                let start = as_usize(&self.eval_expr(&args[1])?)?;
-                let end = as_usize(&self.eval_expr(&args[2])?)?;
+                let Value::Int(start) = self.eval_expr(&args[1])? else {
+                    return Err(RillError::new("slice start must be Int").into());
+                };
+                let Value::Int(end) = self.eval_expr(&args[2])? else {
+                    return Err(RillError::new("slice end must be Int").into());
+                };
                 let Value::List(items) = list else {
                     return Err(RillError::new("slice needs a List").into());
                 };
-                if start > end {
+                let (from, to) = slice_bounds(items.len(), Some(start), Some(end), false);
+                if from > to {
                     return Err(
                         RillError::new(format!("slice start {start} is after end {end}")).into()
                     );
                 }
-                let len = items.len();
-                let start = start.min(len);
-                let end = end.min(len);
-                Ok(Value::List(items[start..end].to_vec()))
+                Ok(Value::List(items[from..to].to_vec()))
             }
             "skip" => {
                 let list = self.eval_expr(&args[0])?;
@@ -2567,6 +2607,17 @@ impl Evaluator {
                     return Err(RillError::new("skip needs a List").into());
                 };
                 Ok(Value::List(items.into_iter().skip(n).collect()))
+            }
+            "step" => {
+                let list = self.eval_expr(&args[0])?;
+                let n = as_usize(&self.eval_expr(&args[1])?)?;
+                if n == 0 {
+                    return Err(RillError::new("step needs a positive step").into());
+                }
+                let Value::List(items) = list else {
+                    return Err(RillError::new("step needs a List").into());
+                };
+                Ok(Value::List(items.into_iter().step_by(n).collect()))
             }
             "difference" => {
                 let Value::List(a) = self.eval_expr(&args[0])? else {
@@ -2631,7 +2682,7 @@ impl Evaluator {
                     return Err(RillError::new("entries needs a Map").into());
                 };
                 Ok(Value::List(
-                    map.into_iter().map(|(k, v)| Value::List(vec![Value::Str(k), v])).collect(),
+                    map.into_iter().map(|(k, v)| Value::Tuple(vec![Value::Str(k), v])).collect(),
                 ))
             }
             "contains_key" => {
@@ -2982,7 +3033,7 @@ impl Evaluator {
         let Value::List(b) = b else {
             return Err(RillError::new("zip argument must be a List").into());
         };
-        let out = a.into_iter().zip(b).map(|(x, y)| Value::List(vec![x, y])).collect();
+        let out = a.into_iter().zip(b).map(|(x, y)| Value::Tuple(vec![x, y])).collect();
         Ok(Value::List(out))
     }
 
@@ -4319,6 +4370,11 @@ fn contains_implicit(expr: &Expr) -> bool {
         }
         Expr::Field { base, .. } => contains_implicit(base),
         Expr::Index { base, index } => contains_implicit(base) || contains_implicit(index),
+        Expr::Slice { base, start, end, .. } => {
+            contains_implicit(base)
+                || start.as_deref().is_some_and(contains_implicit)
+                || end.as_deref().is_some_and(contains_implicit)
+        }
         Expr::Binary { left, right, .. } => contains_implicit(left) || contains_implicit(right),
         Expr::Pipe { left, right, .. } => contains_implicit(left) || contains_implicit(right),
         Expr::RegexMatch { value, .. }
@@ -4347,6 +4403,23 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::If { cond, .. } => contains_implicit(cond),
         Expr::Loop { .. } => false,
     }
+}
+
+/// Normalise slice bounds: negative values count from the end and
+/// out-of-range values are clamped.  `to` may end up before `from` for a
+/// reversed range; callers decide whether that is empty or an error.
+fn slice_bounds(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+    inclusive: bool,
+) -> (usize, usize) {
+    let len_i64 = len as i64;
+    let normalise = |index: i64| if index < 0 { len_i64 + index } else { index };
+    let from = start.map_or(0, normalise).clamp(0, len_i64) as usize;
+    let to =
+        end.map_or(len_i64, |end| normalise(end) + i64::from(inclusive)).clamp(0, len_i64) as usize;
+    (from, to)
 }
 
 /// Positional values and `name = value` pairs of a call.

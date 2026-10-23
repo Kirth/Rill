@@ -254,6 +254,13 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `xs[start..end]`, `xs[..end]`, `xs[start..]`, `xs[start..=end]`.
+    Slice {
+        base: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
+    },
     /// `if`/`else if`/`else`, usable as a statement or as a value.
     If {
         cond: Box<Expr>,

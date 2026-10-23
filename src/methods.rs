@@ -54,6 +54,7 @@ pub enum BuiltinMethod {
     Last,
     Slice,
     Skip,
+    Step,
     Difference,
     SymmetricDifference,
     Contains,
@@ -101,6 +102,7 @@ impl BuiltinMethod {
             Self::Last => "last",
             Self::Slice => "slice",
             Self::Skip => "skip",
+            Self::Step => "step",
             Self::Difference => "difference",
             Self::SymmetricDifference => "symmetric_difference",
             Self::Contains => "contains",
@@ -215,6 +217,10 @@ pub enum Return {
     CallbackList,
     ListUnknown,
     ListTupleUnknown,
+    /// `List[Tuple[Str, V]]` from a Map.
+    MapEntries,
+    /// `List[Tuple[T, U]]` from `xs.zip(ys)`.
+    ZipPairs,
     ListStr,
     ListPath,
     ListProcessResult,
@@ -433,7 +439,7 @@ pub static METHODS: &[Method] = &[
         [List],
         1,
         [Argument::List],
-        Return::ListUnknown,
+        Return::ZipPairs,
         Target::Builtin(BuiltinMethod::Zip)
     ),
     method!(
@@ -503,6 +509,14 @@ pub static METHODS: &[Method] = &[
         [Argument::Int],
         Return::Receiver,
         Target::Builtin(BuiltinMethod::Skip)
+    ),
+    method!(
+        "step",
+        [List],
+        1,
+        [Argument::Int],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::Step)
     ),
     method!(
         "difference",
@@ -575,7 +589,7 @@ pub static METHODS: &[Method] = &[
     ),
     method!("keys", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Keys)),
     method!("values", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Values)),
-    method!("entries", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Entries)),
+    method!("entries", [Map], 0, [], Return::MapEntries, Target::Builtin(BuiltinMethod::Entries)),
     method!(
         "contains_key",
         [Map],

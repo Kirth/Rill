@@ -1706,7 +1706,12 @@ impl Parser {
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, RillError> {
         let start = self.peek().span.start;
-        let mut left = self.parse_prefix()?;
+        let left = self.parse_prefix()?;
+        self.parse_infix(left, min_bp, start)
+    }
+
+    /// Continue parsing operators after an already-parsed left operand.
+    fn parse_infix(&mut self, mut left: Expr, min_bp: u8, start: usize) -> Result<Expr, RillError> {
         loop {
             if self.at(TokenKind::Newline)
                 && matches!(
@@ -1798,7 +1803,29 @@ impl Parser {
             }
 
             if op == ParsedOp::Index {
-                let index = self.parse_expr(0)?;
+                // `[index]`, or a slice: `[a..b]`, `[..b]`, `[a..]`, `[a..=b]`, `[..]`.
+                let index_start = self.peek().span.start;
+                let at_range =
+                    |parser: &Self| parser.at(TokenKind::DotDot) || parser.at(TokenKind::DotDotEq);
+                let bound = if at_range(self) { None } else { Some(self.parse_expr(12)?) };
+                if at_range(self) {
+                    let inclusive = matches!(self.next().kind, TokenKind::DotDotEq);
+                    let end = if self.at(TokenKind::RBracket) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr(0)?))
+                    };
+                    self.expect(TokenKind::RBracket)?;
+                    left = Expr::Slice {
+                        base: Box::new(left),
+                        start: bound.map(Box::new),
+                        end,
+                        inclusive,
+                    };
+                    continue;
+                }
+                let bound = bound.expect("a non-range index has a bound");
+                let index = self.parse_infix(bound, 0, index_start)?;
                 self.expect(TokenKind::RBracket)?;
                 left = Expr::Index { base: Box::new(left), index: Box::new(index) };
                 continue;
@@ -2566,6 +2593,11 @@ fn expr_propagates(expr: &Expr) -> bool {
         Expr::Call { callee, args } => expr_propagates(callee) || args.iter().any(expr_propagates),
         Expr::Field { base, .. } => expr_propagates(base),
         Expr::Index { base, index } => expr_propagates(base) || expr_propagates(index),
+        Expr::Slice { base, start, end, .. } => {
+            expr_propagates(base)
+                || start.as_deref().is_some_and(expr_propagates)
+                || end.as_deref().is_some_and(expr_propagates)
+        }
         Expr::Binary { left, right, .. } | Expr::Pipe { left, right, .. } => {
             expr_propagates(left) || expr_propagates(right)
         }
@@ -2620,6 +2652,7 @@ fn describe_expr(expr: &Expr) -> &'static str {
         Expr::Literal(Literal::Str(_)) => "a string literal",
         Expr::Interpolated(_) => "an interpolated string",
         Expr::If { .. } => "an if expression",
+        Expr::Slice { .. } => "a slice",
         Expr::Loop { .. } => "a loop",
         Expr::Literal(Literal::Int(_)) => "an integer literal",
         Expr::Literal(Literal::Float(_)) => "a float literal",

@@ -1097,9 +1097,9 @@ fn zip_two_lists() {
     assert_eq!(
         run("[1, 2, 3].zip([\"a\", \"b\", \"c\"])"),
         Value::List(vec![
-            Value::List(vec![Value::Int(1), Value::Str("a".into())]),
-            Value::List(vec![Value::Int(2), Value::Str("b".into())]),
-            Value::List(vec![Value::Int(3), Value::Str("c".into())]),
+            Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
+            Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
+            Value::Tuple(vec![Value::Int(3), Value::Str("c".into())]),
         ])
     );
 }
@@ -1109,8 +1109,8 @@ fn zip_stops_at_shorter() {
     assert_eq!(
         run("[1, 2, 3].zip([\"a\", \"b\"])"),
         Value::List(vec![
-            Value::List(vec![Value::Int(1), Value::Str("a".into())]),
-            Value::List(vec![Value::Int(2), Value::Str("b".into())]),
+            Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
+            Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
         ])
     );
 }

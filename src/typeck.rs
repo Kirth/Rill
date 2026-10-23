@@ -793,6 +793,23 @@ impl Checker {
                 }
                 Ok(Type::Unknown)
             }
+            Expr::Slice { base, start, end, .. } => {
+                let base_ty = self.check_expr(base)?;
+                for bound in [start, end].into_iter().flatten() {
+                    let bound_ty = self.check_expr(bound)?;
+                    if !matches!(bound_ty, Type::Int | Type::Unknown) {
+                        return Err(RillError::new(format!(
+                            "slice bounds must be Int, got {bound_ty}"
+                        )));
+                    }
+                }
+                match base_ty {
+                    Type::List(_) | Type::Str | Type::Unknown => Ok(base_ty),
+                    Type::Tuple(_) => Err(RillError::new("cannot slice a Tuple")
+                        .with_help("tuples have a fixed shape; index them instead")),
+                    other => Err(RillError::new(format!("cannot slice {other}"))),
+                }
+            }
             Expr::Field { base, name } => self.check_field(base, name),
             Expr::Binary { op, left, right } => self.check_binary(*op, left, right),
             Expr::Pipe { kind, left, right } => self.check_pipe(*kind, left, right),
@@ -848,9 +865,9 @@ impl Checker {
                     }
                 }
                 let iter_ty = self.check_expr(iter)?;
-                if !matches!(iter_ty, Type::List(_) | Type::Stream | Type::Unknown) {
+                if !matches!(iter_ty, Type::List(_) | Type::Map | Type::Stream | Type::Unknown) {
                     return Err(RillError::new(format!(
-                        "for loop needs List or Stream, got {iter_ty}"
+                        "for loop needs List, Map, or Stream, got {iter_ty}"
                     )));
                 }
                 let parallel = !matches!(mode, ForMode::Sequential);
@@ -860,8 +877,11 @@ impl Checker {
                     self.parallel_floor
                 };
                 self.env.push();
-                let item_ty =
-                    if matches!(iter_ty, Type::Stream) { Type::Map } else { iter_ty.list_item() };
+                let item_ty = match iter_ty {
+                    Type::Stream => Type::Map,
+                    Type::Map => Type::Tuple(vec![Type::Str, Type::Unknown]),
+                    other => other.list_item(),
+                };
                 self.bind_pattern(pattern, item_ty, true)?;
                 self.loop_depth += 1;
                 self.loop_stack.push(None);
@@ -1879,6 +1899,11 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::ListTupleUnknown => {
             Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Unknown])))
         }
+        Return::MapEntries => Type::List(Box::new(Type::Tuple(vec![Type::Str, Type::Unknown]))),
+        Return::ZipPairs => Type::List(Box::new(Type::Tuple(vec![
+            receiver.list_item(),
+            args.first().map_or(Type::Unknown, Type::list_item),
+        ]))),
         Return::ListStr => Type::List(Box::new(Type::Str)),
         Return::ListPath => Type::List(Box::new(Type::Path)),
         Return::ListProcessResult => Type::List(Box::new(Type::ProcessResult)),
@@ -2069,6 +2094,11 @@ fn contains_implicit(expr: &Expr) -> bool {
         }
         Expr::Field { base, .. } => contains_implicit(base),
         Expr::Index { base, index } => contains_implicit(base) || contains_implicit(index),
+        Expr::Slice { base, start, end, .. } => {
+            contains_implicit(base)
+                || start.as_deref().is_some_and(contains_implicit)
+                || end.as_deref().is_some_and(contains_implicit)
+        }
         Expr::Binary { left, right, .. } => contains_implicit(left) || contains_implicit(right),
         Expr::Pipe { left, right, .. } => contains_implicit(left) || contains_implicit(right),
         Expr::RegexMatch { value, .. }
