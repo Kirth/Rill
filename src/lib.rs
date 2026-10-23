@@ -32,7 +32,10 @@ pub struct ProgramRequirements {
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
     program: ast::Program,
+    /// Local modules in dependency order (a module's imports precede it).
     modules: Vec<CompiledModule>,
+    /// Canonical paths of the modules the root program imports directly.
+    imports: Vec<PathBuf>,
     pub requirements: ProgramRequirements,
     pub args: Option<ast::ArgGroup>,
     pub source: SourceUnit,
@@ -40,8 +43,11 @@ pub struct CompiledProgram {
 
 #[derive(Debug, Clone)]
 struct CompiledModule {
+    path: PathBuf,
     source: SourceUnit,
     program: ast::Program,
+    /// Canonical paths of the modules this one imports directly.
+    imports: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,19 +78,19 @@ impl CompilationSession {
             self.begin_loading(path)?;
         }
         let result = (|| {
-            let imports = self
+            let (import_paths, imports) = self
                 .compile_imports(&program, &unit.base_dir)
                 .map_err(|err| attach_source(err, &unit))?;
             let import_refs = imports.iter().collect::<Vec<_>>();
             typeck::check_module(&program, &import_refs).map_err(|err| {
                 err.with_kind(ErrorKind::Type).with_source(unit.name.clone(), unit.source.clone())
             })?;
-            Ok(program)
+            Ok((program, import_paths))
         })();
         if root_path.is_some() {
             self.loading.pop();
         }
-        let program = result?;
+        let (program, imports) = result?;
         let requirements = ProgramRequirements {
             needs_input: program_needs_input(&program.stmts)
                 || self.order.iter().any(|module| program_needs_input(&module.program.stmts)),
@@ -96,28 +102,33 @@ impl CompilationSession {
         Ok(CompiledProgram {
             program,
             modules: self.order.clone(),
+            imports,
             requirements,
             args,
             source: unit,
         })
     }
 
+    /// Compile every local module a program imports; returns their canonical
+    /// paths (deduplicated, in import order) and their exported symbol types.
     fn compile_imports(
         &mut self,
         program: &ast::Program,
         base_dir: &Path,
-    ) -> Result<Vec<typeck::ModuleExports>, RillError> {
+    ) -> Result<(Vec<PathBuf>, Vec<typeck::ModuleExports>), RillError> {
         let mut paths = Vec::new();
         collect_local_imports(&program.stmts, &mut paths);
         let mut seen = BTreeSet::new();
+        let mut import_paths = Vec::new();
         let mut exports = Vec::new();
         for import in paths {
             let path = resolve_module_path(base_dir, &import)?;
             if seen.insert(path.clone()) {
                 exports.push(self.compile_module(&path)?);
+                import_paths.push(path);
             }
         }
-        Ok(exports)
+        Ok((import_paths, exports))
     }
 
     fn compile_module(&mut self, path: &Path) -> Result<typeck::ModuleExports, RillError> {
@@ -137,7 +148,7 @@ impl CompilationSession {
                 base_dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
             };
             let program = parse_source(&source_unit)?;
-            let imports = self
+            let (import_paths, imports) = self
                 .compile_imports(&program, &source_unit.base_dir)
                 .map_err(|err| attach_source(err, &source_unit))?;
             let import_refs = imports.iter().collect::<Vec<_>>();
@@ -145,7 +156,12 @@ impl CompilationSession {
                 err.with_kind(ErrorKind::Type)
                     .with_source(source_unit.name.clone(), source_unit.source.clone())
             })?;
-            let compiled = CompiledModule { source: source_unit, program };
+            let compiled = CompiledModule {
+                path: path.clone(),
+                source: source_unit,
+                program,
+                imports: import_paths,
+            };
             self.order.push(compiled.clone());
             self.cache.insert(path.clone(), CachedModule { exports: exports.clone() });
             Ok(exports)
@@ -479,12 +495,27 @@ fn execute_program(
     environment: BTreeMap<String, String>,
 ) -> Result<types::Value, RillError> {
     let mut evaluator = eval::Evaluator::with_environment(args, input, environment);
+    // Each module runs in its own scope and hands its exported bindings to the
+    // modules (and finally the root program) that import it.
+    let mut exports: BTreeMap<PathBuf, Vec<(String, types::Binding)>> = BTreeMap::new();
     for module in &program.modules {
-        evaluator
-            .eval_module_program(&module.program)
+        let imported = collect_imported_bindings(&module.imports, &exports);
+        let exported = evaluator
+            .eval_module(&module.program, imported)
             .map_err(|error| attach_source(error, &module.source))?;
+        exports.insert(module.path.clone(), exported);
     }
-    evaluator.eval_program(&program.program).map_err(|error| attach_source(error, &program.source))
+    let imported = collect_imported_bindings(&program.imports, &exports);
+    evaluator
+        .eval_program_with_imports(&program.program, imported)
+        .map_err(|error| attach_source(error, &program.source))
+}
+
+fn collect_imported_bindings(
+    imports: &[PathBuf],
+    exports: &BTreeMap<PathBuf, Vec<(String, types::Binding)>>,
+) -> Vec<(String, types::Binding)> {
+    imports.iter().flat_map(|path| exports.get(path).cloned().unwrap_or_default()).collect()
 }
 
 fn attach_source(error: RillError, source: &SourceUnit) -> RillError {

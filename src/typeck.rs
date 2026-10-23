@@ -1916,7 +1916,9 @@ pub(crate) fn check_value_annotation(
     ensure_assignable(&type_from_name(annotation), &type_from_value(value))
 }
 
-fn top_level_names(stmts: &[Stmt]) -> Vec<String> {
+/// Names a module exports: its top-level `let` bindings and `fn`s.  Mutable
+/// `var`s stay private to the module.
+pub(crate) fn top_level_names(stmts: &[Stmt]) -> Vec<String> {
     fn pattern_names(pattern: &LetPattern, names: &mut Vec<String>) {
         match pattern {
             LetPattern::Ident(name) if name != "_" => names.push(name.clone()),
@@ -1933,7 +1935,7 @@ fn top_level_names(stmts: &[Stmt]) -> Vec<String> {
     let mut names = Vec::new();
     for stmt in stmts {
         match stmt.unspanned() {
-            Stmt::Let { pattern, .. } => pattern_names(pattern, &mut names),
+            Stmt::Let { pattern, mutable: false, .. } => pattern_names(pattern, &mut names),
             Stmt::Fn { name, .. } => names.push(name.clone()),
             _ => {}
         }

@@ -1370,3 +1370,89 @@ fn unannotated_propagating_functions_return_consistent_wrappers() {
         ])
     );
 }
+
+// ── Modules run in their own scope ───────────────────────────────────────────
+
+fn compile_in(
+    scratch: &Scratch,
+    root: &str,
+    source: &str,
+) -> Result<rill::CompiledProgram, rill::diagnostic::RillError> {
+    let root_path = scratch.0.join(root);
+    std::fs::write(&root_path, source).unwrap();
+    rill::CompilationSession::new().compile(rill::SourceUnit {
+        name: root_path.display().to_string(),
+        source: source.to_string(),
+        base_dir: scratch.0.clone(),
+    })
+}
+
+fn run_in(scratch: &Scratch, root: &str, source: &str) -> Value {
+    let program = compile_in(scratch, root, source).expect(source);
+    rill::run_compiled(&program, vec![], None).expect(source)
+}
+
+#[test]
+fn module_private_names_do_not_leak() {
+    let scratch = Scratch::new();
+    // Top-level `let` and `fn` are exported; `var`s and names inside bodies are not.
+    std::fs::write(
+        scratch.0.join("m.ril"),
+        "var secret = 1\nlet shared = 10\nfn helper() { let local = 2\nsecret + local }\n",
+    )
+    .unwrap();
+    assert_eq!(run_in(&scratch, "main.ril", "use ./m.ril\nhelper() + shared"), Value::Int(13));
+    for source in ["use ./m.ril\nsecret", "use ./m.ril\nlocal"] {
+        let error =
+            compile_in(&scratch, "leak.ril", source).expect_err("private names stay private");
+        assert!(error.to_string().contains("unknown identifier"), "{error}");
+    }
+}
+
+#[test]
+fn module_vars_are_not_exported_but_lets_and_fns_are() {
+    let scratch = Scratch::new();
+    std::fs::write(
+        scratch.0.join("m.ril"),
+        "var counter = 0\nlet limit = 3\nfn bump() { counter += 1\ncounter }\n",
+    )
+    .unwrap();
+    assert_eq!(run_in(&scratch, "main.ril", "use ./m.ril\nbump()\nbump() + limit"), Value::Int(5));
+    assert!(compile_in(&scratch, "bad.ril", "use ./m.ril\ncounter").is_err());
+}
+
+#[test]
+fn modules_with_the_same_private_name_do_not_clobber_each_other() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join("a.ril"), "let tag = \"a\"\nfn tag_a() { tag }\n").unwrap();
+    std::fs::write(scratch.0.join("b.ril"), "let tag = \"b\"\nfn tag_b() { tag }\n").unwrap();
+    assert_eq!(
+        run_in(&scratch, "main.ril", "use ./a.ril\nuse ./b.ril\ntag_a() + tag_b()"),
+        Value::Str("ab".into())
+    );
+}
+
+#[test]
+fn imported_functions_resolve_names_in_their_own_module() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join("m.ril"), "let greeting = \"module\"\nfn greet() { greeting }\n")
+        .unwrap();
+    assert_eq!(
+        run_in(
+            &scratch,
+            "main.ril",
+            "use ./m.ril\nlet greeting = \"importer\"\ngreet() + greeting"
+        ),
+        Value::Str("moduleimporter".into())
+    );
+}
+
+#[test]
+fn transitive_module_symbols_are_not_visible() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.0.join("inner.ril"), "fn deep() { 1 }\n").unwrap();
+    std::fs::write(scratch.0.join("outer.ril"), "use ./inner.ril\nfn shallow() { deep() + 1 }\n")
+        .unwrap();
+    assert_eq!(run_in(&scratch, "main.ril", "use ./outer.ril\nshallow()"), Value::Int(2));
+    assert!(compile_in(&scratch, "bad.ril", "use ./outer.ril\ndeep()").is_err());
+}

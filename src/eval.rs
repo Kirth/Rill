@@ -126,6 +126,16 @@ impl Env {
         self.current().insert(name, binding);
     }
 
+    /// Add an existing binding (an imported module symbol) to the current scope.
+    fn insert_binding(&mut self, name: String, binding: Binding) {
+        self.current().insert(name, binding);
+    }
+
+    /// The binding for `name` in the innermost scope only.
+    fn binding_in_current(&self, name: &str) -> Option<Binding> {
+        self.scopes.last().and_then(|scope| scope.get(name).cloned())
+    }
+
     /// Reserve a slot for a function declared later in the current block.
     fn hoist(&mut self, name: &str) {
         self.current()
@@ -580,6 +590,18 @@ impl Evaluator {
     }
 
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, RillError> {
+        self.eval_program_with_imports(program, Vec::new())
+    }
+
+    /// Run the root program with the bindings exported by its imports.
+    pub(crate) fn eval_program_with_imports(
+        &mut self,
+        program: &Program,
+        imports: Vec<(String, Binding)>,
+    ) -> Result<Value, RillError> {
+        for (name, binding) in imports {
+            self.env.insert_binding(name, binding);
+        }
         if let Some(group) = program.stmts.iter().find_map(|stmt| match stmt.unspanned() {
             Stmt::Args(group) => Some(group),
             _ => None,
@@ -598,9 +620,32 @@ impl Evaluator {
         }
     }
 
-    pub(crate) fn eval_module_program(&mut self, program: &Program) -> Result<(), RillError> {
-        match self.eval_stmts(&program.stmts).map_err(EvalError::diagnostic)? {
-            Flow::Value(_) | Flow::Return(_) => Ok(()),
+    /// Run a module in its own scope (over the global one) with the bindings
+    /// it imports, and return the bindings it exports: its top-level `let`
+    /// values and `fn` definitions, never its `var`s or private helpers of
+    /// other modules.
+    pub(crate) fn eval_module(
+        &mut self,
+        program: &Program,
+        imports: Vec<(String, Binding)>,
+    ) -> Result<Vec<(String, Binding)>, RillError> {
+        self.env.push();
+        for (name, binding) in imports {
+            self.env.insert_binding(name, binding);
+        }
+        let flow = self.eval_stmts(&program.stmts).map_err(EvalError::diagnostic);
+        let exports = crate::typeck::top_level_names(&program.stmts)
+            .into_iter()
+            .filter_map(|name| {
+                self.env.binding_in_current(&name).and_then(|binding| match binding.slot {
+                    Slot::Value(_) | Slot::Hoisted(_) => Some((name, binding)),
+                    Slot::Cell(_) => None,
+                })
+            })
+            .collect();
+        self.env.pop();
+        match flow? {
+            Flow::Value(_) | Flow::Return(_) => Ok(exports),
             Flow::Propagate(value) => Err(RillError::new(format!(
                 "cannot propagate {} outside a function",
                 value.type_name()
