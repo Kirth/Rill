@@ -354,7 +354,10 @@ impl Checker {
                 self.ensure_assignable_in_parallel(name)?;
                 if matches!(self.env.is_mutable(name), Some(false)) {
                     return Err(RillError::new(format!(
-                        "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
+                        "cannot assign to immutable variable '{name}'"
+                    ))
+                    .with_help(format!(
+                        "declare it with `var {name} = ...` to allow reassignment"
                     )));
                 }
                 self.check_expr(expr)?;
@@ -364,7 +367,10 @@ impl Checker {
                 self.ensure_assignable_in_parallel(name)?;
                 if matches!(self.env.is_mutable(name), Some(false)) {
                     return Err(RillError::new(format!(
-                        "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
+                        "cannot assign to immutable variable '{name}'"
+                    ))
+                    .with_help(format!(
+                        "declare it with `var {name} = ...` to allow reassignment"
                     )));
                 }
                 let collection = self

@@ -1,4 +1,5 @@
 use crate::types::{ErrorKind, ErrorValue};
+use miette::{Diagnostic, LabeledSpan, SourceCode};
 use std::fmt;
 use std::sync::Arc;
 
@@ -14,17 +15,30 @@ impl Span {
     }
 }
 
-#[derive(Debug, Clone, miette::Diagnostic)]
-#[diagnostic(code(rill::error))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// A Rill diagnostic: parse, type, runtime, process, or I/O error, or a
+/// checker warning.  Rendered through miette.
+#[derive(Debug, Clone)]
 pub struct RillError {
-    #[source_code]
     pub source: Option<Arc<miette::NamedSource<String>>>,
-    #[label("{message}")]
-    pub label: Option<miette::SourceSpan>,
     pub message: String,
     pub span: Option<Span>,
     pub exit_code: Option<i32>,
     pub kind: ErrorKind,
+    pub severity: Severity,
+    /// A short suggestion shown under the report ("did you mean ...").
+    pub help: Option<String>,
+    /// Further diagnostics reported together with this one.
+    pub related: Vec<RillError>,
+    /// Overrides the code derived from `kind`.
+    pub code: Option<&'static str>,
+    /// Extra labelled spans, e.g. "this block was opened here".
+    pub secondary: Vec<(Span, String)>,
 }
 
 impl RillError {
@@ -33,33 +47,31 @@ impl RillError {
             message: message.into(),
             span: None,
             source: None,
-            label: None,
             exit_code: None,
             kind: ErrorKind::Runtime,
+            severity: Severity::Error,
+            help: None,
+            related: Vec::new(),
+            code: None,
+            secondary: Vec::new(),
         }
     }
 
     pub fn spanned(message: impl Into<String>, span: Span) -> Self {
-        let message = message.into();
-        Self {
-            label: Some((span.start, span.end.saturating_sub(span.start)).into()),
-            message,
-            span: Some(span),
-            source: None,
-            exit_code: None,
-            kind: ErrorKind::Runtime,
-        }
+        Self::new(message).with_span(span)
+    }
+
+    pub fn warning(message: impl Into<String>, code: &'static str) -> Self {
+        let mut warning = Self::new(message);
+        warning.severity = Severity::Warning;
+        warning.code = Some(code);
+        warning
     }
 
     pub fn exit(code: i32) -> Self {
-        Self {
-            message: format!("exit {code}"),
-            span: None,
-            source: None,
-            label: None,
-            exit_code: Some(code),
-            kind: ErrorKind::Runtime,
-        }
+        let mut error = Self::new(format!("exit {code}"));
+        error.exit_code = Some(code);
+        error
     }
 
     pub fn with_kind(mut self, kind: ErrorKind) -> Self {
@@ -67,11 +79,33 @@ impl RillError {
         self
     }
 
+    /// Attach a span unless one is already present, so the innermost
+    /// (most precise) location wins.
     pub fn with_span(mut self, span: Span) -> Self {
         if self.span.is_none() {
             self.span = Some(span);
-            self.label = Some((span.start, span.end.saturating_sub(span.start)).into());
         }
+        self
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    pub fn with_related(mut self, related: Vec<RillError>) -> Self {
+        self.related = related;
+        self
+    }
+
+    /// Add a secondary labelled span to the report.
+    pub fn with_label(mut self, span: Span, text: impl Into<String>) -> Self {
+        self.secondary.push((span, text.into()));
         self
     }
 
@@ -80,21 +114,119 @@ impl RillError {
             Self::new(format!("{}: {}", error_kind_name(&error.kind), error.message))
                 .with_kind(error.kind.clone());
         if let Some((start, end)) = error.span {
-            diagnostic = Self::spanned(diagnostic.message, Span::new(start, end))
-                .with_kind(error.kind.clone());
+            diagnostic = diagnostic.with_span(Span::new(start, end));
         }
         diagnostic
     }
 
     pub fn with_source(mut self, name: impl Into<String>, source: impl Into<String>) -> Self {
-        let name = name.into();
-        self.source = Some(Arc::new(miette::NamedSource::new(name, source.into())));
-        if self.label.is_none() {
-            if let Some(span) = self.span {
-                self.label = Some((span.start, span.end.saturating_sub(span.start)).into());
+        let source = Arc::new(miette::NamedSource::new(name.into(), source.into()));
+        if self.source.is_none() {
+            self.source = Some(source.clone());
+        }
+        for related in &mut self.related {
+            if related.source.is_none() {
+                related.source = Some(source.clone());
             }
         }
         self
+    }
+
+    /// The diagnostic code shown in reports, e.g. `rill::type`.
+    pub fn code_name(&self) -> &'static str {
+        self.code.unwrap_or(match self.kind {
+            ErrorKind::Parse => "rill::parse",
+            ErrorKind::Type => "rill::type",
+            ErrorKind::Runtime => "rill::runtime",
+            ErrorKind::Process => "rill::process",
+            ErrorKind::Io => "rill::io",
+        })
+    }
+
+    /// One-based line and column of the span start, when source is attached.
+    pub fn location(&self) -> Option<(usize, usize)> {
+        let span = self.span?;
+        let source = self.source.as_ref()?;
+        Some(byte_to_line_col(source.inner(), span.start))
+    }
+
+    /// One-based line and column of the span end, when source is attached.
+    pub fn end_location(&self) -> Option<(usize, usize)> {
+        let span = self.span?;
+        let source = self.source.as_ref()?;
+        Some(byte_to_line_col(source.inner(), span.end))
+    }
+
+    pub fn source_name(&self) -> Option<&str> {
+        self.source.as_ref().map(|source| source.name())
+    }
+
+    /// `name:line:col: message`, for logs and machine-readable output.
+    pub fn render_plain(&self) -> String {
+        match (self.source_name(), self.location()) {
+            (Some(name), Some((line, col))) => format!("{name}:{line}:{col}: {}", self.message),
+            (Some(name), None) => format!("{name}: {}", self.message),
+            _ => self.message.clone(),
+        }
+    }
+}
+
+/// Render a diagnostic the way the CLI does, with or without colour.
+pub fn render(error: &RillError, color: bool, width: usize) -> String {
+    let theme = if color {
+        miette::GraphicalTheme::unicode()
+    } else {
+        miette::GraphicalTheme::unicode_nocolor()
+    };
+    let handler = miette::GraphicalReportHandler::new_themed(theme).with_width(width);
+    let mut output = String::new();
+    if handler.render_report(&mut output, error).is_err() {
+        output = error.render_plain();
+    }
+    output
+}
+
+impl Diagnostic for RillError {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        Some(Box::new(self.code_name()))
+    }
+
+    fn severity(&self) -> Option<miette::Severity> {
+        Some(match self.severity {
+            Severity::Error => miette::Severity::Error,
+            Severity::Warning => miette::Severity::Warning,
+        })
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        self.help.as_ref().map(|help| Box::new(help) as Box<dyn fmt::Display>)
+    }
+
+    fn source_code(&self) -> Option<&dyn SourceCode> {
+        self.source.as_deref().map(|source| source as &dyn SourceCode)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+        let to_span = |span: Span| {
+            miette::SourceSpan::from((span.start, span.end.saturating_sub(span.start)))
+        };
+        let primary = self.span.map(|span| {
+            LabeledSpan::new_primary_with_span(Some(self.message.clone()), to_span(span))
+        });
+        let secondary = self.secondary.iter().map(move |(span, text)| {
+            LabeledSpan::new_with_span(Some(text.clone()), to_span(*span))
+        });
+        if primary.is_none() && self.secondary.is_empty() {
+            return None;
+        }
+        Some(Box::new(primary.into_iter().chain(secondary)))
+    }
+
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
+        if self.related.is_empty() {
+            return None;
+        }
+        Some(Box::new(self.related.iter().map(|related| related as &dyn Diagnostic)))
     }
 }
 
@@ -117,16 +249,9 @@ fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
 
 impl fmt::Display for RillError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)?;
-        if let Some(span) = self.span {
-            if let Some(src) = &self.source {
-                let (line, col) = byte_to_line_col(src.inner(), span.start);
-                write!(f, " at {line}:{col}")?;
-            } else {
-                write!(f, " at {}..{}", span.start, span.end)?;
-            }
-        }
-        Ok(())
+        // The headline is the message alone; miette prints the location in
+        // the source snippet, and `render_plain` gives `name:line:col`.
+        write!(f, "{}", self.message)
     }
 }
 

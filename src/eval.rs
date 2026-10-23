@@ -197,9 +197,10 @@ impl Env {
         let cell = match &binding.slot {
             Slot::Cell(cell) => cell.clone(),
             Slot::Value(_) => {
-                return Err(RillError::new(format!(
-                    "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
-                )))
+                return Err(RillError::new(format!("cannot assign to immutable variable '{name}'"))
+                    .with_help(format!(
+                        "declare it with `var {name} = ...` to allow reassignment"
+                    )))
             }
             Slot::Hoisted(_) => {
                 return Err(RillError::new(format!("cannot assign to function '{name}'")))
@@ -817,12 +818,23 @@ impl Evaluator {
     }
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
+        // Kept small on purpose: it strips the span wrapper and delegates, so a
+        // nested Rill call costs one large frame here instead of two.
+        match stmt {
+            Stmt::Located { stmt, span } => {
+                self.eval_stmt_inner(stmt).map_err(|error| match error {
+                    EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
+                    other => other,
+                })
+            }
+            other => self.eval_stmt_inner(other),
+        }
+    }
+
+    fn eval_stmt_inner(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
         self.check_cancelled()?;
         match stmt {
-            Stmt::Located { stmt, span } => self.eval_stmt(stmt).map_err(|error| match error {
-                EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
-                other => other,
-            }),
+            Stmt::Located { .. } => self.eval_stmt(stmt),
             Stmt::Use(module) => {
                 let _ = module;
                 Ok(Flow::Value(Value::Null))
@@ -1051,12 +1063,22 @@ impl Evaluator {
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, EvalError> {
+        // Small wrapper for the same reason as `eval_stmt`.
+        match expr {
+            Expr::Located { expr, span } => {
+                self.eval_expr_inner(expr).map_err(|error| match error {
+                    EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
+                    flow => flow,
+                })
+            }
+            other => self.eval_expr_inner(other),
+        }
+    }
+
+    fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value, EvalError> {
         self.check_cancelled()?;
         match expr {
-            Expr::Located { expr, span } => self.eval_expr(expr).map_err(|error| match error {
-                EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
-                flow => flow,
-            }),
+            Expr::Located { .. } => self.eval_expr(expr),
             Expr::Literal(value) => self.eval_literal(value),
             Expr::Ident(name) => {
                 if name == "none" {
