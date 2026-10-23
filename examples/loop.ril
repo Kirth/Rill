@@ -1,0 +1,20 @@
+# Mutable bindings need `var`; `let` bindings are fixed.
+var i = 0
+var f = "foo"
+
+while i < 10 {
+    i += 1
+    f += "fa"
+}
+
+print(i)
+print(f)
+
+let maybe: Int? = none
+print "interpolated {maybe} and {some(3)}"
+
+let first_square_over_50 = loop {
+    i += 1
+    if i * i > 50 { break i * i }
+}
+print(first_square_over_50)

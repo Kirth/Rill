@@ -1,0 +1,8 @@
+use json
+let text = "\{\"zeta\": 1, \"alpha\": \{\"nested\": [1, 2.5, \"s\", null, true]\}\}"
+let value = json.parse(text)
+print(value.keys())
+print(json.stringify(value))
+print(value.alpha.nested[1] * 2)
+print({b: 1, a: [1, 2]}.to_json())
+print(text.parse_json().zeta)

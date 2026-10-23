@@ -1,0 +1,4 @@
+input lines
+for line in input.lines {
+    print "{line.len()}:{line.upper()}"
+}

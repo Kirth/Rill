@@ -1,0 +1,18 @@
+#!/usr/bin/env rill
+# A declarative CLI: `rill examples/args_demo.ril --help` prints the usage.
+
+args {
+    verbose: Bool = false short="v" description="print every step"
+    retries: Int = 3 short="r" description="attempts before giving up"
+    config: Option[Path] description="override the config file"
+    target: Str description="what to deploy"
+}
+
+if args.verbose { warn "deploying {args.target} with {args.retries} retries" }
+
+let config = match args.config {
+    some(p) => p,
+    none => path("deploy.toml"),
+}
+
+print "target={args.target} retries={args.retries} config={config}"

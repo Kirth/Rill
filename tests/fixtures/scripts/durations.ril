@@ -1,0 +1,4 @@
+print(1s + 500ms, 2 * 1s, 1s / 2, 1500ms > 1s, 3s / 1.5s, 90s, 1.5s, 250ms, 2h)
+print((90s).secs(), (1500ms).ms(), (1s).as_secs_float())
+let total = 100ms + 200ms + 700ms
+print(total, total == 1s)

@@ -1,0 +1,9 @@
+let name = "rill"
+let xs = [10, 20, 30]
+let m = {k: "v"}
+print "hello {name.upper()} {xs[0] + xs[1]} {m.get("k")} \{literal\} \$HOME ${UNSET_RILL_VAR:-fallback} cost: $5"
+print(r"raw \n {name} $name")
+print("\u{1F600} tab[\t] quote[\"]")
+print("{xs.map(|x| x * 2)}")
+print("padded: {name.len()}")
+print "{some(1)} {none} {ok(2)} {err("bad")}"

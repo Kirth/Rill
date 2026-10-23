@@ -1,0 +1,32 @@
+[zeta, alpha, mid]
+zeta=1
+alpha=2
+mid=3
+[(zeta, 1), (alpha, 2), (mid, 3)]
+[1, 2, 3]
+[2, 1, 3]
+3
+some(3)
+none
+some(2)
+some(1)
+none
+[(1, a), (2, b), (3, c)]
+[1, 2]
+[3, 1]
+[3, 1]
+[1, 2]
+el
+[0, 3, 6, 9]
+4
+true
+true
+true
+true
+[1, 2, 3]
+[3, 2]
+some(3)
+true
+[0, 1, 4, 9, 16]
+[0, 1]
+0,1,4,9,16

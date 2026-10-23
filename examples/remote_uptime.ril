@@ -1,0 +1,22 @@
+#!/usr/bin/env rill
+# Fan out over hosts with a bounded worker pool; collect (host, result) tuples
+# and report in input order.  Hosts are placeholders; edit them before running.
+
+let hosts = ["web-1.example.internal", "web-2.example.internal", "db-1.example.internal"]
+
+let reports = parallel(4) for host in hosts {
+    let result = run ssh -o ConnectTimeout=5 $host uptime
+    emit (host, result)
+}
+
+var failed = 0
+for (host, result) in reports {
+    if result.ok {
+        print "{host}: {result.out.trim()}"
+    } else {
+        failed += 1
+        warn "{host}: status {result.status}: {result.err.trim()}"
+    }
+}
+
+if failed > 0 { exit(1) }

@@ -1,0 +1,11 @@
+let r = run printf "b\na\nc\n" | run sort
+print(r.out.lines())
+let lines = run printf "one\ntwo\nthree\n" | run grep o | .lines() |> .map(|l| l.upper())
+print(lines)
+let words = ["x y", "z"]
+let quoted = run printf "%s|" $*words
+print(quoted.out)
+let count = run printf "a\nb\n" | .lines() |> .len()
+print(count)
+let failed = run false
+print(failed.ok, failed.status)

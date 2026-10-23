@@ -1,0 +1,21 @@
+let grade = |n| if n >= 90 { "A" } else if n >= 80 { "B" } else { "C" }
+print(grade(95), grade(85), grade(10))
+var i = 0
+let found = loop {
+    i += 1
+    if i * i > 50 { break i }
+}
+print(found)
+for x in 0..10 {
+    if x % 2 == 0 { continue }
+    if x > 7 { break }
+    prin "{x} "
+}
+print("")
+let squares = for x in 1..=4 { emit x * x }
+print(squares)
+var n = 3
+while n > 0 { n -= 1 }
+print(n)
+print(7 % 3, -7 % 3, 2 ** 10, -2 ** 2, 7 / 2, 7.0 / 2, 1 == 1.0, "b" > "a")
+print(some(1) ?? 0, none ?? 5, null ?? "d")

@@ -1,0 +1,6 @@
+args {
+    verbose: Bool = false short="v" description="be chatty"
+    port: Int = 8080 short="p"
+    name: Str description="who to greet"
+}
+print(args.name, args.port, args.verbose)

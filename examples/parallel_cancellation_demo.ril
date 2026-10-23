@@ -1,0 +1,45 @@
+# Bounded parallelism keeps result order stable even when jobs finish out of order.
+# The worker pool is shared and capped at the machine's available parallelism.
+print "1. parallel_map: completion messages may be out of order"
+
+let ordered = [1, 2, 3, 4].parallel_map(|job| {
+    if job == 1 { 400ms.sleep() }
+    if job == 2 { 300ms.sleep() }
+    if job == 3 { 200ms.sleep() }
+    if job == 4 { 100ms.sleep() }
+
+    print "   job $job finished"
+    job * 10
+})
+
+print "   results remain in input order:"
+print(ordered)
+
+# A race does not return until its losing workers have stopped. The slow branch
+# starts an external command that would create a marker after one second. The
+# fast branch wins first, so cancellation kills that command and its shell child.
+print "2. race for: the first value wins and the loser is cancelled"
+
+let marker = (sh "mktemp -u /tmp/rill-race-demo.XXXXXX").out.trim()
+
+let winner = race for candidate in ["slow", "fast"] {
+    if candidate == "slow" {
+        sh "sleep 1; printf leaked > '$marker'"
+        emit "slow"
+    }
+
+    if candidate == "fast" {
+        100ms.sleep()
+        emit "fast"
+    }
+}
+
+print "   winner: {winner}"
+
+# Wait longer than the losing command would have needed. If cancellation were
+# detached or incomplete, the marker would now exist.
+1200ms.sleep()
+print "   losing command created its marker (expected false): {path(marker).exists()}"
+
+# Keep the demo self-cleaning even when run against a broken implementation.
+sh "rm -f '$marker'"

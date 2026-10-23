@@ -1,0 +1,4 @@
+args {
+    name: Str
+}
+print(args.name)

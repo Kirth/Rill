@@ -1,0 +1,30 @@
+fn number(n: Int) -> Str {
+    match n {
+        0 => "zero",
+        1 | 2 => "small",
+        n if n < 0 => "negative",
+        _ => "other",
+    }
+}
+fn shape(v) -> Str {
+    match v {
+        (a, b) => "pair {a},{b}",
+        [] => "empty",
+        [x] => "single {x}",
+        [h, ..] => "list starting {h}",
+        "yes" => "affirmative",
+        _ => "other",
+    }
+}
+for n in [0, 2, -4, 9] { print(number(n)) }
+for v in [(1, 2), [], [9], [7, 8], "yes", 3.5] { print(shape(v)) }
+let r: Result[Int, Error] = ok(3)
+print(match r { ok(n) => n * 2, err(e) => -1 })
+let o: Option[Str] = none
+print(match o { some(s) => s, none => "nothing" })
+let line = "user=bob status=200"
+match line {
+    /user=(?<user>\w+) status=(?<status>\d+)/ => print "{user}:{status}",
+    _ => print "no match",
+}
+if line =~ /status=(?<code>\d+)/ { print(code) }

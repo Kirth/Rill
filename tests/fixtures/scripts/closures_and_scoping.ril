@@ -1,0 +1,20 @@
+var total = 0
+[1, 2, 3].map(|x| { total += x })
+print(total)
+let adders = [1, 2, 3].map(|n| |x| x + n)
+print(adders.map(|f| f(10)))
+fn outer() -> Int {
+    fn helper(x: Int) -> Int { x * 2 }
+    helper(21)
+}
+print(outer())
+fn even(n: Int) -> Bool { if n == 0 { true } else { odd(n - 1) } }
+fn odd(n: Int) -> Bool { if n == 0 { false } else { even(n - 1) } }
+print(even(10), odd(7))
+let base = 100
+fn uses_base() -> Int { base + 1 }
+print(uses_base())
+let make = || 42
+print(make())
+fn greet(name, greeting = "hello", punct = "!") -> Str { "{greeting} {name}{punct}" }
+print(greet("bob"), greet("bob", punct = "?"), greet(greeting = "hi", name = "ann"))

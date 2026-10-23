@@ -1,0 +1,10 @@
+env.RILL_DEMO = "set"
+print(env.RILL_DEMO, env.get("RILL_FIXTURE"))
+with env { RILL_INNER = "in" } {
+    let r = run sh -c "echo \$RILL_INNER \$RILL_DEMO"
+    print(r.out.trim())
+}
+let r = run sh -c "echo \$\{RILL_INNER:-unset\}"
+print(r.out.trim())
+let p = path("a/b/../c.txt")
+print(p.basename(), p.extension(), p.stem(), p.parent())

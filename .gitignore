@@ -1,13 +1,15 @@
 /target/
-scripts/
+/scripts/
+*.snap.new
+.direnv/
+result
+
+# Stale notes superseded by docs/; kept ignored until removed from the checkout.
 working/
-METHODS.md
 afu.md
 asses2.txt
 assess.txt
 design0.md
 language_overview.txt
+METHODS.md
 prop_on_host.txt
-*.snap.new
-.direnv/
-result

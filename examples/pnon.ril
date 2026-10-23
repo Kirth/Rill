@@ -1,0 +1,5 @@
+# Parallel bodies collect results with `emit`; results keep input order.
+let out = parallel for i in [1, 2, 3] {
+    emit i * i
+}
+print(out)

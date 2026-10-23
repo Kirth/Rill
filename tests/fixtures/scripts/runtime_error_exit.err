@@ -1,0 +1,9 @@
+rill::runtime
+
+  × index 3 out of bounds (len 1)
+   ╭─[runtime_error_exit.ril:2:7]
+ 1 │ let xs = [1]
+ 2 │ print(xs[3])
+   ·       ──┬──
+   ·         ╰── index 3 out of bounds (len 1)
+   ╰────

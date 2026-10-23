@@ -1,0 +1,3 @@
+let PI_ISH = 3
+fn helper(x: Int) -> Int { x + 1 }
+fn double(x: Int) -> Int { helper(x) * 2 - 2 }

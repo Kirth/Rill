@@ -1,0 +1,7 @@
+args {
+    verbose: Bool = false short="v"
+    port: Int = 8080 short="p"
+    tag: Option[Str]
+    name: Str
+}
+print(args.name, args.port, args.verbose, args.tag)

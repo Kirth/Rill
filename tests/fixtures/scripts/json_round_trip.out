@@ -1,0 +1,5 @@
+[zeta, alpha]
+{"zeta":1,"alpha":{"nested":[1,2.5,"s",null,true]}}
+5
+{"b":1,"a":[1,2]}
+1

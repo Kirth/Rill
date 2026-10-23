@@ -1,0 +1,10 @@
+Usage: rill <script> [options] <name>
+
+Arguments:
+  <name>                 who to greet
+
+Options:
+  -v, --verbose          be chatty [default: false]
+  -p, --port <Int>       [default: 8080]
+      --name <Str>       who to greet [required]
+  -h, --help             show this help

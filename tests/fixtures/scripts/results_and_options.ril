@@ -1,0 +1,21 @@
+fn parse_port(text: Str) -> Result[Int, Error] {
+    if text == "" { return err("empty port") }
+    ok(text.len() * 1000)
+}
+fn load(text: Str) -> Result[Str, Error] {
+    let port = parse_port(text)?
+    ok("port {port}")
+}
+print(load("ab"), load(""))
+print(parse_port("x").map(|p| p + 1), parse_port("").map_err(|e| "wrapped"))
+print(parse_port("abc").and_then(|p| if p > 2000 { ok(p) } else { err("low") }))
+print(parse_port("").unwrap_or(7), parse_port("").unwrap_or_else(|e| 8))
+let maybe: Option[Int] = some(4)
+print(maybe.map(|x| x * 2), maybe.ok_or("none"), none.ok_or("none"), maybe.is_some())
+fn infer(x: Int) { let v = parse_port("ab")?; v + x }
+print(infer(1))
+fn first_even(xs: List[Int]) -> Option[Int] {
+    for x in xs { if x % 2 == 0 { return some(x) } }
+    none
+}
+print(first_even([1, 3, 4]), first_even([1]))

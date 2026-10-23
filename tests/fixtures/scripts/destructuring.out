@@ -1,0 +1,7 @@
+1
+two
+10
+20
+web
+80
+{outer: {inner: 5}, xs: [{n: 1}, {n: 42}], new: k}

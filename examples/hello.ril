@@ -1,0 +1,12 @@
+#!/usr/bin/env rill
+# The smallest useful script: a command, its result, and interpolation.
+
+let who = run! whoami
+print "hello, {who.trim()}"
+
+let r = run uname -s
+if r.ok {
+    print "running on {r.out.trim()}"
+} else {
+    warn "uname failed with status {r.status}"
+}

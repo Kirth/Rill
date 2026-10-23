@@ -1,0 +1,7 @@
+# Functions as values: a typed callback parameter and a closure.
+fn apply(cb: Fn(Str) -> Str, value: Str) -> Str {
+    cb(value)
+}
+
+let shout = |s| s.upper() + "!"
+print(apply(shout, "hello"))

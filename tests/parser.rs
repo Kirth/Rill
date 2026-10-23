@@ -243,3 +243,19 @@ fn try_operator_directly_after_identifier() {
     assert!(matches!(parse_one("o?").unspanned(), Expr::Try(inner)
         if matches!(inner.unspanned(), Expr::Ident(name) if name == "o")));
 }
+
+#[test]
+fn braces_in_expression_position_are_blocks_unless_they_look_like_maps() {
+    let value =
+        |source: &str| rill::run_source(source, vec![]).unwrap_or_else(|e| panic!("{source}: {e}"));
+    use rill::types::Value;
+    assert_eq!(
+        value("let r: Result[Int, Error] = err(\"x\")\nmatch r { ok(v) => v, err(e) => { let n = 1\n n + 1 } }"),
+        Value::Int(2)
+    );
+    assert_eq!(value("let x = { let a = 1; a + 1 }\nx"), Value::Int(2));
+    assert_eq!(value("let m = {}\nm.len()"), Value::Int(0));
+    assert_eq!(value("let m = {a: 1, \"b-c\": 2}\nm.len()"), Value::Int(2));
+    assert_eq!(value("let m = {\n  a: 1,\n}\nm.a"), Value::Int(1));
+    assert_eq!(value("print {a: 1}\n2"), Value::Int(2));
+}

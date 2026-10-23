@@ -2015,12 +2015,34 @@ impl Parser {
                 self.expect(TokenKind::RBracket)?;
                 Ok(Expr::List(values))
             }
+            TokenKind::LBrace if !self.brace_starts_map() => {
+                // A block expression: `{ stmts; value }`, as in a match arm.
+                // Hand the brace back so parse_block sees the opening token.
+                self.tokens.push_front(Token { kind: TokenKind::LBrace, span: token.span });
+                let body = self.parse_block()?;
+                Ok(Expr::Block(body))
+            }
             TokenKind::LBrace => {
                 let mut pairs = Vec::new();
                 self.skip_separators();
                 if !self.at(TokenKind::RBrace) {
                     loop {
-                        let key = self.expect_ident()?;
+                        let key = match self.peek_kind() {
+                            TokenKind::Str(_) => {
+                                let token = self.next();
+                                let TokenKind::Str(parts) = token.kind else { unreachable!() };
+                                match self.build_string(parts)? {
+                                    Expr::Literal(Literal::Str(text)) => text,
+                                    _ => {
+                                        return Err(RillError::spanned(
+                                            "map keys cannot be interpolated",
+                                            token.span,
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => self.expect_ident()?,
+                        };
                         self.expect(TokenKind::Colon)?;
                         let value = self.parse_expr(0)?;
                         pairs.push((key, value));
@@ -2608,6 +2630,22 @@ impl Parser {
 
     fn peek_kind(&self) -> TokenKind {
         self.peek().kind.clone()
+    }
+
+    /// After consuming `{`: whether what follows is a map literal (`}`, or a
+    /// key followed by `:`) rather than a block of statements.
+    fn brace_starts_map(&self) -> bool {
+        let mut n = 0;
+        while matches!(self.peek_n_kind(n), TokenKind::Newline | TokenKind::Semi) {
+            n += 1;
+        }
+        match self.peek_n_kind(n) {
+            TokenKind::RBrace => true,
+            TokenKind::Ident(_) | TokenKind::Str(_) => {
+                matches!(self.peek_n_kind(n + 1), TokenKind::Colon)
+            }
+            _ => false,
+        }
     }
 
     fn peek_n_kind(&self, n: usize) -> TokenKind {

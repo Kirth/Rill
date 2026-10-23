@@ -1,0 +1,2 @@
+use ./helpers/math.ril
+print(double(4), PI_ISH)

@@ -1,0 +1,18 @@
+#!/usr/bin/env rill
+# Byte pipelines into values, regex captures, and an insertion-ordered map
+# used as a counter.  Reads lines from stdin or from the files given as
+# arguments: `rill examples/log_errors.ril /var/log/syslog`.
+
+input lines
+
+var by_unit = {}
+for line in input.lines {
+    if line =~ /(?<unit>[\w.-]+)\[\d+\]: .*(?<level>error|failed)/ {
+        by_unit[unit] = (by_unit.get(unit) ?? 0) + 1
+    }
+}
+
+for (unit, count) in by_unit {
+    print "{unit}: {count}"
+}
+print "{by_unit.len()} units reported errors"

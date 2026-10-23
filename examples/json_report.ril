@@ -1,0 +1,24 @@
+#!/usr/bin/env rill
+# Results with `?`, Option combinators, and JSON in and out.
+
+fn read_config(file: Path) -> Result[Map, Error] {
+    let text = file.read_text()?
+    ok(text.parse_json())
+}
+
+fn summarise(config: Map) -> Map {
+    let services = config.get("services") ?? []
+    {
+        name: config.get("name") ?? "unnamed",
+        service_count: services.len(),
+        first_service: services.first().map(|s| s.get("name")).unwrap_or("none"),
+    }
+}
+
+match read_config(path("config.json")) {
+    ok(config) => print(summarise(config).to_json_pretty()),
+    err(e) => {
+        warn "could not read config: {e}"
+        exit(2)
+    }
+}

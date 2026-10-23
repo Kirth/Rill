@@ -1,0 +1,9 @@
+let (a, b) = (1, "two")
+let [h, t] = [10, 20]
+let {name, port: p} = {name: "web", port: 80}
+print(a, b, h, t, name, p)
+var m = {outer: {inner: 1}, xs: [{n: 1}, {n: 2}]}
+m.outer.inner = 5
+m.xs[-1].n += 40
+m["new"] = "k"
+print(m)
