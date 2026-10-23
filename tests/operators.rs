@@ -99,3 +99,55 @@ fn inclusive_range_and_precedence() {
     assert_eq!(run("1 + 2 * 3 % 4 == 3 && !false"), Value::Bool(true));
     assert_eq!(run("let r = run date +%s\nr.ok"), Value::Bool(true));
 }
+
+#[test]
+fn durations_support_arithmetic_comparison_and_accessors() {
+    use std::time::Duration;
+    assert_eq!(run("1s + 500ms"), Value::Duration(Duration::from_millis(1500)));
+    assert_eq!(run("2 * 1s"), Value::Duration(Duration::from_secs(2)));
+    assert_eq!(run("1s * 1.5"), Value::Duration(Duration::from_millis(1500)));
+    assert_eq!(run("1s / 2"), Value::Duration(Duration::from_millis(500)));
+    assert_eq!(run("3s / 1.5s"), Value::Float(2.0));
+    assert_eq!(run("5s % 2s"), Value::Duration(Duration::from_secs(1)));
+    assert_eq!(run("1500ms > 1s"), Value::Bool(true));
+    assert_eq!(run("1s == 1000ms"), Value::Bool(true));
+    assert_eq!(
+        run("var t = 1s\nt += 250ms\nt *= 2\nt"),
+        Value::Duration(Duration::from_millis(2500))
+    );
+    assert_eq!(
+        run("[1500ms.secs(), 1500ms.ms(), 1500ms.us(), 1500ms.ns()]"),
+        Value::List(vec![
+            Value::Int(1),
+            Value::Int(1500),
+            Value::Int(1_500_000),
+            Value::Int(1_500_000_000)
+        ])
+    );
+    assert_eq!(run("1500ms.as_secs_float()"), Value::Float(1.5));
+    assert!(fails("1s - 2s").contains("underflow"));
+    assert!(fails("1s * -1").contains("negative"));
+    assert!(check_err("1s * 1s").contains("not defined for Duration and Duration"));
+    assert!(check_err("1s + 1").contains("not defined for Duration and Int"));
+}
+
+#[test]
+fn durations_display_like_go() {
+    for (source, expected) in [
+        ("0s", "0s"),
+        ("100ns", "100ns"),
+        ("1500ns", "1.5us"),
+        ("250ms", "250ms"),
+        ("1.5s", "1.5s"),
+        ("90s", "1m30s"),
+        ("1h", "1h"),
+        ("5400s", "1h30m"),
+        ("2m + 5.5s", "2m5.5s"),
+        ("3h + 2m + 5s", "3h2m5s"),
+    ] {
+        assert_eq!(run(&format!("Str({source})")), Value::Str(expected.into()), "{source}");
+    }
+    assert_eq!(run("(20 * 1024 * 1024).human_size()"), Value::Str("20.0 MiB".into()));
+    assert_eq!(run("20MiB.human_size()"), Value::Str("20.0 MiB".into()));
+    assert_eq!(run("512.human_size()"), Value::Str("512 B".into()));
+}

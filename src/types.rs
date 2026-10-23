@@ -226,7 +226,7 @@ impl Value {
             Value::List(v) => v.iter().map(Value::as_string_lossy).collect::<Vec<_>>().join("\n"),
             Value::Tuple(_) => format!("{self}"),
             Value::Map(_) => format!("{self}"),
-            Value::Duration(v) => format!("{v:?}"),
+            Value::Duration(v) => format_duration(*v),
             Value::Path(v) => v.display().to_string(),
             Value::Regex(v) => v.clone(),
             Value::Error(v) => v.message.clone(),
@@ -281,7 +281,7 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Duration(v) => write!(f, "{v:?}"),
+            Value::Duration(v) => write!(f, "{}", format_duration(*v)),
             Value::Path(v) => write!(f, "{}", v.display()),
             Value::Regex(v) => write!(f, "/{v}/"),
             Value::Error(v) => write!(f, "{}: {}", error_kind_name(&v.kind), v.message),
@@ -294,6 +294,62 @@ impl fmt::Display for Value {
             Value::Stream(_) => write!(f, "<stream>"),
             Value::Function(_) => write!(f, "<function>"),
         }
+    }
+}
+
+/// Go-style duration text: `1h30m`, `2m5.5s`, `1.5s`, `250ms`, `100ns`, `0s`.
+pub fn format_duration(duration: Duration) -> String {
+    let nanos = duration.as_nanos();
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+    if nanos < 1_000 {
+        return format!("{nanos}ns");
+    }
+    if nanos < 1_000_000 {
+        return format!("{}us", trim_float(nanos as f64 / 1e3));
+    }
+    if nanos < 1_000_000_000 {
+        return format!("{}ms", trim_float(nanos as f64 / 1e6));
+    }
+    let total_secs = duration.as_secs();
+    let (hours, minutes, secs) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
+    let mut out = String::new();
+    if hours > 0 {
+        out.push_str(&format!("{hours}h"));
+    }
+    if minutes > 0 {
+        out.push_str(&format!("{minutes}m"));
+    }
+    let subsec = duration.subsec_nanos();
+    if secs > 0 || subsec > 0 || out.is_empty() {
+        out.push_str(&format!("{}s", trim_float(secs as f64 + subsec as f64 / 1e9)));
+    }
+    out
+}
+
+/// Format with up to nine decimals and no trailing zeros.
+fn trim_float(value: f64) -> String {
+    let text = format!("{value:.9}");
+    let text = text.trim_end_matches('0');
+    text.trim_end_matches('.').to_string()
+}
+
+/// Human-readable byte count in binary units: `20.0 MiB`.
+pub fn format_size(bytes: i64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let magnitude = bytes.unsigned_abs() as f64;
+    let mut unit = 0;
+    let mut value = magnitude;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let sign = if bytes < 0 { "-" } else { "" };
+    if unit == 0 {
+        format!("{sign}{} B", magnitude as u64)
+    } else {
+        format!("{sign}{value:.1} {}", UNITS[unit])
     }
 }
 

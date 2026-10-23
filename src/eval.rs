@@ -1987,6 +1987,22 @@ impl Evaluator {
                 let default = self.eval_expr(&args[0])?;
                 Ok(value.map(|value| *value).unwrap_or(default))
             }
+            (Structural::DurationSecs, Value::Duration(d)) => Ok(Value::Int(d.as_secs() as i64)),
+            (Structural::DurationMillis, Value::Duration(d)) => {
+                Ok(Value::Int(d.as_millis().min(i64::MAX as u128) as i64))
+            }
+            (Structural::DurationMicros, Value::Duration(d)) => {
+                Ok(Value::Int(d.as_micros().min(i64::MAX as u128) as i64))
+            }
+            (Structural::DurationNanos, Value::Duration(d)) => {
+                Ok(Value::Int(d.as_nanos().min(i64::MAX as u128) as i64))
+            }
+            (Structural::DurationSecsFloat, Value::Duration(d)) => {
+                Ok(Value::Float(d.as_secs_f64()))
+            }
+            (Structural::HumanSize, Value::Int(bytes)) => {
+                Ok(Value::Str(crate::types::format_size(bytes)))
+            }
             _ => unreachable!("registry validated structural receiver"),
         }
     }
@@ -3664,6 +3680,9 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
     if let (Value::Str(a), Value::Str(b), BinaryOp::Add) = (&left, &right, op) {
         return Ok(Value::Str(format!("{a}{b}")));
     }
+    if matches!(left, Value::Duration(_)) || matches!(right, Value::Duration(_)) {
+        return duration_binary(left, right, op);
+    }
     check_numeric_operands(&left, &right, op)?;
     if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
         let value = match op {
@@ -3813,6 +3832,76 @@ fn check_numeric_operands(left: &Value, right: &Value, op: BinaryOp) -> Result<(
         left.type_name(),
         right.type_name()
     )))
+}
+
+/// Arithmetic involving a Duration: `+`/`-` between durations, scaling by a
+/// number, dividing by a number, and the ratio or remainder of two durations.
+fn duration_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, RillError> {
+    use std::time::Duration;
+    let overflow = || RillError::new("duration overflow");
+    let scale = |d: Duration, factor: f64| -> Result<Value, RillError> {
+        if !factor.is_finite() || factor < 0.0 {
+            return Err(RillError::new("a duration cannot be scaled by a negative number"));
+        }
+        Duration::try_from_secs_f64(d.as_secs_f64() * factor)
+            .map(Value::Duration)
+            .map_err(|_| overflow())
+    };
+    match (&left, &right, op) {
+        (Value::Duration(a), Value::Duration(b), BinaryOp::Add) => {
+            a.checked_add(*b).map(Value::Duration).ok_or_else(overflow)
+        }
+        (Value::Duration(a), Value::Duration(b), BinaryOp::Sub) => a
+            .checked_sub(*b)
+            .map(Value::Duration)
+            .ok_or_else(|| RillError::new("duration underflow: the result would be negative")),
+        (Value::Duration(d), Value::Int(n), BinaryOp::Mul)
+        | (Value::Int(n), Value::Duration(d), BinaryOp::Mul) => {
+            if *n < 0 {
+                return Err(RillError::new("a duration cannot be scaled by a negative number"));
+            }
+            match u32::try_from(*n) {
+                Ok(n) => d.checked_mul(n).map(Value::Duration).ok_or_else(overflow),
+                Err(_) => scale(*d, *n as f64),
+            }
+        }
+        (Value::Duration(d), Value::Float(f), BinaryOp::Mul)
+        | (Value::Float(f), Value::Duration(d), BinaryOp::Mul) => scale(*d, *f),
+        (Value::Duration(d), Value::Int(n), BinaryOp::Div) => {
+            if *n <= 0 {
+                return Err(RillError::new("a duration can only be divided by a positive number"));
+            }
+            match u32::try_from(*n) {
+                Ok(n) => d.checked_div(n).map(Value::Duration).ok_or_else(overflow),
+                Err(_) => scale(*d, 1.0 / *n as f64),
+            }
+        }
+        (Value::Duration(d), Value::Float(f), BinaryOp::Div) => {
+            if !(*f > 0.0) {
+                return Err(RillError::new("a duration can only be divided by a positive number"));
+            }
+            scale(*d, 1.0 / *f)
+        }
+        (Value::Duration(a), Value::Duration(b), BinaryOp::Div) => {
+            if b.is_zero() {
+                return Err(RillError::new("division by a zero duration"));
+            }
+            Ok(Value::Float(a.as_secs_f64() / b.as_secs_f64()))
+        }
+        (Value::Duration(a), Value::Duration(b), BinaryOp::Rem) => {
+            if b.is_zero() {
+                return Err(RillError::new("remainder by a zero duration"));
+            }
+            let nanos = a.as_nanos() % b.as_nanos();
+            Ok(Value::Duration(Duration::from_nanos(nanos as u64)))
+        }
+        _ => Err(RillError::new(format!(
+            "operator '{}' is not defined for {} and {}",
+            operator_symbol(op),
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
 }
 
 fn operator_symbol(op: BinaryOp) -> &'static str {

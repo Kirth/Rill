@@ -1261,6 +1261,31 @@ impl Checker {
             | BinaryOp::Mul
             | BinaryOp::Div
             | BinaryOp::Rem
+            | BinaryOp::Pow
+                if left_ty == Type::Duration || right_ty == Type::Duration =>
+            {
+                let number = |ty: &Type| matches!(ty, Type::Int | Type::Float | Type::Unknown);
+                match (op, &left_ty, &right_ty) {
+                    (BinaryOp::Add | BinaryOp::Sub, Type::Duration, Type::Duration) => {
+                        Ok(Type::Duration)
+                    }
+                    (BinaryOp::Mul, Type::Duration, right) if number(right) => Ok(Type::Duration),
+                    (BinaryOp::Mul, left, Type::Duration) if number(left) => Ok(Type::Duration),
+                    (BinaryOp::Div, Type::Duration, right) if number(right) => Ok(Type::Duration),
+                    (BinaryOp::Div, Type::Duration, Type::Duration) => Ok(Type::Float),
+                    (BinaryOp::Rem, Type::Duration, Type::Duration) => Ok(Type::Duration),
+                    (_, Type::Unknown, _) | (_, _, Type::Unknown) => Ok(Type::Unknown),
+                    _ => Err(RillError::new(format!(
+                        "operator '{}' is not defined for {left_ty} and {right_ty}",
+                        operator_symbol(op)
+                    ))),
+                }
+            }
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
             | BinaryOp::Pow => {
                 if !left_ty.is_numeric() || !right_ty.is_numeric() {
                     return Err(RillError::new(format!(
@@ -1910,6 +1935,10 @@ fn compound_assignment_type(op: AssignOp, current: &Type, value: &Type) -> Resul
             Type::Int | Type::Float,
             Type::Int | Type::Float,
         ) => Ok(common_type(current.clone(), value.clone())),
+        (AssignOp::Add | AssignOp::Sub, Type::Duration, Type::Duration) => Ok(Type::Duration),
+        (AssignOp::Mul | AssignOp::Div, Type::Duration, Type::Int | Type::Float) => {
+            Ok(Type::Duration)
+        }
         _ => Err(RillError::new(format!(
             "compound assignment is not supported for {current} and {value}"
         ))),
@@ -1924,6 +1953,30 @@ fn compile_regex(pattern: &str) -> Result<regex::Regex, RillError> {
 fn regex_capture_names(pattern: &str) -> Result<Vec<String>, RillError> {
     let regex = compile_regex(pattern)?;
     Ok(regex.capture_names().flatten().map(ToString::to_string).collect())
+}
+
+fn operator_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
+        BinaryOp::Pow => "**",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Range => "..",
+        BinaryOp::RangeInclusive => "..=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+        BinaryOp::In => "in",
+        BinaryOp::NotIn => "not in",
+        BinaryOp::Coalesce => "??",
+    }
 }
 
 fn unknown_namespace_function(module: &str, name: &str) -> RillError {

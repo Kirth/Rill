@@ -138,6 +138,12 @@ pub enum Structural {
     IsNone,
     Unwrap,
     UnwrapOr,
+    DurationSecs,
+    DurationMillis,
+    DurationMicros,
+    DurationNanos,
+    DurationSecsFloat,
+    HumanSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -660,6 +666,19 @@ pub static METHODS: &[Method] = &[
         Target::Builtin(BuiltinMethod::Await)
     ),
     method!("sleep", [Duration], 0, [], Return::Null, Target::Sleep),
+    method!("secs", [Duration], 0, [], Return::Int, Target::Structural(Structural::DurationSecs)),
+    method!("ms", [Duration], 0, [], Return::Int, Target::Structural(Structural::DurationMillis)),
+    method!("us", [Duration], 0, [], Return::Int, Target::Structural(Structural::DurationMicros)),
+    method!("ns", [Duration], 0, [], Return::Int, Target::Structural(Structural::DurationNanos)),
+    method!(
+        "as_secs_float",
+        [Duration],
+        0,
+        [],
+        Return::Float,
+        Target::Structural(Structural::DurationSecsFloat)
+    ),
+    method!("human_size", [Int], 0, [], Return::Str, Target::Structural(Structural::HumanSize)),
     method!("is_ok", [Result], 0, [], Return::Bool, Target::Structural(Structural::IsOk)),
     method!("is_err", [Result], 0, [], Return::Bool, Target::Structural(Structural::IsErr)),
     method!("ok", [Result], 0, [], Return::ResultOkOption, Target::Structural(Structural::Ok)),
