@@ -1,5 +1,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+
+/// Insertion-ordered string-keyed map used for every Rill `Map` value.
+pub type Map = indexmap::IndexMap<String, Value>;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::Utf8Error;
@@ -49,7 +52,7 @@ impl StreamHandle {
     pub fn next(&self) -> Option<Value> {
         let rx = self.rx.lock().unwrap();
         rx.recv().ok().map(|(line, host)| {
-            Value::Map(BTreeMap::from([
+            Value::Map(Map::from_iter([
                 ("line".to_string(), Value::Str(line)),
                 ("host".to_string(), Value::Str(host)),
             ]))
@@ -113,7 +116,7 @@ pub enum Value {
     Bytes(Vec<u8>),
     List(Vec<Value>),
     Tuple(Vec<Value>),
-    Map(BTreeMap<String, Value>),
+    Map(Map),
     Duration(Duration),
     Path(PathBuf),
     Regex(String),

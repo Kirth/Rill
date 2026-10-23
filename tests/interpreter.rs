@@ -1099,7 +1099,7 @@ fn parallel_map_list() {
 
 #[test]
 fn parallel_map_on_map() {
-    // BTreeMap iteration order is alphabetical — keys a, b
+    // Maps iterate in insertion order: keys a, b
     let result = run(r#"{ a: 10, b: 20 }.parallel_map(|k, v| v * 2)"#);
     assert_eq!(result, Value::List(vec![Value::Int(20), Value::Int(40)]));
 }
@@ -1252,5 +1252,50 @@ fn tuple_serialization_uses_arrays_without_changing_parsed_array_types() {
     assert_eq!(
         run(r#"({pair: (1, 2)}).to_toml().parse_toml().pair"#),
         Value::List(vec![Value::Int(1), Value::Int(2)])
+    );
+}
+
+#[test]
+fn map_literals_preserve_insertion_order() {
+    assert_eq!(
+        run(r#"{zeta: 1, alpha: 2, mid: 3}.keys()"#),
+        Value::List(vec![
+            Value::Str("zeta".into()),
+            Value::Str("alpha".into()),
+            Value::Str("mid".into())
+        ])
+    );
+    assert_eq!(run(r#"Str({zeta: 1, alpha: 2})"#), Value::Str("{zeta: 1, alpha: 2}".into()));
+}
+
+#[test]
+fn json_and_yaml_round_trips_preserve_key_order() {
+    let source = r#"
+        let m = {zeta: 1, alpha: 2}
+        [
+            m.to_json(),
+            m.to_json().parse_json().to_json(),
+            m.to_yaml().parse_yaml().keys().join(","),
+            m.to_toml().parse_toml().keys().join(","),
+        ]
+    "#;
+    assert_eq!(
+        run(source),
+        Value::List(vec![
+            Value::Str(r#"{"zeta":1,"alpha":2}"#.into()),
+            Value::Str(r#"{"zeta":1,"alpha":2}"#.into()),
+            Value::Str("zeta,alpha".into()),
+            Value::Str("zeta,alpha".into()),
+        ])
+    );
+}
+
+#[test]
+fn map_equality_ignores_order_and_so_does_difference() {
+    assert_eq!(run(r#"{a: 1, b: 2} == {b: 2, a: 1}"#), Value::Bool(true));
+    assert_eq!(run(r#"[{a: 1, b: 2}].difference([{b: 2, a: 1}])"#), Value::List(vec![]));
+    assert_eq!(
+        run(r#"[3, 1, 3, 2].group_by(|x| Str(x)).keys()"#),
+        Value::List(vec![Value::Str("3".into()), Value::Str("1".into()), Value::Str("2".into())])
     );
 }

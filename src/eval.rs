@@ -5,7 +5,7 @@ use crate::runtime::{
     run_command, run_command_cancellable, run_pipeline, run_pipeline_cancellable,
     ssh_control_options, CommandIo, ProcessRuntime, ProcessSpec, StreamMode, TokioProcessRuntime,
 };
-use crate::types::{Binding, Closure, ErrorKind, ErrorValue, Value};
+use crate::types::{Map, Binding, Closure, ErrorKind, ErrorValue, Value};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
@@ -59,14 +59,21 @@ impl Env {
             root.insert(name.to_string(), Binding { value, mutable: true });
         };
         insert(&mut root, "args", Value::List(args.into_iter().map(Value::Str).collect()));
-        let environment = std::env::vars().map(|(name, value)| (name, Value::Str(value))).collect();
+        let mut environment: Vec<(String, String)> = std::env::vars_os()
+            .map(|(name, value)| {
+                (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())
+            })
+            .collect();
+        environment.sort();
+        let environment: Map =
+            environment.into_iter().map(|(name, value)| (name, Value::Str(value))).collect();
         insert(&mut root, "env", Value::Map(environment));
         let lines =
             input.unwrap_or_default().lines().map(|line| Value::Str(line.to_string())).collect();
         insert(
             &mut root,
             "input",
-            Value::Map(BTreeMap::from([("lines".to_string(), Value::List(lines))])),
+            Value::Map(Map::from_iter([("lines".to_string(), Value::List(lines))])),
         );
         Self { scopes: vec![Arc::new(root)] }
     }
@@ -1048,7 +1055,7 @@ impl Evaluator {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Tuple),
             Expr::Map(pairs) => {
-                let mut map = BTreeMap::new();
+                let mut map = Map::new();
                 for (key, expr) in pairs {
                     map.insert(key.clone(), self.eval_expr(expr)?);
                 }
@@ -1352,8 +1359,8 @@ impl Evaluator {
         &mut self,
         group: &ArgGroup,
         raw: &[String],
-    ) -> Result<BTreeMap<String, Value>, EvalError> {
-        let mut values = BTreeMap::new();
+    ) -> Result<Map, EvalError> {
+        let mut values = Map::new();
         let mut positional = Vec::new();
         let mut child = None;
         let mut options = true;
@@ -1455,7 +1462,7 @@ impl Evaluator {
             let command_values = self.parse_arg_group(&command, &raw[next_index..])?;
             values.insert(
                 "command".to_string(),
-                Value::Map(BTreeMap::from([(command.name.clone(), Value::Map(command_values))])),
+                Value::Map(Map::from_iter([(command.name.clone(), Value::Map(command_values))])),
             );
         }
         if position < positional.len() {
@@ -2242,7 +2249,7 @@ impl Evaluator {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| Value::Int(d.as_secs() as i64))
                     .unwrap_or(Value::Null);
-                let mut map = std::collections::BTreeMap::new();
+                let mut map = Map::new();
                 map.insert("size".into(), Value::Int(meta.len() as i64));
                 map.insert("modified".into(), modified);
                 map.insert("is_file".into(), Value::Bool(meta.is_file()));
@@ -2975,8 +2982,7 @@ impl Evaluator {
             return Err(RillError::new("group_by needs a List").into());
         };
         let keyer = &args[1];
-        let mut map: std::collections::BTreeMap<String, Vec<Value>> =
-            std::collections::BTreeMap::new();
+        let mut map: indexmap::IndexMap<String, Vec<Value>> = indexmap::IndexMap::new();
         for item in items {
             let key = self.apply_unary(keyer, item.clone())?.as_string_lossy();
             map.entry(key).or_default().push(item);
@@ -3850,13 +3856,13 @@ fn parse_arg_value(
     }
 }
 
-fn parse_url(value: &str) -> Result<BTreeMap<String, Value>, RillError> {
+fn parse_url(value: &str) -> Result<Map, RillError> {
     let (scheme, rest) =
         value.split_once("://").ok_or_else(|| RillError::new("url must include a scheme"))?;
     let (authority, path_query) = rest.split_once('/').unwrap_or((rest, ""));
     let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
     let (query, fragment) = query.split_once('#').unwrap_or((query, ""));
-    Ok(BTreeMap::from([
+    Ok(Map::from_iter([
         ("scheme".to_string(), Value::Str(scheme.to_string())),
         ("host".to_string(), Value::Str(authority.to_string())),
         ("path".to_string(), Value::Str(format!("/{path}"))),

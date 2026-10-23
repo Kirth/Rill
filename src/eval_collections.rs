@@ -41,12 +41,15 @@ fn hash_key(value: &Value) -> Option<HashKey> {
         Value::Tuple(values) => {
             HashKey::Tuple(values.iter().map(hash_key).collect::<Option<Vec<_>>>()?)
         }
-        Value::Map(values) => HashKey::Map(
-            values
+        Value::Map(values) => {
+            // Maps compare order-insensitively, so the key must too.
+            let mut pairs = values
                 .iter()
                 .map(|(key, value)| Some((key.clone(), hash_key(value)?)))
-                .collect::<Option<Vec<_>>>()?,
-        ),
+                .collect::<Option<Vec<_>>>()?;
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            HashKey::Map(pairs)
+        }
         Value::Duration(value) => HashKey::Duration(*value),
         Value::Path(value) => HashKey::Path(value.clone()),
         Value::Regex(value) => HashKey::Regex(value.clone()),
