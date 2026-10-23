@@ -320,6 +320,46 @@ impl Checker {
         Ok(ModuleExports { symbols })
     }
 
+    /// The type of a field/index chain used as an assignment target.
+    fn check_place(&mut self, place: &Expr) -> Result<Type, RillError> {
+        match place.unspanned() {
+            Expr::Ident(name) => self.env.get(name).ok_or_else(|| self.unknown_identifier(name)),
+            Expr::Field { base, name } => match self.check_place(base)? {
+                Type::Map | Type::Unknown => Ok(Type::Unknown),
+                other => Err(RillError::new(format!("cannot assign to field '{name}' of {other}"))),
+            },
+            Expr::Index { base, index } => {
+                let base_ty = self.check_place(base)?;
+                let index_ty = self.check_expr(index)?;
+                match base_ty {
+                    Type::List(item) => {
+                        ensure_assignable(&Type::Int, &index_ty)?;
+                        Ok(*item)
+                    }
+                    Type::Map => {
+                        if !matches!(index_ty, Type::Str | Type::Int | Type::Unknown) {
+                            return Err(RillError::new(format!(
+                                "map key must be Str, got {index_ty}"
+                            )));
+                        }
+                        Ok(Type::Unknown)
+                    }
+                    Type::Tuple(elements) => {
+                        ensure_assignable(&Type::Int, &index_ty)?;
+                        let raw_index = constant_int(index).ok_or_else(|| {
+                            RillError::new("tuple assignment index must be an integer literal")
+                        })?;
+                        let position = normalize_tuple_index(raw_index, elements.len())?;
+                        Ok(elements[position].clone())
+                    }
+                    Type::Unknown => Ok(Type::Unknown),
+                    other => Err(RillError::new(format!("cannot assign into {other}"))),
+                }
+            }
+            _ => Err(RillError::new("invalid assignment target")),
+        }
+    }
+
     /// Type-check parameter defaults against their annotations, inside the
     /// function scope so defaults may refer to earlier parameters.
     fn check_param_defaults(&mut self, function: &Function) -> Result<(), RillError> {
@@ -427,68 +467,58 @@ impl Checker {
                 ensure_assignable(&Type::Str, &ty)?;
                 Ok(Type::Null)
             }
-            Stmt::Assign { name, op, expr } => {
-                self.ensure_assignable_in_parallel(name)?;
-                if matches!(self.env.is_mutable(name), Some(false)) {
-                    return Err(RillError::new(format!(
-                        "cannot assign to immutable variable '{name}'"
-                    ))
-                    .with_help(format!(
-                        "declare it with `var {name} = ...` to allow reassignment"
-                    )));
-                }
-                let Some(current) = self.env.get(name) else {
-                    return Err(RillError::new(format!(
-                        "assignment to undeclared variable '{name}'"
-                    ))
-                    .with_help(
-                        crate::suggest::did_you_mean(name, self.env.names())
-                            .unwrap_or_else(|| format!("declare it first with `var {name} = ...`")),
+            Stmt::Assign { target, op, expr } => {
+                let Some(root) = place_root(target) else {
+                    return Err(RillError::new("invalid assignment target").with_help(
+                        "assign to a variable, a field such as `m.key`, or an index such as `xs[0]`",
                     ));
                 };
+                let root = root.to_string();
+                self.ensure_assignable_in_parallel(&root)?;
+                if matches!(self.env.is_mutable(&root), Some(false)) {
+                    return Err(RillError::new(format!(
+                        "cannot assign to immutable variable '{root}'"
+                    ))
+                    .with_help(format!(
+                        "declare it with `var {root} = ...` to allow reassignment"
+                    )));
+                }
+                let Some(current) = self.env.get(&root) else {
+                    return Err(RillError::new(format!(
+                        "assignment to undeclared variable '{root}'"
+                    ))
+                    .with_help(
+                        crate::suggest::did_you_mean(&root, self.env.names())
+                            .unwrap_or_else(|| format!("declare it first with `var {root} = ...`")),
+                    ));
+                };
+                if !matches!(target.unspanned(), Expr::Ident(_)) {
+                    let target_ty = self.check_place(target)?;
+                    let value_ty = self.check_expr(expr)?;
+                    let assigned = compound_assignment_type(*op, &target_ty, &value_ty)?;
+                    if !target_ty.is_unknown() {
+                        ensure_assignable(&target_ty, &assigned)?;
+                    }
+                    return Ok(Type::Null);
+                }
                 let value_ty = self.check_expr(expr)?;
                 let assigned = compound_assignment_type(*op, &current, &value_ty)?;
                 if matches!(current, Type::Null | Type::Unknown)
                     || ensure_assignable(&current, &assigned).is_ok()
                 {
                     if !assigned.is_unknown() && current != assigned {
-                        self.env.retype(name, common_type(current, assigned));
+                        self.env.retype(&root, common_type(current, assigned));
                     }
                 } else if ensure_assignable(&assigned, &current).is_ok() {
                     // Widening (Int -> Float): the variable takes the wider type.
-                    self.env.retype(name, assigned);
+                    self.env.retype(&root, assigned);
                 } else {
                     return Err(RillError::new(format!(
-                        "cannot assign {assigned} to '{name}', which has type {current}"
+                        "cannot assign {assigned} to '{root}', which has type {current}"
                     ))
                     .with_help(format!(
                         "declare a new variable, or convert with `{current}(...)`"
                     )));
-                }
-                Ok(Type::Null)
-            }
-            Stmt::IndexAssign { name, index, op, expr } => {
-                self.ensure_assignable_in_parallel(name)?;
-                if matches!(self.env.is_mutable(name), Some(false)) {
-                    return Err(RillError::new(format!(
-                        "cannot assign to immutable variable '{name}'"
-                    ))
-                    .with_help(format!(
-                        "declare it with `var {name} = ...` to allow reassignment"
-                    )));
-                }
-                let collection = self.env.get(name).ok_or_else(|| self.unknown_identifier(name))?;
-                let index_ty = self.check_expr(index)?;
-                let value_ty = self.check_expr(expr)?;
-                if let Type::Tuple(elements) = collection {
-                    ensure_assignable(&Type::Int, &index_ty)?;
-                    let raw_index = constant_int(index).ok_or_else(|| {
-                        RillError::new("tuple assignment index must be an integer literal")
-                    })?;
-                    let position = normalize_tuple_index(raw_index, elements.len())?;
-                    let target = &elements[position];
-                    let assigned = compound_assignment_type(*op, target, &value_ty)?;
-                    ensure_assignable(target, &assigned)?;
                 }
                 Ok(Type::Null)
             }
@@ -2049,9 +2079,8 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::For { iter, .. } => contains_implicit(iter),
         Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt.unspanned() {
             Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
-            Stmt::Assign { expr, .. } => contains_implicit(expr),
-            Stmt::IndexAssign { index, expr, .. } => {
-                contains_implicit(index) || contains_implicit(expr)
+            Stmt::Assign { target, expr, .. } => {
+                contains_implicit(target) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),
@@ -2169,6 +2198,15 @@ fn operator_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::In => "in",
         BinaryOp::NotIn => "not in",
         BinaryOp::Coalesce => "??",
+    }
+}
+
+/// The variable at the root of an assignment target.
+fn place_root(place: &Expr) -> Option<&str> {
+    match place.unspanned() {
+        Expr::Ident(name) => Some(name),
+        Expr::Field { base, .. } | Expr::Index { base, .. } => place_root(base),
+        _ => None,
     }
 }
 

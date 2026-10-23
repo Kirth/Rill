@@ -918,27 +918,15 @@ impl Evaluator {
                 self.set_environment(name, value)?;
                 Ok(Flow::Value(Value::Null))
             }
-            Stmt::Assign { name, op, expr } => {
+            Stmt::Assign { target, op, expr } => {
                 let rhs = self.eval_expr(expr)?;
                 let op = *op;
-                if !self.env.update(name, |current| apply_compound(current, rhs, op))? {
-                    return Err(EvalError::Runtime(RillError::new(format!(
-                        "assignment to undeclared variable '{name}'"
-                    ))));
-                }
-                Ok(Flow::Value(Value::Null))
-            }
-            Stmt::IndexAssign { name, index, op, expr } => {
-                let idx_val = self.eval_expr(index)?;
-                let rhs = self.eval_expr(expr)?;
-                let literal_index = constant_int_expr(index);
-                let op = *op;
-                let updated = self.env.update(name, |collection| {
-                    index_assign_in_place(collection, idx_val, literal_index, op, rhs)
-                })?;
+                let (root, steps) = self.resolve_place(target)?;
+                let updated =
+                    self.env.update(&root, |value| assign_place(value, &steps, op, rhs))?;
                 if !updated {
                     return Err(EvalError::Runtime(RillError::new(format!(
-                        "assignment to undeclared variable '{name}'"
+                        "assignment to undeclared variable '{root}'"
                     ))));
                 }
                 Ok(Flow::Value(Value::Null))
@@ -1591,6 +1579,27 @@ impl Evaluator {
             }
         }
         Ok(out)
+    }
+
+    /// Evaluate an assignment target into its root variable and the field/index
+    /// steps leading to the assigned slot.  Index expressions are evaluated
+    /// left to right before any mutation happens.
+    fn resolve_place(&mut self, place: &Expr) -> Result<(String, Vec<PlaceStep>), EvalError> {
+        match place.unspanned() {
+            Expr::Ident(name) => Ok((name.clone(), Vec::new())),
+            Expr::Field { base, name } => {
+                let (root, mut steps) = self.resolve_place(base)?;
+                steps.push(PlaceStep::Field(name.clone()));
+                Ok((root, steps))
+            }
+            Expr::Index { base, index } => {
+                let (root, mut steps) = self.resolve_place(base)?;
+                let key = self.eval_expr(index)?;
+                steps.push(PlaceStep::Index { key, literal: constant_int_expr(index) });
+                Ok((root, steps))
+            }
+            _ => Err(RillError::new("invalid assignment target").into()),
+        }
     }
 
     /// Resolve an expression to a path.  A leading `~` is expanded only in
@@ -3867,58 +3876,76 @@ fn apply_compound(current: &mut Value, rhs: Value, op: AssignOp) -> Result<(), R
     Ok(())
 }
 
-fn index_assign_in_place(
-    collection: &mut Value,
-    idx_val: Value,
-    literal_index: Option<i64>,
+/// One step from a variable to the slot being assigned.
+enum PlaceStep {
+    Field(String),
+    Index { key: Value, literal: Option<i64> },
+}
+
+/// Walk `steps` into `value` and apply `op`/`rhs` at the end, in place.
+fn assign_place(
+    value: &mut Value,
+    steps: &[PlaceStep],
     op: AssignOp,
     rhs: Value,
 ) -> Result<(), RillError> {
-    match collection {
-        Value::Map(map) => {
-            let key = match &idx_val {
-                Value::Str(s) => s.clone(),
-                Value::Int(i) => i.to_string(),
-                other => {
+    let Some((step, rest)) = steps.split_first() else {
+        return apply_compound(value, rhs, op);
+    };
+    let last = rest.is_empty();
+    match (value, step) {
+        (Value::Map(map), step) => {
+            let key = match step {
+                PlaceStep::Field(name) => name.clone(),
+                PlaceStep::Index { key: Value::Str(key), .. } => key.clone(),
+                PlaceStep::Index { key: Value::Int(key), .. } => key.to_string(),
+                PlaceStep::Index { key, .. } => {
                     return Err(RillError::new(format!(
                         "map key must be Str or Int, got {}",
-                        other.type_name()
+                        key.type_name()
                     )))
                 }
             };
-            if matches!(op, AssignOp::Assign) {
+            if last && op == AssignOp::Assign {
                 map.insert(key, rhs);
                 return Ok(());
             }
-            let slot = map.entry(key).or_insert(Value::Int(0));
-            apply_compound(slot, rhs, op)
-        }
-        Value::List(items) => {
-            let Value::Int(idx) = idx_val else {
-                return Err(RillError::new(format!(
-                    "list index must be Int, got {}",
-                    idx_val.type_name()
-                )));
+            if last {
+                let slot = map.entry(key).or_insert(Value::Int(0));
+                return apply_compound(slot, rhs, op);
+            }
+            let Some(inner) = map.get_mut(&key) else {
+                return Err(RillError::new(format!("key '{key}' not in map")));
             };
+            assign_place(inner, rest, op, rhs)
+        }
+        (Value::List(items), PlaceStep::Index { key: Value::Int(idx), .. }) => {
             let len = items.len() as i64;
-            let position = if idx < 0 { len + idx } else { idx };
+            let position = if *idx < 0 { len + idx } else { *idx };
             if position < 0 || position >= len {
                 return Err(RillError::new(format!("index {idx} out of bounds (len {len})")));
             }
-            apply_compound(&mut items[position as usize], rhs, op)
+            assign_place(&mut items[position as usize], rest, op, rhs)
         }
-        Value::Tuple(items) => {
-            let Some(literal_index) = literal_index else {
+        (Value::List(_), PlaceStep::Index { key, .. }) => {
+            Err(RillError::new(format!("list index must be Int, got {}", key.type_name())))
+        }
+        (Value::Tuple(items), PlaceStep::Index { key: Value::Int(idx), literal }) => {
+            if literal.is_none() {
                 return Err(RillError::new("tuple assignment index must be an integer literal"));
-            };
-            let Value::Int(index_value) = idx_val else {
-                return Err(RillError::new("tuple index must be Int"));
-            };
-            debug_assert_eq!(literal_index, index_value);
-            let position = normalize_runtime_index(index_value, items.len(), "tuple")?;
-            apply_compound(&mut items[position], rhs, op)
+            }
+            let position = normalize_runtime_index(*idx, items.len(), "tuple")?;
+            assign_place(&mut items[position], rest, op, rhs)
         }
-        other => Err(RillError::new(format!("cannot index-assign into {}", other.type_name()))),
+        (Value::Tuple(_), PlaceStep::Index { .. }) => {
+            Err(RillError::new("tuple index must be Int"))
+        }
+        (other, PlaceStep::Field(name)) => {
+            Err(RillError::new(format!("cannot assign to field '{name}' of {}", other.type_name())))
+        }
+        (other, PlaceStep::Index { .. }) => {
+            Err(RillError::new(format!("cannot index-assign into {}", other.type_name())))
+        }
     }
 }
 
@@ -4302,9 +4329,8 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::For { iter, .. } => contains_implicit(iter),
         Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt.unspanned() {
             Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
-            Stmt::Assign { expr, .. } => contains_implicit(expr),
-            Stmt::IndexAssign { index, expr, .. } => {
-                contains_implicit(index) || contains_implicit(expr)
+            Stmt::Assign { target, expr, .. } => {
+                contains_implicit(target) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),

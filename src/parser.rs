@@ -1384,47 +1384,50 @@ impl Parser {
         )
     }
 
+    /// Whether the statement starting at the current identifier is an
+    /// assignment to a place: `name`, `name.field`, `name[index]`, chained.
     fn is_assignment(&self) -> bool {
-        let next = self.peek_n_kind(1);
-        if matches!(
-            next,
-            TokenKind::Eq
-                | TokenKind::PlusEq
-                | TokenKind::MinusEq
-                | TokenKind::StarEq
-                | TokenKind::SlashEq
-                | TokenKind::PercentEq
-        ) {
-            return true;
-        }
-        // index-assignment: ident[...] op= value — scan forward past matching bracket
-        if matches!(next, TokenKind::LBracket) {
-            let mut depth = 0usize;
-            let mut i = 2;
-            loop {
-                match self.peek_n_kind(i) {
-                    TokenKind::LBracket => depth += 1,
-                    TokenKind::RBracket => {
-                        if depth == 0 {
-                            return matches!(
-                                self.peek_n_kind(i + 1),
-                                TokenKind::Eq
-                                    | TokenKind::PlusEq
-                                    | TokenKind::MinusEq
-                                    | TokenKind::StarEq
-                                    | TokenKind::SlashEq
-                                    | TokenKind::PercentEq
-                            );
+        let is_assign_op = |kind: &TokenKind| {
+            matches!(
+                kind,
+                TokenKind::Eq
+                    | TokenKind::PlusEq
+                    | TokenKind::MinusEq
+                    | TokenKind::StarEq
+                    | TokenKind::SlashEq
+                    | TokenKind::PercentEq
+            )
+        };
+        let mut i = 1;
+        loop {
+            match self.peek_n_kind(i) {
+                kind if is_assign_op(&kind) => return true,
+                TokenKind::Dot => match self.peek_n_kind(i + 1) {
+                    TokenKind::Ident(_) => i += 2,
+                    _ => return false,
+                },
+                TokenKind::LBracket => {
+                    let mut depth = 0usize;
+                    i += 1;
+                    loop {
+                        match self.peek_n_kind(i) {
+                            TokenKind::LBracket => depth += 1,
+                            TokenKind::RBracket => {
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                                depth -= 1;
+                            }
+                            TokenKind::Eof | TokenKind::Newline | TokenKind::Semi => return false,
+                            _ => {}
                         }
-                        depth -= 1;
+                        i += 1;
                     }
-                    TokenKind::Eof | TokenKind::Newline | TokenKind::Semi => return false,
-                    _ => {}
                 }
-                i += 1;
+                _ => return false,
             }
         }
-        false
     }
 
     fn parse_assign_op(&mut self) -> Result<AssignOp, RillError> {
@@ -1446,25 +1449,27 @@ impl Parser {
     }
 
     fn parse_assignment(&mut self) -> Result<Stmt, RillError> {
+        let start = self.peek().span.start;
         let name = self.expect_ident()?;
-        if matches!(self.peek_kind(), TokenKind::LBracket) {
-            self.next(); // consume [
-            let index = self.parse_expr(0)?;
-            self.expect(TokenKind::RBracket)?;
-            let op = self.parse_assign_op()?;
-            self.skip_newlines();
-            let expr = self.parse_expr(0)?;
-            return Ok(Stmt::IndexAssign {
-                name,
-                index: Box::new(index),
-                op,
-                expr: Box::new(expr),
-            });
+        let mut target = Expr::Ident(name);
+        loop {
+            if self.consume(TokenKind::Dot) {
+                let name = self.expect_ident()?;
+                target = Expr::Field { base: Box::new(target), name };
+            } else if self.consume(TokenKind::LBracket) {
+                let index = self.parse_expr(0)?;
+                self.expect(TokenKind::RBracket)?;
+                target = Expr::Index { base: Box::new(target), index: Box::new(index) };
+            } else {
+                break;
+            }
         }
+        let target =
+            Expr::Located { expr: Box::new(target), span: Span::new(start, self.last_end) };
         let op = self.parse_assign_op()?;
         self.skip_newlines();
         let expr = self.parse_expr(0)?;
-        Ok(Stmt::Assign { name, op, expr })
+        Ok(Stmt::Assign { target, op, expr })
     }
 
     fn parse_env_assignment(&mut self) -> Result<Stmt, RillError> {
@@ -2528,10 +2533,9 @@ fn stmts_propagate(stmts: &[Stmt]) -> bool {
         Stmt::Let { expr, .. }
         | Stmt::Expr(expr)
         | Stmt::Emit(expr)
-        | Stmt::Assign { expr, .. }
         | Stmt::AssignEnv { expr, .. }
         | Stmt::Return(Some(expr)) => expr_propagates(expr),
-        Stmt::IndexAssign { index, expr, .. } => expr_propagates(index) || expr_propagates(expr),
+        Stmt::Assign { target, expr, .. } => expr_propagates(target) || expr_propagates(expr),
         Stmt::While { cond, body } => expr_propagates(cond) || stmts_propagate(body),
         Stmt::WithEnv { bindings, body } => {
             bindings.iter().any(|(_, expr)| expr_propagates(expr)) || stmts_propagate(body)

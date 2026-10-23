@@ -214,3 +214,32 @@ fn default_parameters_and_named_arguments() {
     // Runtime agrees when the checker is bypassed by dynamic types.
     assert!(fails(&format!("{prelude}let f = add\nf(1, c = 2)")).contains("no parameter 'c'"));
 }
+
+#[test]
+fn nested_place_assignment() {
+    assert_eq!(run("var m = {a: 1}\nm.a = 2\nm.a"), Value::Int(2));
+    assert_eq!(run("var m = {a: {b: 1}}\nm[\"a\"][\"b\"] = 2\nm.a.b"), Value::Int(2));
+    assert_eq!(run("var m = {a: {b: 1}}\nm.a.b += 5\nm.a.b"), Value::Int(6));
+    assert_eq!(
+        run("var xs = [{name: \"a\"}]\nxs[0].name = \"x\"\nxs[0].name"),
+        Value::Str("x".into())
+    );
+    assert_eq!(
+        run("var xs = [{name: \"a\"}]\nxs[-1].name += \"y\"\nxs[-1].name"),
+        Value::Str("ay".into())
+    );
+    assert_eq!(run("var m = {}\nm.k = 1\nm.k"), Value::Int(1));
+    assert_eq!(run("var m = {}\nm.k += 1\nm.k"), Value::Int(1));
+    assert_eq!(run("var t = (1, \"a\")\nt[1] = \"b\"\nt[1]"), Value::Str("b".into()));
+    assert_eq!(run("var xs = [1]\nxs += [2]\nxs"), Value::List(vec![Value::Int(1), Value::Int(2)]));
+    assert_eq!(
+        run("var xs = [[1]]\nxs[0] += [2]\nxs[0]"),
+        Value::List(vec![Value::Int(1), Value::Int(2)])
+    );
+    assert!(fails("var m = {a: 1}\nm.missing.inner = 1").contains("key 'missing' not in map"));
+    assert!(check_err("let m = {a: 1}\nm.a = 2").contains("immutable variable 'm'"));
+    assert!(check_err("var s = \"x\"\ns[0] = \"y\"").contains("cannot assign into Str"));
+    assert!(check_err("var xs = [1]\nxs[0] = \"s\"").contains("expected Int, got Str"));
+    assert!(check_err("var n = 1\nn.a = 2").contains("cannot assign to field 'a' of Int"));
+    assert!(check_err("var xs = [1]\nxs[\"a\"] = 2").contains("expected Int"));
+}

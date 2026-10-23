@@ -201,11 +201,10 @@ fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
             ast::Stmt::Let { expr, .. }
             | ast::Stmt::Expr(expr)
             | ast::Stmt::Emit(expr)
-            | ast::Stmt::Assign { expr, .. }
             | ast::Stmt::AssignEnv { expr, .. }
             | ast::Stmt::Return(Some(expr)) => collect_expr_imports(expr, imports),
-            ast::Stmt::IndexAssign { index, expr, .. } => {
-                collect_expr_imports(index, imports);
+            ast::Stmt::Assign { target, expr, .. } => {
+                collect_expr_imports(target, imports);
                 collect_expr_imports(expr, imports);
             }
             ast::Stmt::While { cond, body } => {
@@ -494,10 +493,9 @@ fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
         ast::Stmt::Let { expr, .. }
         | ast::Stmt::Expr(expr)
         | ast::Stmt::Emit(expr)
-        | ast::Stmt::Assign { expr, .. }
         | ast::Stmt::AssignEnv { expr, .. } => expr_needs_input(expr),
-        ast::Stmt::IndexAssign { index, expr, .. } => {
-            expr_needs_input(index) || expr_needs_input(expr)
+        ast::Stmt::Assign { target, expr, .. } => {
+            expr_needs_input(target) || expr_needs_input(expr)
         }
         ast::Stmt::Break(Some(expr)) => expr_needs_input(expr),
         ast::Stmt::While { cond, body } => expr_needs_input(cond) || program_needs_input(body),

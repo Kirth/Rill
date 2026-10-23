@@ -164,16 +164,12 @@ pub enum Stmt {
     Continue,
     /// `break` or `break value` (the value is only meaningful inside `loop`).
     Break(Option<Expr>),
+    /// Assignment to a place: a variable, or a field/index chain rooted at one
+    /// (`x = 1`, `m.a += 2`, `xs[0].name = "n"`).
     Assign {
-        name: String,
+        target: Expr,
         op: AssignOp,
         expr: Expr,
-    },
-    IndexAssign {
-        name: String,
-        index: Box<Expr>,
-        op: AssignOp,
-        expr: Box<Expr>,
     },
     While {
         cond: Box<Expr>,
