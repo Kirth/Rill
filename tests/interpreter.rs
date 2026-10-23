@@ -24,12 +24,12 @@ fn cli_args_and_input_lines_are_available_to_scripts() {
     .expect("run");
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::List(vec![
+        Value::list(vec![
+            Value::list(vec![
                 Value::Str("first.txt".to_string()),
                 Value::Str("second.txt".to_string()),
             ]),
-            Value::List(vec![Value::Str("alpha".to_string()), Value::Str("beta".to_string()),]),
+            Value::list(vec![Value::Str("alpha".to_string()), Value::Str("beta".to_string()),]),
         ])
     );
 }
@@ -47,7 +47,7 @@ fn compilation_recursively_tracks_direct_input_references() {
 fn json_module_parses_and_stringifies_values() {
     let value = run(r#"use json
 "[1, 2]".parse_json()"#);
-    assert_eq!(value, Value::List(vec![Value::Int(1), Value::Int(2)]));
+    assert_eq!(value, Value::list(vec![Value::Int(1), Value::Int(2)]));
     let value = run(r#"use json
 ({name: "rill"}).to_json()"#);
     assert_eq!(value, Value::Str("{\"name\":\"rill\"}".to_string()));
@@ -178,7 +178,7 @@ host: Str
     .expect("run");
     assert_eq!(
         value,
-        Value::List(vec![Value::Bool(true), Value::Int(8080), Value::Str("server1".to_string())])
+        Value::list(vec![Value::Bool(true), Value::Int(8080), Value::Str("server1".to_string())])
     );
 }
 
@@ -242,7 +242,7 @@ env.RILL_TEST_ENV
 fn get_reads_map_values_and_returns_null_for_missing_values() {
     let value = run(r#"let values = {present: "yes"}
 [values.get("present"), values.get("missing"), null.get("missing")]"#);
-    assert_eq!(value, Value::List(vec![Value::Str("yes".to_string()), Value::Null, Value::Null,]));
+    assert_eq!(value, Value::list(vec![Value::Str("yes".to_string()), Value::Null, Value::Null,]));
 }
 
 #[test]
@@ -274,7 +274,7 @@ let scoped = run printenv "RILL_EVALUATOR_LOCAL_TEST" {
 "#);
     assert_eq!(
         value,
-        Value::List(vec![
+        Value::list(vec![
             Value::Str("local".into()),
             Value::Str("local".into()),
             Value::Str("override".into()),
@@ -582,25 +582,25 @@ run printf $server:/srv/app
 #[test]
 fn byte_pipe_to_lines() {
     let value = run(r#"run printf "a\nb\n" | .lines()"#);
-    assert_eq!(value, Value::List(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
+    assert_eq!(value, Value::list(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
 }
 
 #[test]
 fn chained_byte_pipeline_connects_processes_directly() {
     let value = run(r#"run printf "a\nb\n" | run tr a-z A-Z | .lines()"#);
-    assert_eq!(value, Value::List(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
+    assert_eq!(value, Value::list(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
 }
 
 #[test]
 fn chained_byte_pipeline_streams_between_processes() {
     let value = run(r#"run printf "a\nb\n" | run tr a-z A-Z | .lines()"#);
-    assert_eq!(value, Value::List(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
+    assert_eq!(value, Value::list(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
 }
 
 #[test]
 fn value_pipe_into_take() {
     let value = run(r#"["a", "b", "c"] |> .take(2)"#);
-    assert_eq!(value, Value::List(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
+    assert_eq!(value, Value::list(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
 }
 
 #[test]
@@ -628,7 +628,7 @@ fn closures_work_as_map_and_filter_callbacks() {
     let value = run(r#"
 [1, 2, 3] |> .map(|value| value + 1) |> .filter(|value| value > 2)
 "#);
-    assert_eq!(value, Value::List(vec![Value::Int(3), Value::Int(4)]));
+    assert_eq!(value, Value::list(vec![Value::Int(3), Value::Int(4)]));
 }
 
 #[test]
@@ -637,7 +637,7 @@ fn implicit_callback_arguments_work_for_fields_and_values() {
 let records = [{name: "a", score: 4}, {name: "b", score: 8}]
 records |> .filter(.score > 5) |> .map(.name)
 "#);
-    assert_eq!(value, Value::List(vec![Value::Str("b".to_string())]));
+    assert_eq!(value, Value::list(vec![Value::Str("b".to_string())]));
 }
 
 #[test]
@@ -660,7 +660,7 @@ for host in hosts {
     print "$host"
 }
 "#);
-    assert_eq!(value, Value::List(vec![]));
+    assert_eq!(value, Value::list(vec![]));
 }
 
 #[test]
@@ -669,7 +669,7 @@ fn for_expr_emits_mapped_values() {
 let x = for i in [1, 2, 3] { emit i * 2 }
 x
 "#);
-    assert_eq!(value, Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
+    assert_eq!(value, Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
 }
 
 #[test]
@@ -678,7 +678,7 @@ fn for_expr_no_emit_returns_empty_list() {
 let x = for i in [1, 2, 3] { print i }
 x
 "#);
-    assert_eq!(value, Value::List(vec![]));
+    assert_eq!(value, Value::list(vec![]));
 }
 
 #[test]
@@ -689,7 +689,7 @@ let x = for i in [1, 2, 3] {
 }
 x
 "#);
-    assert_eq!(value, Value::List(vec![Value::Int(2), Value::Int(3)]));
+    assert_eq!(value, Value::list(vec![Value::Int(2), Value::Int(3)]));
 }
 
 #[test]
@@ -700,7 +700,7 @@ for i in [1, 2] { print i }
 "#);
     // for as statement evaluates to the list from the for expression; since it's
     // the last expression in the program, that's what run() returns
-    assert_eq!(value, Value::List(vec![]));
+    assert_eq!(value, Value::list(vec![]));
 }
 
 #[test]
@@ -712,7 +712,7 @@ let x = for i in [1, 2, 3, 4, 5] {
 }
 x
 "#);
-    assert_eq!(value, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+    assert_eq!(value, Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
 }
 
 #[test]
@@ -720,7 +720,7 @@ fn range_literal_produces_list() {
     let value = run("0..5");
     assert_eq!(
         value,
-        Value::List(vec![
+        Value::list(vec![
             Value::Int(0),
             Value::Int(1),
             Value::Int(2),
@@ -738,7 +738,7 @@ x
 "#);
     assert_eq!(
         value,
-        Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
+        Value::list(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
     );
 }
 
@@ -749,7 +749,7 @@ let x = parallel for i in [1, 2, 3] { emit i * 2 }
 x
 "#);
     // Results collected in spawn order (deterministic).
-    assert_eq!(value, Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
+    assert_eq!(value, Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
 }
 
 #[test]
@@ -761,8 +761,8 @@ let winner = race(1) for i in [7] { emit i }
 "#);
     assert_eq!(
         value,
-        Value::Tuple(vec![
-            Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]),
+        Value::tuple(vec![
+            Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6)]),
             Value::Int(7),
         ])
     );
@@ -778,7 +778,7 @@ fn bounded_parallel_for_rejects_non_positive_worker_counts() {
 #[test]
 fn parallel_for_empty_list() {
     let value = run("parallel for i in [] { emit i }");
-    assert_eq!(value, Value::List(vec![]));
+    assert_eq!(value, Value::list(vec![]));
 }
 
 #[test]
@@ -789,7 +789,7 @@ x
 "#);
     assert_eq!(
         value,
-        Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
+        Value::list(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
     );
 }
 
@@ -799,7 +799,7 @@ fn parallel_for_no_emit_returns_empty_list() {
 let x = parallel for i in [1, 2, 3] { print i }
 x
 "#);
-    assert_eq!(value, Value::List(vec![]));
+    assert_eq!(value, Value::list(vec![]));
 }
 
 #[test]
@@ -829,7 +829,7 @@ doubled
 "#);
     assert_eq!(
         value,
-        Value::List(vec![
+        Value::list(vec![
             Value::Int(0),
             Value::Int(2),
             Value::Int(4),
@@ -1065,7 +1065,7 @@ fn parallel_map_list() {
     // Order is preserved (handles joined in spawn order)
     assert_eq!(
         run("[1, 2, 3].parallel_map(|x| x * 10)"),
-        Value::List(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
+        Value::list(vec![Value::Int(10), Value::Int(20), Value::Int(30)])
     );
 }
 
@@ -1073,14 +1073,14 @@ fn parallel_map_list() {
 fn parallel_map_on_map() {
     // Maps iterate in insertion order: keys a, b
     let result = run(r#"{ a: 10, b: 20 }.parallel_map(|k, v| v * 2)"#);
-    assert_eq!(result, Value::List(vec![Value::Int(20), Value::Int(40)]));
+    assert_eq!(result, Value::list(vec![Value::Int(20), Value::Int(40)]));
 }
 
 #[test]
 fn flatten_nested_lists() {
     assert_eq!(
         run("[[1, 2], [3, 4]].flatten()"),
-        Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+        Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
     );
 }
 
@@ -1088,7 +1088,7 @@ fn flatten_nested_lists() {
 fn flatten_mixed_keeps_non_lists() {
     assert_eq!(
         run("[1, [2, 3], 4].flatten()"),
-        Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
+        Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)])
     );
 }
 
@@ -1096,10 +1096,10 @@ fn flatten_mixed_keeps_non_lists() {
 fn zip_two_lists() {
     assert_eq!(
         run("[1, 2, 3].zip([\"a\", \"b\", \"c\"])"),
-        Value::List(vec![
-            Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
-            Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
-            Value::Tuple(vec![Value::Int(3), Value::Str("c".into())]),
+        Value::list(vec![
+            Value::tuple(vec![Value::Int(1), Value::Str("a".into())]),
+            Value::tuple(vec![Value::Int(2), Value::Str("b".into())]),
+            Value::tuple(vec![Value::Int(3), Value::Str("c".into())]),
         ])
     );
 }
@@ -1108,9 +1108,9 @@ fn zip_two_lists() {
 fn zip_stops_at_shorter() {
     assert_eq!(
         run("[1, 2, 3].zip([\"a\", \"b\"])"),
-        Value::List(vec![
-            Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
-            Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
+        Value::list(vec![
+            Value::tuple(vec![Value::Int(1), Value::Str("a".into())]),
+            Value::tuple(vec![Value::Int(2), Value::Str("b".into())]),
         ])
     );
 }
@@ -1119,10 +1119,10 @@ fn zip_stops_at_shorter() {
 fn enumerate_list() {
     assert_eq!(
         run("[\"a\", \"b\", \"c\"].enumerate()"),
-        Value::List(vec![
-            Value::Tuple(vec![Value::Int(0), Value::Str("a".into())]),
-            Value::Tuple(vec![Value::Int(1), Value::Str("b".into())]),
-            Value::Tuple(vec![Value::Int(2), Value::Str("c".into())]),
+        Value::list(vec![
+            Value::tuple(vec![Value::Int(0), Value::Str("a".into())]),
+            Value::tuple(vec![Value::Int(1), Value::Str("b".into())]),
+            Value::tuple(vec![Value::Int(2), Value::Str("c".into())]),
         ])
     );
 }
@@ -1131,9 +1131,9 @@ fn enumerate_list() {
 fn destructuring_for_list_items() {
     assert_eq!(
         run(r#"for let (i, value) in ["a", "b"].enumerate() { emit (i, value) }"#),
-        Value::List(vec![
-            Value::Tuple(vec![Value::Int(0), Value::Str("a".into())]),
-            Value::Tuple(vec![Value::Int(1), Value::Str("b".into())]),
+        Value::list(vec![
+            Value::tuple(vec![Value::Int(0), Value::Str("a".into())]),
+            Value::tuple(vec![Value::Int(1), Value::Str("b".into())]),
         ])
     );
 }
@@ -1142,7 +1142,7 @@ fn destructuring_for_list_items() {
 fn destructuring_if_binds_then_branch_and_uses_else_on_mismatch() {
     assert_eq!(
         run(r#"if let [name, count] = ["alice", 3] { (name, count) } else { "no" }"#),
-        Value::Tuple(vec![Value::Str("alice".into()), Value::Int(3)])
+        Value::tuple(vec![Value::Str("alice".into()), Value::Int(3)])
     );
     assert_eq!(
         run(r#"if let [name, count] = { name: "alice" } { name } else { "no" }"#),
@@ -1154,15 +1154,15 @@ fn destructuring_if_binds_then_branch_and_uses_else_on_mismatch() {
 fn group_by_key() {
     let result = run("[1, 2, 3, 4].group_by(|n| { if n > 2 { \"big\" } else { \"small\" } })");
     let Value::Map(map) = result else { panic!("expected Map") };
-    assert_eq!(map.get("small"), Some(&Value::List(vec![Value::Int(1), Value::Int(2)])));
-    assert_eq!(map.get("big"), Some(&Value::List(vec![Value::Int(3), Value::Int(4)])));
+    assert_eq!(map.get("small"), Some(&Value::list(vec![Value::Int(1), Value::Int(2)])));
+    assert_eq!(map.get("big"), Some(&Value::list(vec![Value::Int(3), Value::Int(4)])));
 }
 
 #[test]
 fn parallel_filter_list() {
     assert_eq!(
         run("[1, 2, 3, 4, 5].parallel_filter(|x| x > 2)"),
-        Value::List(vec![Value::Int(3), Value::Int(4), Value::Int(5)])
+        Value::list(vec![Value::Int(3), Value::Int(4), Value::Int(5)])
     );
 }
 
@@ -1170,7 +1170,7 @@ fn parallel_filter_list() {
 fn tuples_are_fixed_heterogeneous_values() {
     assert_eq!(
         run(r#"(1, "two", true)"#),
-        Value::Tuple(vec![Value::Int(1), Value::Str("two".into()), Value::Bool(true),])
+        Value::tuple(vec![Value::Int(1), Value::Str("two".into()), Value::Bool(true),])
     );
     assert_eq!(run("(1, 2) == (1, 2)"), Value::Bool(true));
     assert_eq!(run("(1, 2) == [1, 2]"), Value::Bool(false));
@@ -1185,7 +1185,7 @@ let quad: Tuple[Int, Str, Bool, Float] = (7, "skip", true, 2.5)
 let (number, _, flag, decimal) = quad
 [quad[0], quad[-1], number, flag, decimal]
 "#),
-        Value::List(vec![
+        Value::list(vec![
             Value::Int(7),
             Value::Float(2.5),
             Value::Int(7),
@@ -1210,7 +1210,7 @@ values[0] += 2
 values[-1] = "b"
 values
 "#),
-        Value::Tuple(vec![Value::Int(3), Value::Str("b".into())])
+        Value::tuple(vec![Value::Int(3), Value::Str("b".into())])
     );
 }
 
@@ -1219,11 +1219,11 @@ fn tuple_serialization_uses_arrays_without_changing_parsed_array_types() {
     assert_eq!(run(r#"(1, "two").to_json()"#), Value::Str(r#"[1,"two"]"#.into()));
     assert_eq!(
         run(r#"(1, "two").to_yaml().parse_yaml()"#),
-        Value::List(vec![Value::Int(1), Value::Str("two".into())])
+        Value::list(vec![Value::Int(1), Value::Str("two".into())])
     );
     assert_eq!(
         run(r#"({pair: (1, 2)}).to_toml().parse_toml().pair"#),
-        Value::List(vec![Value::Int(1), Value::Int(2)])
+        Value::list(vec![Value::Int(1), Value::Int(2)])
     );
 }
 
@@ -1231,7 +1231,7 @@ fn tuple_serialization_uses_arrays_without_changing_parsed_array_types() {
 fn map_literals_preserve_insertion_order() {
     assert_eq!(
         run(r#"{zeta: 1, alpha: 2, mid: 3}.keys()"#),
-        Value::List(vec![
+        Value::list(vec![
             Value::Str("zeta".into()),
             Value::Str("alpha".into()),
             Value::Str("mid".into())
@@ -1253,7 +1253,7 @@ fn json_and_yaml_round_trips_preserve_key_order() {
     "#;
     assert_eq!(
         run(source),
-        Value::List(vec![
+        Value::list(vec![
             Value::Str(r#"{"zeta":1,"alpha":2}"#.into()),
             Value::Str(r#"{"zeta":1,"alpha":2}"#.into()),
             Value::Str("zeta,alpha".into()),
@@ -1265,10 +1265,10 @@ fn json_and_yaml_round_trips_preserve_key_order() {
 #[test]
 fn map_equality_ignores_order_and_so_does_difference() {
     assert_eq!(run(r#"{a: 1, b: 2} == {b: 2, a: 1}"#), Value::Bool(true));
-    assert_eq!(run(r#"[{a: 1, b: 2}].difference([{b: 2, a: 1}])"#), Value::List(vec![]));
+    assert_eq!(run(r#"[{a: 1, b: 2}].difference([{b: 2, a: 1}])"#), Value::list(vec![]));
     assert_eq!(
         run(r#"[3, 1, 3, 2].group_by(|x| Str(x)).keys()"#),
-        Value::List(vec![Value::Str("3".into()), Value::Str("1".into()), Value::Str("2".into())])
+        Value::list(vec![Value::Str("3".into()), Value::Str("1".into()), Value::Str("2".into())])
     );
 }
 
@@ -1305,7 +1305,7 @@ fn functions_can_call_functions_declared_later_and_recurse() {
     "#;
     assert_eq!(
         run(source),
-        Value::List(vec![Value::Bool(true), Value::Bool(true), Value::Bool(false)])
+        Value::list(vec![Value::Bool(true), Value::Bool(true), Value::Bool(false)])
     );
 }
 
@@ -1328,7 +1328,7 @@ fn with_env_applies_to_called_functions_and_is_restored() {
         let inside = with_env_probe()
         [inside, show()]
     "#;
-    assert_eq!(run(source), Value::List(vec![Value::Str("x".into()), Value::Null]));
+    assert_eq!(run(source), Value::list(vec![Value::Str("x".into()), Value::Null]));
 }
 
 #[test]
@@ -1361,7 +1361,7 @@ fn unannotated_propagating_functions_return_consistent_wrappers() {
     "#;
     assert_eq!(
         run(source),
-        Value::List(vec![
+        Value::list(vec![
             Value::Result(Ok(Box::new(Value::Str("HI".into())))),
             Value::Bool(true),
             Value::Option(Some(Box::new(Value::Str("a".into())))),

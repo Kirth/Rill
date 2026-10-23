@@ -36,6 +36,8 @@ the single-commit prototype that preceded it.
 - **Bare calls** are whitespace-aware: `print [1, 2]`, `print {a: 1}`,
   `print -1` and `print args.host` are calls; `xs[0]` and `a - 1` are not.
 - Unary minus is a real operator: `-2 ** 2` is `-4`.
+- Function parameters, loop variables and `if let` bindings are immutable;
+  copy them into a `var` to change them.
 - `1 == 1.0` is `true`; numeric equality crosses Int and Float everywhere.
 - `slice(start, end)` with `start > end` is an error instead of a panic.
 - Paths are tilde-expanded only when written as literals; runtime values are
@@ -78,5 +80,11 @@ the single-commit prototype that preceded it.
 - Robustness: evaluator runs on a large stack, call depth is limited
   (`RILL_MAX_CALL_DEPTH`), `repeat` and ranges are size-capped, non-UTF-8
   environments no longer panic, `xs += [x]` is amortised O(1).
+- Performance: lists, tuples and maps are shared and copied on write, so
+  reading a variable never deep-copies a collection; `Value` shrank to 32
+  bytes; cancellation is polled every 64 steps instead of locking on every
+  node; sequential `for` loops reuse one scope.
+- `for` expressions infer their element type from the `emit` values, and
+  calling a value of unknown type is allowed.
 - Repository: README, reference docs, CI (Linux and macOS, MSRV 1.80),
   flake, snapshot and conformance test suites, dual MIT/Apache-2.0 license.

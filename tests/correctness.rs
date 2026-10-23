@@ -78,10 +78,10 @@ fail()
 
 #[test]
 fn callback_signatures_and_yaml_shapes_agree() {
-    assert_eq!(run(r#"({a: 2}).map(|name, value| value + 1)"#), Value::List(vec![Value::Int(3)]));
+    assert_eq!(run(r#"({a: 2}).map(|name, value| value + 1)"#), Value::list(vec![Value::Int(3)]));
     assert_eq!(
         run(r#""[1, 2]".parse_yaml() |> .map(|x| x + 1)"#),
-        Value::List(vec![Value::Int(2), Value::Int(3)])
+        Value::list(vec![Value::Int(2), Value::Int(3)])
     );
     for source in [
         "({a: 1}).map(|x| x)",
@@ -123,7 +123,7 @@ fn bounded_parallel_map_preserves_order() {
     .unwrap();
     assert_eq!(
         value,
-        Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6), Value::Int(8),])
+        Value::list(vec![Value::Int(2), Value::Int(4), Value::Int(6), Value::Int(8),])
     );
     assert!(start.elapsed() >= std::time::Duration::from_millis(40));
     assert!(start.elapsed() < std::time::Duration::from_secs(1));
@@ -140,7 +140,7 @@ fn parallel_environment_updates_are_local_to_each_callback() {
         2,
     )
     .unwrap();
-    assert_eq!(value, Value::List(vec![Value::Str("1".into()), Value::Str("2".into())]));
+    assert_eq!(value, Value::list(vec![Value::Str("1".into()), Value::Str("2".into())]));
     assert_eq!(std::env::var_os("RILL_PARALLEL_LOCAL_ENV"), host_value);
 }
 
@@ -162,8 +162,8 @@ fn ordered_parallel_for_and_filter_ignore_completion_order() {
             2,
         )
         .unwrap(),
-        Value::List(vec![
-            Value::List(vec![
+        Value::list(vec![
+            Value::list(vec![
                 Value::Int(1),
                 Value::Int(10),
                 Value::Int(2),
@@ -171,7 +171,7 @@ fn ordered_parallel_for_and_filter_ignore_completion_order() {
                 Value::Int(3),
                 Value::Int(30),
             ]),
-            Value::List(vec![Value::Int(2), Value::Int(3), Value::Int(4)]),
+            Value::list(vec![Value::Int(2), Value::Int(3), Value::Int(4)]),
         ])
     );
 }
@@ -180,9 +180,9 @@ fn ordered_parallel_for_and_filter_ignore_completion_order() {
 fn nested_parallel_work_reuses_single_worker_pool() {
     assert_eq!(
         run_parallel("[1, 2].parallel_map(|x| [x, x + 1].parallel_map(|y| y * 2))", 1,).unwrap(),
-        Value::List(vec![
-            Value::List(vec![Value::Int(2), Value::Int(4)]),
-            Value::List(vec![Value::Int(4), Value::Int(6)]),
+        Value::list(vec![
+            Value::list(vec![Value::Int(2), Value::Int(4)]),
+            Value::list(vec![Value::Int(4), Value::Int(6)]),
         ])
     );
 }
@@ -344,7 +344,7 @@ fn moderate_recursion_succeeds() {
 fn slice_with_reversed_bounds_is_an_error() {
     let error = rill::run_source("[1, 2, 3].slice(2, 1)", vec![]).expect_err("reversed slice");
     assert!(error.to_string().contains("slice start 2 is after end 1"), "{error}");
-    assert_eq!(run("[1, 2, 3].slice(1, 1)"), Value::List(vec![]));
+    assert_eq!(run("[1, 2, 3].slice(1, 1)"), Value::list(vec![]));
 }
 
 #[test]
@@ -353,4 +353,37 @@ fn repeat_and_range_refuse_absurd_sizes() {
     assert!(error.to_string().contains("repeat would produce"), "{error}");
     let error = rill::run_source("0..100000000", vec![]).expect_err("range cap");
     assert!(error.to_string().contains("would produce more than"), "{error}");
+}
+
+#[test]
+fn shared_collections_keep_value_semantics() {
+    // Reading a variable shares the collection; writing copies on write.
+    let value = run(
+        "var a = [1, 2]\nlet b = a\na += [3]\nvar m = {k: [1]}\nlet n = m\nm.k += [2]\n[a, b, m.k, n.k]",
+    );
+    assert_eq!(
+        value,
+        Value::list(vec![
+            Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            Value::list(vec![Value::Int(1), Value::Int(2)]),
+            Value::list(vec![Value::Int(1), Value::Int(2)]),
+            Value::list(vec![Value::Int(1)]),
+        ])
+    );
+}
+
+#[test]
+fn closures_created_in_loops_capture_each_iteration() {
+    let value = run("let fs = for i in 0..3 { emit || i }\nfs.map(|f| f())");
+    assert_eq!(value, Value::list(vec![Value::Int(0), Value::Int(1), Value::Int(2)]));
+    let value =
+        run("var fs = []\nfor x in [1, 2] { let y = x * 10\n fs += [|| y] }\nfs.map(|f| f())");
+    assert_eq!(value, Value::list(vec![Value::Int(10), Value::Int(20)]));
+}
+
+#[test]
+fn copying_a_large_list_is_cheap() {
+    let start = std::time::Instant::now();
+    run("let xs = 0..200000\nvar n = 0\nfor i in 0..2000 { let ys = xs\n n += ys.len() }\nn");
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "took {:?}", start.elapsed());
 }

@@ -86,19 +86,19 @@ fn collections_chain_and_bind_implicit_receivers_to_each_item() {
 let alloc = "maas_ips:\n  host: 10.0.0.1".parse_yaml()
 [alloc.get("maas_ips").get("host"), alloc.get("absent").get("host")]
 "#),
-        Value::List(vec![Value::Str("10.0.0.1".into()), Value::Null])
+        Value::list(vec![Value::Str("10.0.0.1".into()), Value::Null])
     );
     assert_eq!(
         run(r#"
 [" a ", " b ", " c "] |> .map(.trim()).take(2).reverse()
 "#),
-        Value::List(vec![Value::Str("b".into()), Value::Str("a".into())])
+        Value::list(vec![Value::Str("b".into()), Value::Str("a".into())])
     );
     assert_eq!(
         run(r#"
 ({a: 2, b: 4}).map(|key, value| value + 1).filter(. > 3)
 "#),
-        Value::List(vec![Value::Int(5)])
+        Value::list(vec![Value::Int(5)])
     );
     check(r#"let values: List[Str] = [" a "].map(.trim())"#).unwrap();
     check(r#"let values: List[Int] = [1].map(|x| 2).reverse().take(1)"#).unwrap();
@@ -110,7 +110,7 @@ fn list_difference_preserves_order_duplicates_and_nested_values() {
     let value = run(r#"[
         [1, [2]], [3], [1, [2]], 4
     ].difference([[1, [2]], 9])"#);
-    assert_eq!(value, Value::List(vec![Value::List(vec![Value::Int(3)]), Value::Int(4)]));
+    assert_eq!(value, Value::list(vec![Value::list(vec![Value::Int(3)]), Value::Int(4)]));
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn list_symmetric_difference_matches_equality_for_mixed_values() {
     let value = run(r#"[1, 2, 2, 3].symmetric_difference([2, 4, 4])"#);
     assert_eq!(
         value,
-        Value::List(vec![Value::Int(1), Value::Int(3), Value::Int(4), Value::Int(4)])
+        Value::list(vec![Value::Int(1), Value::Int(3), Value::Int(4), Value::Int(4)])
     );
 }
 
@@ -130,7 +130,7 @@ fn map_fields_and_method_names_can_coexist() {
 let obj = {get: "data", trim: "field", custom: |x| x + 1}
 [obj.get("get"), obj.trim, obj.custom(2)]
 "#),
-        Value::List(vec![Value::Str("data".into()), Value::Str("field".into()), Value::Int(3)])
+        Value::list(vec![Value::Str("data".into()), Value::Str("field".into()), Value::Int(3)])
     );
     assert_eq!(
         run(r#"
@@ -138,7 +138,7 @@ let json = {parse: |text| text}
 let path = path("/tmp")
 [json.parse("ok"), path.join("child")]
 "#),
-        Value::List(vec![Value::Str("ok".into()), Value::Path(PathBuf::from("/tmp/child"))])
+        Value::list(vec![Value::Str("ok".into()), Value::Path(PathBuf::from("/tmp/child"))])
     );
     assert_eq!(run(r#"({get: |x| x}).get("get")("ok")"#), Value::Str("ok".into()));
 }
@@ -164,14 +164,14 @@ let data = {name: "rill", count: 2}
     (0s).sleep(),
 ]
 "#),
-        Value::List(vec![
+        Value::list(vec![
             Value::Str("rill".into()),
             Value::Int(2),
             Value::Str("rill".into()),
             Value::Int(2),
-            Value::List(vec![
-                Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]),
-                Value::List(vec![Value::Str("c".into()), Value::Str("d".into())])
+            Value::list(vec![
+                Value::list(vec![Value::Str("a".into()), Value::Str("b".into())]),
+                Value::list(vec![Value::Str("c".into()), Value::Str("d".into())])
             ]),
             Value::Str("example.com".into()),
             Value::Bool(true),
@@ -273,7 +273,7 @@ load()
     assert_eq!(run(&format!(r#"path("{}").exists()"#, filename.display())), Value::Bool(true));
     assert_eq!(
         run(&format!(r#""{}/*.yml".glob()"#, scratch.0.display())),
-        Value::List(vec![Value::Path(filename.clone())])
+        Value::list(vec![Value::Path(filename.clone())])
     );
     std::fs::write(&filename, "broken: [").unwrap();
     for (path, method, expected_kind) in [
@@ -318,7 +318,7 @@ fn archive_methods_list_and_extract() {
     builder.finish().unwrap();
     assert_eq!(
         run(&format!(r#"path("{}").archive_list()"#, archive.display())),
-        Value::List(vec![Value::Str("file.txt".into())])
+        Value::list(vec![Value::Str("file.txt".into())])
     );
     let destination = scratch.0.join("extracted");
     assert_eq!(
@@ -336,13 +336,13 @@ fn archive_methods_list_and_extract() {
 fn method_pipelines_preserve_process_and_function_behavior() {
     assert_eq!(
         run(r#"run printf " a\nb\n" | run cat | .lines() |> .map(.trim()).reverse()"#),
-        Value::List(vec![Value::Str("b".into()), Value::Str("a".into())])
+        Value::list(vec![Value::Str("b".into()), Value::Str("a".into())])
     );
     assert_eq!(run(r#"["printf", "ok"].spawn().await().out"#), Value::Str("ok".into()));
     assert_eq!(run(r#"["sh", "-c", "exit 3"].run().ok"#), Value::Bool(false));
     assert_eq!(
         run(r#"[["printf", "a"], ["printf", "b"]].parallel().map(.out)"#),
-        Value::List(vec![Value::Str("a".into()), Value::Str("b".into())])
+        Value::list(vec![Value::Str("a".into()), Value::Str("b".into())])
     );
     assert_eq!(run(r#"fn double(x: Int) -> Int { x * 2 }; 3 |> double"#), Value::Int(6));
     assert_eq!(run(r#"let double = |x| x * 2; 3 |> double"#), Value::Int(6));
@@ -603,7 +603,7 @@ fn namespace_apis_share_method_behavior() {
     ] {
         assert_eq!(run(namespace), run(method), "{namespace}");
     }
-    assert_eq!(run(r#""[1]" |> json.parse() |> .take(1)"#), Value::List(vec![Value::Int(1)]));
+    assert_eq!(run(r#""[1]" |> json.parse() |> .take(1)"#), Value::list(vec![Value::Int(1)]));
     let scratch = Scratch::new();
     let file = scratch.0.join("file");
     assert_eq!(run(&format!(r#"fs.write("{}", "hello")"#, file.display())), Value::Null);

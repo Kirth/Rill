@@ -419,3 +419,21 @@ let z: Int = if flag { 1 } else { 2 }
 "#,
     );
 }
+
+#[test]
+fn parameters_and_loop_variables_are_immutable() {
+    let error = check_err("fn f(x: Int) -> Int { x = 2\n x }");
+    assert!(error.contains("cannot assign to immutable variable 'x'"), "{error}");
+    let error = check_err("for x in [1] { x = 2 }");
+    assert!(error.contains("cannot assign to immutable variable 'x'"), "{error}");
+    check_ok("fn f(x: Int) -> Int { var y = x\n y += 1\n y }");
+}
+
+#[test]
+fn for_expressions_infer_their_element_type_from_emit() {
+    check_ok("let fs = for i in 0..3 { emit || i }\nfs.map(|f| f())");
+    check_ok("let r = race for x in [1] { emit x }\nprint(r + 1)");
+    let error = check_err("let names = for x in [1, 2] { emit \"n{x}\" }\nnames.map(|n| n + 1)");
+    assert!(error.contains("Str and Int"), "{error}");
+    check_ok("let mixed = for x in [1] { if x > 0 { emit 1 } else { emit \"s\" } }\nmixed.len()");
+}

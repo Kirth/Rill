@@ -99,7 +99,9 @@ impl Env {
             input.unwrap_or_default().lines().map(|line| Value::Str(line.to_string())).collect();
         root.insert(
             "input".to_string(),
-            Binding::cell(Value::Map(Map::from_iter([("lines".to_string(), Value::List(lines))]))),
+            Binding::cell(Value::Map(
+                Map::from_iter([("lines".to_string(), Value::List(lines))]).into(),
+            )),
         );
         Self { scopes: vec![Arc::new(root)], frozen: 0 }
     }
@@ -119,6 +121,11 @@ impl Env {
     /// Declare a mutable binding in the innermost scope.
     fn set(&mut self, name: String, value: Value) {
         self.current().insert(name, Binding::cell(value));
+    }
+
+    /// Declare an immutable binding (loop variables, destructured patterns).
+    fn bind_immutable(&mut self, name: String, value: Value) {
+        self.current().insert(name, Binding::value(value));
     }
 
     fn bind(&mut self, name: String, value: Value, mutable: bool) {
@@ -239,7 +246,8 @@ enum Flow {
 
 #[derive(Debug)]
 enum EvalError {
-    Runtime(RillError),
+    /// Boxed so that `Result<Value, EvalError>` stays small on the hot path.
+    Runtime(Box<RillError>),
     Control(Flow),
     Cancelled,
 }
@@ -283,14 +291,14 @@ fn is_truthy(value: &Value) -> Result<bool, EvalError> {
 
 impl From<RillError> for EvalError {
     fn from(error: RillError) -> Self {
-        Self::Runtime(error)
+        Self::Runtime(Box::new(error))
     }
 }
 
 impl EvalError {
     fn diagnostic(self) -> RillError {
         match self {
-            Self::Runtime(error) => error,
+            Self::Runtime(error) => *error,
             Self::Control(_) => RillError::new("control flow escaped its evaluation boundary"),
             Self::Cancelled => RillError::new("evaluation cancelled").with_kind(ErrorKind::Runtime),
         }
@@ -304,6 +312,9 @@ pub struct Evaluator {
     /// child processes.  Evaluator-local; the host process is never mutated.
     environment: BTreeMap<String, String>,
     function_depth: usize,
+    /// Statements and expressions evaluated since the last cancellation poll;
+    /// polling the token locks a mutex, so it is done every `POLL_INTERVAL` steps.
+    steps: u32,
     remote_prefix: Vec<RemoteLayer>,
     executor: ParallelExecutor,
     cancellation: CancellationToken,
@@ -313,7 +324,7 @@ pub struct Evaluator {
 impl Evaluator {
     fn bind_pattern(&mut self, pattern: &LetPattern, value: Value) -> Result<(), EvalError> {
         match pattern {
-            LetPattern::Ident(name) => self.env.set(name.clone(), value),
+            LetPattern::Ident(name) => self.env.bind_immutable(name.clone(), value),
             LetPattern::List(names) => {
                 let items = match value {
                     Value::List(v) => v,
@@ -327,7 +338,10 @@ impl Evaluator {
                 };
                 for (i, name) in names.iter().enumerate() {
                     if name != "_" {
-                        self.env.set(name.clone(), items.get(i).cloned().unwrap_or(Value::Null));
+                        self.env.bind_immutable(
+                            name.clone(),
+                            items.get(i).cloned().unwrap_or(Value::Null),
+                        );
                     }
                 }
             }
@@ -350,9 +364,9 @@ impl Evaluator {
                     ))
                     .into());
                 }
-                for (name, item) in names.iter().zip(items) {
+                for (name, item) in names.iter().zip(Arc::unwrap_or_clone(items)) {
                     if name != "_" {
-                        self.env.set(name.clone(), item);
+                        self.env.bind_immutable(name.clone(), item);
                     }
                 }
             }
@@ -369,7 +383,10 @@ impl Evaluator {
                 };
                 for (key, alias) in pairs {
                     let binding = alias.as_deref().unwrap_or(key.as_str());
-                    self.env.set(binding.to_string(), map.get(key).cloned().unwrap_or(Value::Null));
+                    self.env.bind_immutable(
+                        binding.to_string(),
+                        map.get(key).cloned().unwrap_or(Value::Null),
+                    );
                 }
             }
         }
@@ -396,7 +413,7 @@ impl Evaluator {
                 if items.len() != names.len() {
                     return Ok(None);
                 }
-                for (name, item) in names.iter().zip(items) {
+                for (name, item) in names.iter().zip(Arc::unwrap_or_clone(items)) {
                     if name != "_" {
                         bindings.push((name.clone(), item));
                     }
@@ -440,6 +457,7 @@ impl Evaluator {
             env: Env::new(args, input),
             environment,
             function_depth: 0,
+            steps: 0,
             remote_prefix: Vec::new(),
             executor,
             cancellation: CancellationToken::new(),
@@ -456,6 +474,7 @@ impl Evaluator {
             env,
             environment: self.environment.clone(),
             function_depth: self.function_depth,
+            steps: 0,
             remote_prefix: self.remote_prefix.clone(),
             executor: self.executor.clone(),
             cancellation,
@@ -483,7 +502,7 @@ impl Evaluator {
     }
 
     fn environment_value(&self) -> Value {
-        Value::Map(
+        Value::map(
             self.environment
                 .iter()
                 .map(|(name, value)| (name.clone(), Value::Str(value.clone())))
@@ -494,6 +513,19 @@ impl Evaluator {
     fn check_cancelled(&self) -> Result<(), EvalError> {
         if self.cancellation.is_cancelled() {
             Err(EvalError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Cheap per-step cancellation check: only every `POLL_INTERVAL` steps
+    /// touches the token (which takes a lock).
+    #[inline]
+    fn poll_cancelled(&mut self) -> Result<(), EvalError> {
+        const POLL_INTERVAL: u32 = 64;
+        self.steps = self.steps.wrapping_add(1);
+        if self.steps % POLL_INTERVAL == 0 {
+            self.check_cancelled()
         } else {
             Ok(())
         }
@@ -526,7 +558,7 @@ impl Evaluator {
             .ok()
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| RillError::new("parallel worker count must be greater than zero"))?;
-        ParallelExecutor::new(count).map_err(EvalError::Runtime)
+        ParallelExecutor::new(count).map_err(EvalError::from)
     }
 
     fn execute_command(
@@ -736,7 +768,7 @@ impl Evaluator {
                             &terminal,
                             &cancellation,
                             ParallelTerminal::Runtime(match error {
-                                EvalError::Runtime(error) => error,
+                                EvalError::Runtime(error) => *error,
                                 other => RillError::new(format!("{other:?}")),
                             }),
                         );
@@ -760,7 +792,7 @@ impl Evaluator {
                             record_parallel_terminal(
                                 &terminal,
                                 &cancellation,
-                                ParallelTerminal::Runtime(error),
+                                ParallelTerminal::Runtime(*error),
                             );
                             None
                         }
@@ -804,7 +836,7 @@ impl Evaluator {
                 child.env.push();
                 if let Err(error) = child.bind_pattern(pattern, item) {
                     state.finish(RaceOutcome::Terminal(ParallelTerminal::Runtime(match error {
-                        EvalError::Runtime(error) => error,
+                        EvalError::Runtime(error) => *error,
                         other => RillError::new(format!("{other:?}")),
                     })));
                     return;
@@ -848,7 +880,7 @@ impl Evaluator {
                 }
                 Err(EvalError::Cancelled) => return,
                 Err(EvalError::Runtime(error)) => {
-                    state.finish(RaceOutcome::Terminal(ParallelTerminal::Runtime(error)));
+                    state.finish(RaceOutcome::Terminal(ParallelTerminal::Runtime(*error)));
                     return;
                 }
                 Err(EvalError::Control(Flow::Emit(value))) => {
@@ -869,7 +901,9 @@ impl Evaluator {
         match stmt {
             Stmt::Located { stmt, span } => {
                 self.eval_stmt_inner(stmt).map_err(|error| match error {
-                    EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
+                    EvalError::Runtime(error) => {
+                        EvalError::Runtime(Box::new(error.with_span(*span)))
+                    }
                     other => other,
                 })
             }
@@ -878,7 +912,7 @@ impl Evaluator {
     }
 
     fn eval_stmt_inner(&mut self, stmt: &Stmt) -> Result<Flow, EvalError> {
-        self.check_cancelled()?;
+        self.poll_cancelled()?;
         match stmt {
             Stmt::Located { .. } => self.eval_stmt(stmt),
             Stmt::Use(module) => {
@@ -930,7 +964,7 @@ impl Evaluator {
                             ))
                             .into());
                         }
-                        for (name, item) in names.iter().zip(items) {
+                        for (name, item) in names.iter().zip(Arc::unwrap_or_clone(items)) {
                             if name != "_" {
                                 self.env.bind(name.clone(), item, *mutable);
                             }
@@ -969,11 +1003,11 @@ impl Evaluator {
                 let op = *op;
                 let (root, steps) = self.resolve_place(target)?;
                 let updated =
-                    self.env.update(&root, |value| assign_place(value, &steps, op, rhs))?;
+                    self.env.update(root, |value| assign_place(value, &steps, op, rhs))?;
                 if !updated {
-                    return Err(EvalError::Runtime(RillError::new(format!(
+                    return Err(EvalError::Runtime(Box::new(RillError::new(format!(
                         "assignment to undeclared variable '{root}'"
-                    ))));
+                    )))));
                 }
                 Ok(Flow::Value(Value::Null))
             }
@@ -1013,7 +1047,12 @@ impl Evaluator {
                         if items.is_empty() {
                             return Err(RillError::new("on needs a nonempty command prefix").into());
                         }
-                        RemoteLayer::Exec(items.into_iter().map(|v| v.as_string_lossy()).collect())
+                        RemoteLayer::Exec(
+                            Arc::unwrap_or_clone(items)
+                                .into_iter()
+                                .map(|v| v.as_string_lossy())
+                                .collect(),
+                        )
                     }
                     other => {
                         return Err(RillError::new(format!(
@@ -1065,7 +1104,9 @@ impl Evaluator {
         match expr {
             Expr::Located { expr, span } => {
                 self.eval_expr_inner(expr).map_err(|error| match error {
-                    EvalError::Runtime(error) => EvalError::Runtime(error.with_span(*span)),
+                    EvalError::Runtime(error) => {
+                        EvalError::Runtime(Box::new(error.with_span(*span)))
+                    }
                     flow => flow,
                 })
             }
@@ -1074,7 +1115,7 @@ impl Evaluator {
     }
 
     fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value, EvalError> {
-        self.check_cancelled()?;
+        self.poll_cancelled()?;
         match expr {
             Expr::Located { .. } => self.eval_expr(expr),
             Expr::Literal(value) => self.eval_literal(value),
@@ -1094,18 +1135,18 @@ impl Evaluator {
                 .iter()
                 .map(|item| self.eval_expr(item))
                 .collect::<Result<Vec<_>, _>>()
-                .map(Value::List),
+                .map(Value::list),
             Expr::Tuple(items) => items
                 .iter()
                 .map(|item| self.eval_expr(item))
                 .collect::<Result<Vec<_>, _>>()
-                .map(Value::Tuple),
+                .map(Value::tuple),
             Expr::Map(pairs) => {
                 let mut map = Map::new();
                 for (key, expr) in pairs {
                     map.insert(key.clone(), self.eval_expr(expr)?);
                 }
-                Ok(Value::Map(map))
+                Ok(Value::Map(map.into()))
             }
             Expr::Call { callee, args } => self.eval_call(callee, args),
             Expr::Index { base, index } => {
@@ -1125,7 +1166,7 @@ impl Evaluator {
                         };
                         let len = items.len() as i64;
                         let i = if idx < 0 { len + idx } else { idx };
-                        items.into_iter().nth(i as usize).ok_or_else(|| {
+                        items.get(i as usize).cloned().ok_or_else(|| {
                             RillError::new(format!("index {idx} out of bounds (len {len})")).into()
                         })
                     }
@@ -1204,7 +1245,7 @@ impl Evaluator {
                     Value::List(items) => {
                         let (from, to) =
                             slice_bounds(items.len(), bounds[0], bounds[1], *inclusive);
-                        Ok(Value::List(items[from..to.max(from)].to_vec()))
+                        Ok(Value::List(items[from..to.max(from)].to_vec().into()))
                     }
                     Value::Str(text) => {
                         let chars: Vec<char> = text.chars().collect();
@@ -1330,13 +1371,13 @@ impl Evaluator {
                             }
                         }
                     }
-                    return Ok(Value::List(collected));
+                    return Ok(Value::List(collected.into()));
                 }
                 let list = match iter_val {
                     Value::List(items) => items,
-                    Value::Map(map) => map
+                    Value::Map(map) => Arc::unwrap_or_clone(map)
                         .into_iter()
-                        .map(|(key, value)| Value::Tuple(vec![Value::Str(key), value]))
+                        .map(|(key, value)| Value::Tuple(vec![Value::Str(key), value].into()))
                         .collect(),
                     other => {
                         return Err(RillError::new(format!(
@@ -1349,29 +1390,37 @@ impl Evaluator {
                 match mode {
                     ForMode::Sequential => {
                         let mut collected: Vec<Value> = Vec::new();
-                        for item in list {
-                            let result = self.scoped(|evaluator| {
+                        // One scope serves every iteration: the loop variable is
+                        // rebound in place, and scopes are copy-on-write, so a
+                        // closure created in an earlier iteration keeps its own
+                        // snapshot.  This avoids allocating a scope per iteration.
+                        self.scoped(|evaluator| {
+                            for item in Arc::unwrap_or_clone(list) {
                                 evaluator.bind_pattern(pattern, item)?;
-                                evaluator.eval_stmts_collecting_emits(body)
-                            });
-                            let (flow, emits) = result?;
-                            collected.extend(emits);
-                            match flow {
-                                Flow::Value(_) | Flow::Continue => {}
-                                Flow::Break(_) => break,
-                                Flow::Return(v) => return Err(EvalError::Control(Flow::Return(v))),
-                                Flow::Propagate(v) => {
-                                    return Err(EvalError::Control(Flow::Propagate(v)))
+                                let (flow, emits) = evaluator.eval_stmts_collecting_emits(body)?;
+                                collected.extend(emits);
+                                match flow {
+                                    Flow::Value(_) | Flow::Continue => {}
+                                    Flow::Break(_) => break,
+                                    Flow::Return(v) => {
+                                        return Err(EvalError::Control(Flow::Return(v)))
+                                    }
+                                    Flow::Propagate(v) => {
+                                        return Err(EvalError::Control(Flow::Propagate(v)))
+                                    }
+                                    Flow::Emit(_) => unreachable!(),
                                 }
-                                Flow::Emit(_) => unreachable!(),
                             }
-                        }
-                        Ok(Value::List(collected))
+                            Ok(())
+                        })?;
+                        Ok(Value::List(collected.into()))
                     }
                     ForMode::Parallel => {
-                        self.eval_for_parallel(workers.as_deref(), pattern, list, body)
+                        self.eval_for_parallel(workers.as_deref(), pattern, (*list).clone(), body)
                     }
-                    ForMode::Race => self.eval_for_race(workers.as_deref(), pattern, list, body),
+                    ForMode::Race => {
+                        self.eval_for_race(workers.as_deref(), pattern, (*list).clone(), body)
+                    }
                 }
             }
             Expr::If { cond, pattern, then_body, else_body } => {
@@ -1505,13 +1554,14 @@ impl Evaluator {
 
     fn configure_args(&mut self, group: &ArgGroup) -> Result<(), EvalError> {
         let raw = match self.env.get("args") {
-            Some(Value::List(values)) => {
-                values.into_iter().map(|value| value.as_string_lossy()).collect::<Vec<_>>()
-            }
+            Some(Value::List(values)) => Arc::unwrap_or_clone(values)
+                .into_iter()
+                .map(|value| value.as_string_lossy())
+                .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
         let values = self.parse_arg_group(group, &raw)?;
-        self.env.set("args".to_string(), Value::Map(values));
+        self.env.set("args".to_string(), Value::Map(values.into()));
         Ok(())
     }
 
@@ -1616,7 +1666,7 @@ impl Evaluator {
             let command_values = self.parse_arg_group(&command, &raw[next_index..])?;
             values.insert(
                 "command".to_string(),
-                Value::Map(Map::from_iter([(command.name.clone(), Value::Map(command_values))])),
+                Value::map(Map::from_iter([(command.name.clone(), Value::map(command_values))])),
             );
         }
         if position < positional.len() {
@@ -1668,9 +1718,12 @@ impl Evaluator {
     /// Evaluate an assignment target into its root variable and the field/index
     /// steps leading to the assigned slot.  Index expressions are evaluated
     /// left to right before any mutation happens.
-    fn resolve_place(&mut self, place: &Expr) -> Result<(String, Vec<PlaceStep>), EvalError> {
+    fn resolve_place<'a>(
+        &mut self,
+        place: &'a Expr,
+    ) -> Result<(&'a str, Vec<PlaceStep>), EvalError> {
         match place.unspanned() {
-            Expr::Ident(name) => Ok((name.clone(), Vec::new())),
+            Expr::Ident(name) => Ok((name.as_str(), Vec::new())),
             Expr::Field { base, name } => {
                 let (root, mut steps) = self.resolve_place(base)?;
                 steps.push(PlaceStep::Field(name.clone()));
@@ -2036,7 +2089,7 @@ impl Evaluator {
                                 })
                         });
                     Ok(Value::Result(
-                        result.map(Box::new).map_err(|err| Box::new(Value::Error(err))),
+                        result.map(Box::new).map_err(|err| Box::new(Value::Error(Box::new(err)))),
                     ))
                 }
                 Target::Structural(_) => unreachable!("structural methods dispatch before binding"),
@@ -2170,7 +2223,10 @@ impl Evaluator {
                 }
                 let hosts = match self.eval_expr(&args[0])? {
                     Value::Str(s) => vec![s],
-                    Value::List(items) => items.into_iter().map(|v| v.as_string_lossy()).collect(),
+                    Value::List(items) => Arc::unwrap_or_clone(items)
+                        .into_iter()
+                        .map(|v| v.as_string_lossy())
+                        .collect(),
                     other => {
                         return Err(RillError::new(format!(
                             "Stream.tail hosts must be Str or List, got {}",
@@ -2180,7 +2236,7 @@ impl Evaluator {
                     }
                 };
                 let path = self.eval_expr(&args[1])?.as_string_lossy();
-                let handle = crate::runtime::spawn_tail(hosts, path).map_err(EvalError::Runtime)?;
+                let handle = crate::runtime::spawn_tail(hosts, path).map_err(EvalError::from)?;
                 Ok(Value::Stream(handle))
             }
             ("fs", "write") => {
@@ -2239,7 +2295,7 @@ impl Evaluator {
             ("url", "parse") => {
                 let text = self.eval_one_arg("url.parse", args)?.as_string_lossy();
                 let parsed = parse_url(&text)?;
-                Ok(Value::Map(parsed))
+                Ok(Value::Map(parsed.into()))
             }
             ("hashes", "sha256") => {
                 use sha2::{Digest, Sha256};
@@ -2278,7 +2334,7 @@ impl Evaluator {
                             .to_string(),
                     ));
                 }
-                Ok(Value::List(entries))
+                Ok(Value::List(entries.into()))
             }
             ("archive", "extract") => {
                 if args.len() != 2 {
@@ -2392,7 +2448,7 @@ impl Evaluator {
                 map.insert("is_file".into(), Value::Bool(meta.is_file()));
                 map.insert("is_dir".into(), Value::Bool(meta.is_dir()));
                 map.insert("is_symlink".into(), Value::Bool(meta.file_type().is_symlink()));
-                Ok(Value::Map(map))
+                Ok(Value::Map(map.into()))
             }
             ("fs", "ls") => {
                 let path_str = self.eval_one_arg("fs.ls", args)?.as_string_lossy();
@@ -2405,14 +2461,12 @@ impl Evaluator {
                     entries.push(Value::Path(entry.path()));
                 }
                 entries.sort_by_cached_key(Value::as_string_lossy);
-                Ok(Value::List(entries))
+                Ok(Value::List(entries.into()))
             }
             ("process", "run") => {
                 let raw = argv_from_value(self.eval_one_arg("process.run", args)?, "process.run")?;
                 let argv = self.wrap_remote(raw, false)?;
-                Ok(self
-                    .execute_command(&argv, None, &CommandIo::default())
-                    .map(Value::ProcessResult)?)
+                Ok(self.execute_command(&argv, None, &CommandIo::default()).map(Value::process)?)
             }
             _ => Err(RillError::new(format!("{module} has no function '{name}'")).into()),
         }
@@ -2478,14 +2532,14 @@ impl Evaluator {
                     self.check_cancelled()?;
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                Ok(Value::ProcessResult(TokioProcessRuntime.await_process(handle)?))
+                Ok(Value::ProcessResult((TokioProcessRuntime.await_process(handle)?).into()))
             }
             "parallel" => {
                 let value = self.eval_one_arg("parallel", args)?;
                 let Value::List(commands) = value else {
                     return Err(RillError::new("parallel needs List[List[Str]]").into());
                 };
-                let specs = commands
+                let specs = Arc::unwrap_or_clone(commands)
                     .into_iter()
                     .map(|command| {
                         Ok(ProcessSpec {
@@ -2504,7 +2558,7 @@ impl Evaluator {
                     TokioProcessRuntime
                         .parallel(specs, limit)?
                         .into_iter()
-                        .map(Value::ProcessResult)
+                        .map(Value::process)
                         .collect(),
                 ))
             }
@@ -2528,14 +2582,14 @@ impl Evaluator {
                 let Value::List(items) = list else {
                     return Err(RillError::new("take needs a List").into());
                 };
-                Ok(Value::List(items.into_iter().take(count).collect()))
+                Ok(Value::List(Arc::unwrap_or_clone(items).into_iter().take(count).collect()))
             }
             "reverse" => {
                 let mut value = self.eval_one_arg("reverse", args)?;
                 let Value::List(items) = &mut value else {
                     return Err(RillError::new("reverse needs a List").into());
                 };
-                items.reverse();
+                Arc::make_mut(items).reverse();
                 Ok(value)
             }
             "map" => self.eval_map(args),
@@ -2640,16 +2694,17 @@ impl Evaluator {
             // List methods
             "sort" => {
                 let val = self.eval_expr(&args[0])?;
-                let Value::List(mut items) = val else {
+                let Value::List(items) = val else {
                     return Err(RillError::new("sort needs a List").into());
                 };
+                let mut items = Arc::unwrap_or_clone(items);
                 let all_int = items.iter().all(|v| matches!(v, Value::Int(_)));
                 if all_int {
                     items.sort_by_key(|v| if let Value::Int(n) = v { *n } else { 0 });
                 } else {
                     items.sort_by_cached_key(Value::as_string_lossy);
                 }
-                Ok(Value::List(items))
+                Ok(Value::list(items))
             }
             "flat_map" => self.eval_flat_map(args),
             "find" | "any" => self.eval_search(name, args),
@@ -2658,14 +2713,14 @@ impl Evaluator {
                 let Value::List(items) = val else {
                     return Err(RillError::new("first needs a List").into());
                 };
-                Ok(Value::Option(items.into_iter().next().map(Box::new)))
+                Ok(Value::Option(Arc::unwrap_or_clone(items).into_iter().next().map(Box::new)))
             }
             "last" => {
                 let val = self.eval_expr(&args[0])?;
                 let Value::List(items) = val else {
                     return Err(RillError::new("last needs a List").into());
                 };
-                Ok(Value::Option(items.into_iter().next_back().map(Box::new)))
+                Ok(Value::Option(Arc::unwrap_or_clone(items).into_iter().next_back().map(Box::new)))
             }
             "slice" => {
                 let list = self.eval_expr(&args[0])?;
@@ -2684,7 +2739,7 @@ impl Evaluator {
                         RillError::new(format!("slice start {start} is after end {end}")).into()
                     );
                 }
-                Ok(Value::List(items[from..to].to_vec()))
+                Ok(Value::List(items[from..to].to_vec().into()))
             }
             "skip" => {
                 let list = self.eval_expr(&args[0])?;
@@ -2692,7 +2747,7 @@ impl Evaluator {
                 let Value::List(items) = list else {
                     return Err(RillError::new("skip needs a List").into());
                 };
-                Ok(Value::List(items.into_iter().skip(n).collect()))
+                Ok(Value::List(Arc::unwrap_or_clone(items).into_iter().skip(n).collect()))
             }
             "step" => {
                 let list = self.eval_expr(&args[0])?;
@@ -2703,7 +2758,7 @@ impl Evaluator {
                 let Value::List(items) = list else {
                     return Err(RillError::new("step needs a List").into());
                 };
-                Ok(Value::List(items.into_iter().step_by(n).collect()))
+                Ok(Value::List(Arc::unwrap_or_clone(items).into_iter().step_by(n).collect()))
             }
             "difference" => {
                 let Value::List(a) = self.eval_expr(&args[0])? else {
@@ -2713,12 +2768,14 @@ impl Evaluator {
                     return Err(RillError::new("difference needs a List").into());
                 };
                 Ok(Value::List(match crate::eval_collections::difference_membership(&a, &b) {
-                    Some(membership) => a
+                    Some(membership) => Arc::unwrap_or_clone(a)
                         .into_iter()
                         .zip(membership)
                         .filter_map(|(value, keep)| keep.then_some(value))
                         .collect(),
-                    None => a.into_iter().filter(|x| !b.contains(x)).collect(),
+                    None => {
+                        Arc::unwrap_or_clone(a).into_iter().filter(|x| !b.contains(x)).collect()
+                    }
                 }))
             }
             "symmetric_difference" => {
@@ -2731,11 +2788,13 @@ impl Evaluator {
                 let (only_a, only_b): (Vec<Value>, Vec<Value>) =
                     match crate::eval_collections::symmetric_membership(&a, &b) {
                         Some((a_membership, b_membership)) => (
-                            a.into_iter()
+                            Arc::unwrap_or_clone(a)
+                                .into_iter()
                                 .zip(a_membership)
                                 .filter_map(|(value, keep)| keep.then_some(value))
                                 .collect(),
-                            b.into_iter()
+                            Arc::unwrap_or_clone(b)
+                                .into_iter()
                                 .zip(b_membership)
                                 .filter_map(|(value, keep)| keep.then_some(value))
                                 .collect(),
@@ -2753,14 +2812,14 @@ impl Evaluator {
                 let Value::Map(map) = val else {
                     return Err(RillError::new("keys needs a Map").into());
                 };
-                Ok(Value::List(map.into_keys().map(Value::Str).collect()))
+                Ok(Value::List(Arc::unwrap_or_clone(map).into_keys().map(Value::Str).collect()))
             }
             "values" => {
                 let val = self.eval_expr(&args[0])?;
                 let Value::Map(map) = val else {
                     return Err(RillError::new("values needs a Map").into());
                 };
-                Ok(Value::List(map.into_values().collect()))
+                Ok(Value::List(Arc::unwrap_or_clone(map).into_values().collect()))
             }
             "entries" => {
                 let val = self.eval_expr(&args[0])?;
@@ -2768,7 +2827,10 @@ impl Evaluator {
                     return Err(RillError::new("entries needs a Map").into());
                 };
                 Ok(Value::List(
-                    map.into_iter().map(|(k, v)| Value::Tuple(vec![Value::Str(k), v])).collect(),
+                    Arc::unwrap_or_clone(map)
+                        .into_iter()
+                        .map(|(k, v)| Value::Tuple(vec![Value::Str(k), v].into()))
+                        .collect(),
                 ))
             }
             "contains_key" => {
@@ -2788,7 +2850,7 @@ impl Evaluator {
                 let Value::Map(other) = other_val else {
                     return Err(RillError::new("merge argument must be a Map").into());
                 };
-                base.extend(other);
+                Arc::make_mut(&mut base).extend(Arc::unwrap_or_clone(other));
                 Ok(Value::Map(base))
             }
             _ => {
@@ -2885,19 +2947,20 @@ impl Evaluator {
             Builtin::Shell => {
                 let script = self.eval_expr(&args[0])?.as_string_lossy();
                 let argv = self.wrap_remote(vec!["sh".into(), "-c".into(), script], false)?;
-                Ok(self
-                    .execute_command(&argv, None, &CommandIo::default())
-                    .map(Value::ProcessResult)?)
+                Ok(self.execute_command(&argv, None, &CommandIo::default()).map(Value::process)?)
             }
             Builtin::Docker => {
                 let container = self.eval_expr(&args[0])?.as_string_lossy();
                 validate_remote_name("container name", &container)?;
-                Ok(Value::List(vec![
-                    Value::Str("sudo".into()),
-                    Value::Str("docker".into()),
-                    Value::Str("exec".into()),
-                    Value::Str(container),
-                ]))
+                Ok(Value::List(
+                    vec![
+                        Value::Str("sudo".into()),
+                        Value::Str("docker".into()),
+                        Value::Str("exec".into()),
+                        Value::Str(container),
+                    ]
+                    .into(),
+                ))
             }
             Builtin::Exit => {
                 let code = match args.first() {
@@ -2927,17 +2990,17 @@ impl Evaluator {
         match list {
             Value::List(items) => {
                 let mut out = Vec::new();
-                for item in items {
+                for item in Arc::unwrap_or_clone(items) {
                     out.push(self.apply_unary(mapper, item)?);
                 }
-                Ok(Value::List(out))
+                Ok(Value::List(out.into()))
             }
             Value::Map(entries) => {
                 let mut out = Vec::new();
-                for (key, value) in entries {
+                for (key, value) in Arc::unwrap_or_clone(entries) {
                     out.push(self.apply_binary(mapper, Value::Str(key), value)?);
                 }
-                Ok(Value::List(out))
+                Ok(Value::List(out.into()))
             }
             Value::Option(Some(value)) => {
                 Ok(Value::Option(Some(Box::new(self.apply_unary(mapper, *value)?))))
@@ -2964,10 +3027,13 @@ impl Evaluator {
 
         // (item_args, is_binary) per slot — binary for Map entries (key, value)
         let slots: Vec<(Vec<Value>, bool)> = match list {
-            Value::List(items) => items.into_iter().map(|v| (vec![v], false)).collect(),
-            Value::Map(entries) => {
-                entries.into_iter().map(|(k, v)| (vec![Value::Str(k), v], true)).collect()
+            Value::List(items) => {
+                Arc::unwrap_or_clone(items).into_iter().map(|v| (vec![v], false)).collect()
             }
+            Value::Map(entries) => Arc::unwrap_or_clone(entries)
+                .into_iter()
+                .map(|(k, v)| (vec![Value::Str(k), v], true))
+                .collect(),
             other => {
                 return Err(RillError::new(format!(
                     "parallel_map needs a List or Map, got {}",
@@ -3010,7 +3076,7 @@ impl Evaluator {
                             record_parallel_terminal(
                                 &terminal,
                                 &cancellation,
-                                ParallelTerminal::Runtime(error),
+                                ParallelTerminal::Runtime(*error),
                             );
                             None
                         }
@@ -3042,12 +3108,12 @@ impl Evaluator {
         };
         let predicate = &args[1];
         let mut out = Vec::new();
-        for item in items {
+        for item in Arc::unwrap_or_clone(items) {
             if self.apply_unary(predicate, item.clone())?.truthy() {
                 out.push(item);
             }
         }
-        Ok(Value::List(out))
+        Ok(Value::List(out.into()))
     }
 
     fn eval_parallel_filter(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3064,7 +3130,7 @@ impl Evaluator {
         let template = self.fork(cancellation.clone());
         let executor = self.executor.clone();
         let decisions = executor.pool.install(|| {
-            items
+            Arc::unwrap_or_clone(items)
                 .into_par_iter()
                 .map(|item| {
                     if cancellation.is_cancelled() {
@@ -3078,7 +3144,7 @@ impl Evaluator {
                             record_parallel_terminal(
                                 &terminal,
                                 &cancellation,
-                                ParallelTerminal::Runtime(error),
+                                ParallelTerminal::Runtime(*error),
                             );
                             None
                         }
@@ -3112,13 +3178,13 @@ impl Evaluator {
             return Err(RillError::new("flatten needs a List").into());
         };
         let mut out = Vec::new();
-        for item in items {
+        for item in Arc::unwrap_or_clone(items) {
             match item {
-                Value::List(inner) => out.extend(inner),
+                Value::List(inner) => out.extend(Arc::unwrap_or_clone(inner)),
                 other => out.push(other),
             }
         }
-        Ok(Value::List(out))
+        Ok(Value::List(out.into()))
     }
 
     fn eval_zip(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3133,7 +3199,11 @@ impl Evaluator {
         let Value::List(b) = b else {
             return Err(RillError::new("zip argument must be a List").into());
         };
-        let out = a.into_iter().zip(b).map(|(x, y)| Value::Tuple(vec![x, y])).collect();
+        let out = Arc::unwrap_or_clone(a)
+            .into_iter()
+            .zip(Arc::unwrap_or_clone(b))
+            .map(|(x, y)| Value::Tuple(vec![x, y].into()))
+            .collect();
         Ok(Value::List(out))
     }
 
@@ -3142,10 +3212,10 @@ impl Evaluator {
         let Value::List(items) = list else {
             return Err(RillError::new("enumerate needs a List").into());
         };
-        let out = items
+        let out = Arc::unwrap_or_clone(items)
             .into_iter()
             .enumerate()
-            .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v]))
+            .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v].into()))
             .collect();
         Ok(Value::List(out))
     }
@@ -3160,11 +3230,11 @@ impl Evaluator {
         };
         let keyer = &args[1];
         let mut map: indexmap::IndexMap<String, Vec<Value>> = indexmap::IndexMap::new();
-        for item in items {
+        for item in Arc::unwrap_or_clone(items) {
             let key = self.apply_unary(keyer, item.clone())?.as_string_lossy();
             map.entry(key).or_default().push(item);
         }
-        Ok(Value::Map(map.into_iter().map(|(k, v)| (k, Value::List(v))).collect()))
+        Ok(Value::map(map.into_iter().map(|(k, v)| (k, Value::List(v.into()))).collect()))
     }
 
     fn eval_flat_map(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3177,14 +3247,14 @@ impl Evaluator {
         };
         let mapper = &args[1];
         let mut out = Vec::new();
-        for item in items {
+        for item in Arc::unwrap_or_clone(items) {
             let mapped = self.apply_unary(mapper, item)?;
             match mapped {
-                Value::List(inner) => out.extend(inner),
+                Value::List(inner) => out.extend(Arc::unwrap_or_clone(inner)),
                 other => out.push(other),
             }
         }
-        Ok(Value::List(out))
+        Ok(Value::List(out.into()))
     }
 
     fn eval_search(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3196,7 +3266,7 @@ impl Evaluator {
             return Err(RillError::new(format!("{name} needs a List")).into());
         };
         let pred = &args[1];
-        for item in items {
+        for item in Arc::unwrap_or_clone(items) {
             let result = self.apply_unary(pred, item.clone())?;
             if is_truthy(&result)? {
                 return Ok(if name == "any" {
@@ -3322,7 +3392,8 @@ impl Evaluator {
                     break;
                 }
             };
-            self.env.set(param.name.clone(), value);
+            // Parameters are immutable, like `let`: no shared cell is needed.
+            self.env.bind(param.name.clone(), value, false);
         }
         if let Err(error) = bind_result {
             self.env.pop();
@@ -3570,7 +3641,7 @@ impl Evaluator {
             io_configs.push(self.command_io(command)?);
         }
         let result = self.execute_pipeline(&argv, &io_configs)?;
-        Ok(Value::ProcessResult(result))
+        Ok(Value::ProcessResult(result.into()))
     }
 
     fn eval_command(
@@ -3602,7 +3673,7 @@ impl Evaluator {
             }
             Ok(Value::Str(result.stdout_text_lossy().into_owned()))
         } else {
-            Ok(Value::ProcessResult(self.execute_command(&argv, input, &io)?))
+            Ok(Value::ProcessResult((self.execute_command(&argv, input, &io)?).into()))
         }
     }
 
@@ -3612,13 +3683,14 @@ impl Evaluator {
         status: Option<i32>,
         span: crate::diagnostic::Span,
     ) -> Result<Value, EvalError> {
-        let err_val = Value::Result(Err(Box::new(Value::Error(crate::types::ErrorValue {
-            kind: crate::types::ErrorKind::Process,
-            message: msg.clone(),
-            operation: None,
-            status,
-            span: None,
-        }))));
+        let err_val =
+            Value::Result(Err(Box::new(Value::Error(Box::new(crate::types::ErrorValue {
+                kind: crate::types::ErrorKind::Process,
+                message: msg.clone(),
+                operation: None,
+                status,
+                span: None,
+            })))));
         if self.function_depth > 0 {
             Err(EvalError::Control(Flow::Propagate(err_val)))
         } else {
@@ -3634,13 +3706,21 @@ impl Evaluator {
                 CommandArg::String(value) => out.push(value.clone()),
                 CommandArg::Var(name) => match self.command_var(name)? {
                     Value::List(items) => {
-                        out.extend(items.into_iter().map(|item| item.as_string_lossy()));
+                        out.extend(
+                            Arc::unwrap_or_clone(items)
+                                .into_iter()
+                                .map(|item| item.as_string_lossy()),
+                        );
                     }
                     other => out.push(other.as_string_lossy()),
                 },
                 CommandArg::Splat(name) => match self.command_var(name)? {
                     Value::List(items) => {
-                        out.extend(items.into_iter().map(|item| item.as_string_lossy()));
+                        out.extend(
+                            Arc::unwrap_or_clone(items)
+                                .into_iter()
+                                .map(|item| item.as_string_lossy()),
+                        );
                     }
                     other => out
                         .extend(other.as_string_lossy().split_whitespace().map(|w| w.to_string())),
@@ -3721,7 +3801,7 @@ impl Evaluator {
                     let Value::Map(values) = value else {
                         return Err(RillError::new("command env config needs a Map").into());
                     };
-                    for (key, value) in values {
+                    for (key, value) in Arc::unwrap_or_clone(values) {
                         io.env.insert(key, value.as_string_lossy());
                     }
                 }
@@ -3756,10 +3836,10 @@ impl Evaluator {
 
     fn config_path(&mut self, expr: &Expr, name: &str) -> Result<PathBuf, EvalError> {
         self.path_from_expr(expr).map_err(|error| match error {
-            EvalError::Runtime(error) => EvalError::Runtime(RillError::new(format!(
+            EvalError::Runtime(error) => EvalError::Runtime(Box::new(RillError::new(format!(
                 "command {name} config: {}",
                 error.message
-            ))),
+            )))),
             other => other,
         })
     }
@@ -3808,15 +3888,15 @@ fn record_parallel_terminal(
 
 fn catch_parallel_job<T>(job: impl FnOnce() -> Result<T, EvalError>) -> Result<T, EvalError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
-        Err(EvalError::Runtime(
+        Err(EvalError::Runtime(Box::new(
             RillError::new("parallel iteration panicked").with_kind(ErrorKind::Runtime),
-        ))
+        )))
     })
 }
 
 fn parallel_terminal_error(outcome: ParallelTerminal) -> EvalError {
     match outcome {
-        ParallelTerminal::Runtime(error) => EvalError::Runtime(error),
+        ParallelTerminal::Runtime(error) => EvalError::Runtime(Box::new(error)),
         ParallelTerminal::Control(flow) => EvalError::Control(flow),
     }
 }
@@ -3952,7 +4032,7 @@ fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
 fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, RillError> {
     if op == BinaryOp::Add && matches!((&left, &right), (Value::List(_), Value::List(_))) {
         let (Value::List(mut left), Value::List(right)) = (left, right) else { unreachable!() };
-        left.extend(right);
+        Arc::make_mut(&mut left).extend(Arc::unwrap_or_clone(right));
         return Ok(Value::List(left));
     }
     if let (Value::Str(a), Value::Str(b), BinaryOp::Add) = (&left, &right, op) {
@@ -4028,7 +4108,7 @@ fn apply_compound(current: &mut Value, rhs: Value, op: AssignOp) -> Result<(), R
         match current {
             Value::List(items) if matches!(rhs, Value::List(_)) => {
                 let Value::List(more) = rhs else { unreachable!() };
-                items.extend(more);
+                Arc::make_mut(items).extend(Arc::unwrap_or_clone(more));
                 return Ok(());
             }
             Value::Str(text) if matches!(rhs, Value::Str(_)) => {
@@ -4062,6 +4142,7 @@ fn assign_place(
     let last = rest.is_empty();
     match (value, step) {
         (Value::Map(map), step) => {
+            let map = Arc::make_mut(map);
             let key = match step {
                 PlaceStep::Field(name) => name.clone(),
                 PlaceStep::Index { key: Value::Str(key), .. } => key.clone(),
@@ -4087,6 +4168,7 @@ fn assign_place(
             assign_place(inner, rest, op, rhs)
         }
         (Value::List(items), PlaceStep::Index { key: Value::Int(idx), .. }) => {
+            let items = Arc::make_mut(items);
             let len = items.len() as i64;
             let position = if *idx < 0 { len + idx } else { *idx };
             if position < 0 || position >= len {
@@ -4102,7 +4184,7 @@ fn assign_place(
                 return Err(RillError::new("tuple assignment index must be an integer literal"));
             }
             let position = normalize_runtime_index(*idx, items.len(), "tuple")?;
-            assign_place(&mut items[position], rest, op, rhs)
+            assign_place(&mut Arc::make_mut(items)[position], rest, op, rhs)
         }
         (Value::Tuple(_), PlaceStep::Index { .. }) => {
             Err(RillError::new("tuple index must be Int"))
@@ -4256,7 +4338,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
         (Value::List(a), Value::List(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
         }
         (Value::Map(a), Value::Map(b)) => {
             a.len() == b.len()
@@ -4717,13 +4799,13 @@ fn wrap_declared_result(function: &Function, value: Value) -> Value {
         Some(TypeName::Result(_, Some(error_type))) if **error_type == TypeName::Error => {
             match value {
                 Value::Result(Err(error)) if !matches!(*error, Value::Error(_)) => {
-                    Value::Result(Err(Box::new(Value::Error(ErrorValue {
+                    Value::Result(Err(Box::new(Value::Error(Box::new(ErrorValue {
                         kind: ErrorKind::Runtime,
                         message: error.as_string_lossy(),
                         operation: None,
                         status: None,
                         span: None,
-                    }))))
+                    })))))
                 }
                 other => other,
             }
@@ -4749,7 +4831,7 @@ fn argv_from_value(value: Value, operation: &str) -> Result<Vec<String>, RillErr
     if items.is_empty() {
         return Err(RillError::new(format!("{operation} needs a non-empty argv")));
     }
-    items
+    Arc::unwrap_or_clone(items)
         .into_iter()
         .map(|item| match item {
             Value::Str(value) => Ok(value),

@@ -29,9 +29,10 @@ count += 1                  # = += -= *= /= %=
 let maybe: Int? = none      # T? is shorthand for Option[T]
 ```
 
-`let` cannot be reassigned. Closures and functions capture `let` bindings by
-value and share `var` bindings by reference, so a function can update an
-outer `var`:
+`let` cannot be reassigned, and neither can function parameters, loop
+variables or pattern bindings; copy them into a `var` first. Closures and
+functions capture `let` bindings by value and share `var` bindings by
+reference, so a function can update an outer `var`:
 
 ```rill
 var total = 0
@@ -103,6 +104,10 @@ xs[1..3]  xs[..2]  xs[2..]  xs[0..=1]  "hello"[1..3]      # negative bounds coun
 var m = {a: {b: 1}, xs: [{n: 1}]}
 m.a.b = 2;  m["new"] = 3;  m.xs[-1].n += 10               # any place rooted at a var
 ```
+
+Lists, tuples and maps have value semantics: assigning `let b = a` and then
+changing `a` leaves `b` alone. Under the hood they are shared and copied on
+write, so passing a large collection around is free.
 
 `m.key` on a missing key is an error; `m.get("key")` returns `null`, and
 `null.get("key")` is `null`, which allows optional chains.

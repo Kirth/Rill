@@ -91,9 +91,9 @@ fn unary_minus_is_a_real_operator() {
 fn inclusive_range_and_precedence() {
     assert_eq!(
         run("0..=3"),
-        Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3)])
+        Value::list(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3)])
     );
-    assert_eq!(run("5..3"), Value::List(vec![]));
+    assert_eq!(run("5..3"), Value::list(vec![]));
     assert_eq!(run("(0..2) == [0, 1]"), Value::Bool(true));
     assert_eq!(run("0..2 == [0, 1]"), Value::Bool(true));
     assert_eq!(run("1 + 2 * 3 % 4 == 3 && !false"), Value::Bool(true));
@@ -117,7 +117,7 @@ fn durations_support_arithmetic_comparison_and_accessors() {
     );
     assert_eq!(
         run("[1500ms.secs(), 1500ms.ms(), 1500ms.us(), 1500ms.ns()]"),
-        Value::List(vec![
+        Value::list(vec![
             Value::Int(1),
             Value::Int(1500),
             Value::Int(1_500_000),
@@ -158,7 +158,7 @@ fn if_is_an_expression() {
     assert_eq!(run("if false { 1 } else if true { 2 } else { 3 }"), Value::Int(2));
     assert_eq!(
         run("[1, 2, 3].map(|n| if n > 1 { \"big\" } else { \"small\" })"),
-        Value::List(vec![
+        Value::list(vec![
             Value::Str("small".into()),
             Value::Str("big".into()),
             Value::Str("big".into())
@@ -167,7 +167,7 @@ fn if_is_an_expression() {
     assert_eq!(run("fn f(v) { if v { return 7 }\n9 }\nf(true)"), Value::Int(7));
     assert_eq!(
         run("for n in [1, 2] { if n == 2 { emit n * 10 } }"),
-        Value::List(vec![Value::Int(20)])
+        Value::list(vec![Value::Int(20)])
     );
     assert_eq!(run("let m = {a: 1}\nif let {a} = m { a } else { 0 }"), Value::Int(1));
     assert!(check_err("let z = if true { 1 }").contains("needs an else branch"));
@@ -200,7 +200,7 @@ fn default_parameters_and_named_arguments() {
     let prelude = "fn add(a, b = 2) { a + b }\n";
     assert_eq!(
         run(&format!("{prelude}[add(1), add(1, 5), add(b = 10, a = 1), add(a = 1)]")),
-        Value::List(vec![Value::Int(3), Value::Int(6), Value::Int(11), Value::Int(3)])
+        Value::list(vec![Value::Int(3), Value::Int(6), Value::Int(11), Value::Int(3)])
     );
     assert_eq!(run("fn scale(x, factor = x * 2) { factor }\nscale(3)"), Value::Int(6));
     assert!(check_err(&format!("{prelude}add()")).contains("needs 1 to 2 args, got 0"));
@@ -231,10 +231,10 @@ fn nested_place_assignment() {
     assert_eq!(run("var m = {}\nm.k = 1\nm.k"), Value::Int(1));
     assert_eq!(run("var m = {}\nm.k += 1\nm.k"), Value::Int(1));
     assert_eq!(run("var t = (1, \"a\")\nt[1] = \"b\"\nt[1]"), Value::Str("b".into()));
-    assert_eq!(run("var xs = [1]\nxs += [2]\nxs"), Value::List(vec![Value::Int(1), Value::Int(2)]));
+    assert_eq!(run("var xs = [1]\nxs += [2]\nxs"), Value::list(vec![Value::Int(1), Value::Int(2)]));
     assert_eq!(
         run("var xs = [[1]]\nxs[0] += [2]\nxs[0]"),
-        Value::List(vec![Value::Int(1), Value::Int(2)])
+        Value::list(vec![Value::Int(1), Value::Int(2)])
     );
     assert!(fails("var m: Map = {a: 1}\nm.missing.inner = 1").contains("key 'missing' not in map"));
     assert!(check_err("var m = {a: 1}\nm.missing.inner = 1")
@@ -250,19 +250,19 @@ fn nested_place_assignment() {
 fn map_iteration_yields_key_value_tuples() {
     assert_eq!(
         run("for (k, v) in {b: 2, a: 1} { emit \"$k=$v\" }"),
-        Value::List(vec![Value::Str("b=2".into()), Value::Str("a=1".into())])
+        Value::list(vec![Value::Str("b=2".into()), Value::Str("a=1".into())])
     );
     assert_eq!(
         run("{a: 1}.entries()"),
-        Value::List(vec![Value::Tuple(vec![Value::Str("a".into()), Value::Int(1)])])
+        Value::list(vec![Value::tuple(vec![Value::Str("a".into()), Value::Int(1)])])
     );
     assert_eq!(
         run("for (k, v) in {a: 1}.entries() { emit k }"),
-        Value::List(vec![Value::Str("a".into())])
+        Value::list(vec![Value::Str("a".into())])
     );
     assert_eq!(
         run("parallel for (k, v) in {a: 1, b: 2} { emit v * 10 }"),
-        Value::List(vec![Value::Int(10), Value::Int(20)])
+        Value::list(vec![Value::Int(10), Value::Int(20)])
     );
     assert!(check_err("for x in 5 { }").contains("for loop needs List, Map, or Stream"));
 }

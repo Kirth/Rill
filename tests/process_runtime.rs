@@ -251,7 +251,7 @@ let r = run sh -c "kill -TERM $$"
 "#);
     assert_eq!(
         value,
-        Value::List(vec![
+        Value::list(vec![
             Value::Int(143),
             Value::Option(Some(Box::new(Value::Int(15)))),
             Value::Bool(false)

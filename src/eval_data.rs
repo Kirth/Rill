@@ -13,7 +13,7 @@ pub(crate) fn json_to_value(value: serde_json::Value) -> Value {
             Value::List(values.into_iter().map(json_to_value).collect())
         }
         serde_json::Value::Object(values) => {
-            Value::Map(values.into_iter().map(|(key, value)| (key, json_to_value(value))).collect())
+            Value::map(values.into_iter().map(|(key, value)| (key, json_to_value(value))).collect())
         }
     }
 }

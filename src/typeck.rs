@@ -175,6 +175,16 @@ impl Env {
         })
     }
 
+    /// Whether the binding came from a `let`/`var` statement (as opposed to a
+    /// parameter, loop variable or builtin).
+    fn is_declared_by_let(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .is_some_and(|binding| binding.declared.is_some())
+    }
+
     /// Whether a name is bound, without marking it as read.
     fn contains(&self, name: &str) -> bool {
         self.scopes.iter().any(|scope| scope.contains_key(name))
@@ -262,6 +272,7 @@ pub(crate) fn check_module(
         warnings: Vec::new(),
         current_span: None,
         warn_unused_top_level: !is_module,
+        emit_types: Vec::new(),
     };
     checker.check_program(program)
 }
@@ -298,6 +309,9 @@ struct Checker {
     /// Unused top-level `let`s warn in scripts but not in modules, whose
     /// top-level bindings are exports.
     warn_unused_top_level: bool,
+    /// One slot per enclosing `for` expression, collecting the common type of
+    /// its `emit` values; innermost last.
+    emit_types: Vec<Option<Type>>,
 }
 
 /// Checker state restored after a statement fails, so later statements are
@@ -311,6 +325,7 @@ struct Snapshot {
     parallel_floor: Option<usize>,
     return_expected: Option<Type>,
     try_kinds: usize,
+    emit_types: usize,
 }
 
 impl Checker {
@@ -324,6 +339,7 @@ impl Checker {
             parallel_floor: self.parallel_floor,
             return_expected: self.return_expected.clone(),
             try_kinds: self.try_kinds.len(),
+            emit_types: self.emit_types.len(),
         }
     }
 
@@ -336,6 +352,7 @@ impl Checker {
         self.parallel_floor = snapshot.parallel_floor;
         self.return_expected = snapshot.return_expected;
         self.try_kinds.truncate(snapshot.try_kinds);
+        self.emit_types.truncate(snapshot.emit_types);
         self.closure_param_hints = None;
     }
 
@@ -693,12 +710,17 @@ impl Checker {
                 let root = root.to_string();
                 self.ensure_assignable_in_parallel(&root)?;
                 if matches!(self.env.is_mutable(&root), Some(false)) {
+                    let help = if self.env.is_declared_by_let(&root) {
+                        format!("declare it with `var {root} = ...` to allow reassignment")
+                    } else {
+                        format!(
+                            "parameters and loop variables are immutable; copy it first with `var {root}2 = {root}`"
+                        )
+                    };
                     return Err(RillError::new(format!(
                         "cannot assign to immutable variable '{root}'"
                     ))
-                    .with_help(format!(
-                        "declare it with `var {root} = ...` to allow reassignment"
-                    )));
+                    .with_help(help));
                 }
                 let Some(current) = self.env.get(&root) else {
                     return Err(RillError::new(format!(
@@ -781,9 +803,11 @@ impl Checker {
                 );
                 self.env.push();
                 for param in &function.params {
-                    self.env.set(
+                    self.env.bind_declared(
                         param.name.clone(),
                         param.type_name.as_ref().map(type_from_name).unwrap_or(Type::Unknown),
+                        false,
+                        None,
                     );
                 }
                 let previous_return = self.return_expected.take();
@@ -864,7 +888,13 @@ impl Checker {
                         "'emit' is only valid inside a for expression body",
                     ));
                 }
-                self.check_expr(expr)?;
+                let ty = self.check_expr(expr)?;
+                if let Some(slot) = self.emit_types.last_mut() {
+                    *slot = Some(match slot.take() {
+                        None => ty,
+                        Some(previous) => common_type(previous, ty),
+                    });
+                }
                 Ok(Type::Null)
             }
             Stmt::WithEnv { bindings, body } => {
@@ -1111,11 +1141,13 @@ impl Checker {
                     Type::Map(value) => Type::Tuple(vec![Type::Str, *value]),
                     other => other.list_item(),
                 };
-                self.bind_pattern(pattern, item_ty, true, None)?;
+                self.bind_pattern(pattern, item_ty, false, None)?;
                 self.loop_depth += 1;
                 self.loop_stack.push(None);
                 self.for_body_depth += 1;
+                self.emit_types.push(None);
                 let checked = self.check_stmts(body);
+                let emitted = self.emit_types.pop().flatten().unwrap_or(Type::Unknown);
                 self.for_body_depth -= 1;
                 self.loop_stack.pop();
                 self.loop_depth -= 1;
@@ -1123,8 +1155,8 @@ impl Checker {
                 self.parallel_floor = previous_floor;
                 checked?;
                 Ok(match mode {
-                    ForMode::Sequential | ForMode::Parallel => Type::List(Box::new(Type::Unknown)),
-                    ForMode::Race => Type::Unknown,
+                    ForMode::Sequential | ForMode::Parallel => Type::List(Box::new(emitted)),
+                    ForMode::Race => emitted,
                 })
             }
             Expr::If { cond, pattern, then_body, else_body } => {
@@ -1136,7 +1168,7 @@ impl Checker {
                 }
                 self.env.push();
                 if let Some(pattern) = pattern {
-                    self.bind_pattern(pattern, cond_ty.clone(), true, None)?;
+                    self.bind_pattern(pattern, cond_ty.clone(), false, None)?;
                 }
                 if let Expr::RegexMatch { pattern, .. } = cond.unspanned() {
                     for name in regex_capture_names(pattern)? {
@@ -1178,7 +1210,12 @@ impl Checker {
                 self.env.push();
                 let hints = self.closure_param_hints.take().unwrap_or_default();
                 for (index, param) in params.iter().enumerate() {
-                    self.env.set(param.clone(), hints.get(index).cloned().unwrap_or(Type::Unknown));
+                    self.env.bind_declared(
+                        param.clone(),
+                        hints.get(index).cloned().unwrap_or(Type::Unknown),
+                        false,
+                        None,
+                    );
                 }
                 let return_type = self.check_stmts(body);
                 let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
@@ -1468,6 +1505,14 @@ impl Checker {
             return Ok(resolve_method_return(builtin.returns, &Type::Unknown, &arg_types));
         }
         let ty = self.env.get(name).ok_or_else(|| self.unknown_function(name))?;
+        if ty == Type::Unknown {
+            // A value of unknown type (closure parameter, Unknown list item):
+            // check the arguments and trust the call.
+            for arg in args {
+                self.check_expr(arg)?;
+            }
+            return Ok(Type::Unknown);
+        }
         if !matches!(ty, Type::Function { .. }) {
             return Err(RillError::new(format!("{name} is not callable")));
         }

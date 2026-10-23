@@ -97,10 +97,13 @@ impl StreamHandle {
     pub fn next(&self) -> Option<Value> {
         let rx = self.rx.lock().unwrap();
         rx.recv().ok().map(|(line, host)| {
-            Value::Map(Map::from_iter([
-                ("line".to_string(), Value::Str(line)),
-                ("host".to_string(), Value::Str(host)),
-            ]))
+            Value::Map(
+                Map::from_iter([
+                    ("line".to_string(), Value::Str(line)),
+                    ("host".to_string(), Value::Str(host)),
+                ])
+                .into(),
+            )
         })
     }
 }
@@ -153,22 +156,52 @@ pub enum Value {
     Float(f64),
     Str(String),
     Bytes(Vec<u8>),
-    List(Vec<Value>),
-    Tuple(Vec<Value>),
-    Map(Map),
+    /// Collections are shared and copied on write (`Arc::make_mut`), so
+    /// reading a variable never deep-copies and `xs += [x]` on a `var` stays
+    /// amortised O(1) while values keep value semantics.
+    List(Arc<Vec<Value>>),
+    Tuple(Arc<Vec<Value>>),
+    Map(Arc<Map>),
     Duration(Duration),
     Path(PathBuf),
     Regex(String),
-    Error(ErrorValue),
+    Error(Box<ErrorValue>),
     Option(Option<Box<Value>>),
     Result(Result<Box<Value>, Box<Value>>),
-    ProcessResult(ProcessResult),
+    ProcessResult(Arc<ProcessResult>),
     ProcessHandle(crate::runtime::ProcessHandle),
     Stream(StreamHandle),
     Function(Arc<FunctionValue>),
 }
 
+/// `iter.collect()` straight into a shared list, for `Value::List(..)` sites.
+impl FromIterator<Value> for Arc<Vec<Value>> {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        Arc::new(iter.into_iter().collect())
+    }
+}
+
 impl Value {
+    pub fn list(items: Vec<Value>) -> Self {
+        Value::List(Arc::new(items))
+    }
+
+    pub fn tuple(items: Vec<Value>) -> Self {
+        Value::Tuple(Arc::new(items))
+    }
+
+    pub fn map(map: Map) -> Self {
+        Value::Map(Arc::new(map))
+    }
+
+    pub fn error(error: ErrorValue) -> Self {
+        Value::Error(Box::new(error))
+    }
+
+    pub fn process(result: ProcessResult) -> Self {
+        Value::ProcessResult(Arc::new(result))
+    }
+
     pub fn truthy(&self) -> bool {
         match self {
             Value::Null => false,
