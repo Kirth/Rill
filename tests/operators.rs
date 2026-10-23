@@ -286,3 +286,64 @@ fn ranges_steps_and_slices() {
     assert!(check_err("let t = (1, 2)\nt[0..1]").contains("cannot slice a Tuple"));
     assert!(check_err("[1][\"a\"..]").contains("slice bounds must be Int"));
 }
+
+#[test]
+fn option_and_result_combinators() {
+    let some = |v: Value| Value::Option(Some(Box::new(v)));
+    let ok = |v: Value| Value::Result(Ok(Box::new(v)));
+    let err = |v: Value| Value::Result(Err(Box::new(v)));
+    assert_eq!(run("some(1).map(|x| x + 1)"), some(Value::Int(2)));
+    assert_eq!(run("none.map(|x| x + 1)"), Value::Option(None));
+    assert_eq!(run("some({n: 1}).map(.n)"), some(Value::Int(1)));
+    assert_eq!(run("ok(1).map(|x| x + 1)"), ok(Value::Int(2)));
+    assert_eq!(run("err(\"e\").map(|x| x + 1)"), err(Value::Str("e".into())));
+    assert_eq!(run("ok(1).map_err(|e| \"x\")"), ok(Value::Int(1)));
+    assert_eq!(run("err(\"e\").map_err(.upper())"), err(Value::Str("E".into())));
+    assert_eq!(
+        run("some(2).and_then(|x| if x > 1 { some(x) } else { none })"),
+        some(Value::Int(2))
+    );
+    assert_eq!(
+        run("some(0).and_then(|x| if x > 1 { some(x) } else { none })"),
+        Value::Option(None)
+    );
+    assert_eq!(run("none.unwrap_or_else(|| 5)"), Value::Int(5));
+    assert_eq!(run("err(\"e\").unwrap_or_else(|e| e + \"!\")"), Value::Str("e!".into()));
+    assert_eq!(run("some(1).ok_or(\"missing\")"), ok(Value::Int(1)));
+    assert_eq!(run("none.ok_or(\"missing\")"), err(Value::Str("missing".into())));
+    assert_eq!(run("some(1).expect(\"boom\")"), Value::Int(1));
+    assert!(fails("none.expect(\"boom\")").contains("boom"));
+    assert!(fails("err(\"bad\").expect(\"boom\")").contains("boom: bad"));
+    assert!(fails("some(1).and_then(|x| x)").contains("must return an Option or Result"));
+}
+
+#[test]
+fn first_last_and_get_return_options() {
+    let some = |v: Value| Value::Option(Some(Box::new(v)));
+    assert_eq!(run("[].first()"), Value::Option(None));
+    assert_eq!(run("[1, 2].first()"), some(Value::Int(1)));
+    assert_eq!(run("[1, 2].last()"), some(Value::Int(2)));
+    assert_eq!(run("[1, 2].get(-1)"), some(Value::Int(2)));
+    assert_eq!(run("[1].get(5)"), Value::Option(None));
+    assert_eq!(run("{a: 1}.get(\"b\")"), Value::Null);
+    assert_eq!(run("let xs = [1]\nlet n: Int = xs.first() ?? 0\nn"), Value::Int(1));
+    assert_eq!(run("[\"\", \"a\"].find(. != \"\").unwrap_or(\"none\")"), Value::Str("a".into()));
+    assert!(check_err("[1].get(\"a\")").contains("invalid .get() argument 1: Str"));
+}
+
+#[test]
+fn closure_parameters_are_inferred_from_the_receiver() {
+    assert!(check_err("[1, 2].map(|x| x.upper())").contains("not supported on Int"));
+    assert!(check_err("[1, 2].map(.upper())").contains("not supported on Int"));
+    let program = rill::parser::parse("[\"a\"].map(|s| s.upper())").unwrap();
+    rill::typeck::check(&program).unwrap();
+    let program = rill::parser::parse("{a: 1}.map(|k, v| k.upper())").unwrap();
+    rill::typeck::check(&program).unwrap();
+    assert!(
+        check_err("fn f(g: Fn[Str] -> Str) { g(\"a\") }\nf(|s| s + 1)").contains("got Str and Int")
+    );
+    assert!(check_err("some(1).unwrap_or_else(|x| x)").contains("needs 0 args, got 1"));
+    assert!(check_err("err(\"e\").map_err(|a, b| a)").contains("needs 1 arg, got 2"));
+    assert!(fails("let o = some(1)\nlet f = |x| x\no.unwrap_or_else(f)")
+        .contains("needs 0 args, got 1"));
+}

@@ -140,6 +140,11 @@ pub enum Structural {
     IsNone,
     Unwrap,
     UnwrapOr,
+    AndThen,
+    MapErr,
+    UnwrapOrElse,
+    OkOr,
+    Expect,
     DurationSecs,
     DurationMillis,
     DurationMicros,
@@ -160,6 +165,8 @@ pub enum Argument {
     JoinPart,
     MatchPattern,
     NamedBool(&'static str),
+    /// A Str key for maps, an Int index for lists.
+    KeyOrIndex,
 }
 
 impl Argument {
@@ -180,6 +187,8 @@ impl Argument {
             Argument::MatchPattern if receiver == Kind::Regex => kind == Kind::Str,
             Argument::MatchPattern => matches!(kind, Kind::Str | Kind::Regex),
             Argument::NamedBool(_) => kind == Kind::Bool,
+            Argument::KeyOrIndex if receiver == Kind::List => kind == Kind::Int,
+            Argument::KeyOrIndex => kind == Kind::Str,
         }
     }
 
@@ -194,6 +203,7 @@ impl Argument {
             Argument::PathOrStr | Argument::JoinPart => Some("Str or Path"),
             Argument::MatchPattern => Some("Str or Regex"),
             Argument::NamedBool(_) => Some("Bool"),
+            Argument::KeyOrIndex => Some("Str key or Int index"),
         }
     }
 }
@@ -219,6 +229,16 @@ pub enum Return {
     ListTupleUnknown,
     /// `List[Tuple[Str, V]]` from a Map.
     MapEntries,
+    /// `map`: `List[R]` for lists and maps, `Option[R]`, or `Result[R, E]`.
+    Mapped,
+    /// `map_err`: `Result[T, R]`.
+    MappedErr,
+    /// `and_then`: whatever the callback returns.
+    AndThen,
+    /// `ok_or(e)`: `Result[T, E]`.
+    OkOrResult,
+    /// `get`: `Option[T]` for lists, unknown (nullable) for maps.
+    GetResult,
     /// `List[Tuple[T, U]]` from `xs.zip(ys)`.
     ZipPairs,
     ListStr,
@@ -395,18 +415,18 @@ macro_rules! method {
 pub static METHODS: &[Method] = &[
     method!(
         "get",
-        [Map, Null],
+        [Map, Null, List],
         1,
-        [Argument::Str],
-        Return::Unknown,
+        [Argument::KeyOrIndex],
+        Return::GetResult,
         Target::Builtin(BuiltinMethod::Get)
     ),
     method!(
         "map",
-        [Map, List],
+        [Map, List, Option, Result],
         1,
         [Argument::Function],
-        Return::CallbackList,
+        Return::Mapped,
         Target::Builtin(BuiltinMethod::Map)
     ),
     method!(
@@ -492,8 +512,22 @@ pub static METHODS: &[Method] = &[
         Return::Bool,
         Target::Builtin(BuiltinMethod::Any)
     ),
-    method!("first", [List], 0, [], Return::ReceiverItem, Target::Builtin(BuiltinMethod::First)),
-    method!("last", [List], 0, [], Return::ReceiverItem, Target::Builtin(BuiltinMethod::Last)),
+    method!(
+        "first",
+        [List],
+        0,
+        [],
+        Return::OptionalReceiverItem,
+        Target::Builtin(BuiltinMethod::First)
+    ),
+    method!(
+        "last",
+        [List],
+        0,
+        [],
+        Return::OptionalReceiverItem,
+        Target::Builtin(BuiltinMethod::Last)
+    ),
     method!(
         "slice",
         [List],
@@ -698,6 +732,46 @@ pub static METHODS: &[Method] = &[
     method!("ok", [Result], 0, [], Return::ResultOkOption, Target::Structural(Structural::Ok)),
     method!("err", [Result], 0, [], Return::ResultErrOption, Target::Structural(Structural::Err)),
     method!("is_some", [Option], 0, [], Return::Bool, Target::Structural(Structural::IsSome)),
+    method!(
+        "and_then",
+        [Option, Result],
+        1,
+        [Argument::Function],
+        Return::AndThen,
+        Target::Structural(Structural::AndThen)
+    ),
+    method!(
+        "map_err",
+        [Result],
+        1,
+        [Argument::Function],
+        Return::MappedErr,
+        Target::Structural(Structural::MapErr)
+    ),
+    method!(
+        "unwrap_or_else",
+        [Option, Result],
+        1,
+        [Argument::Function],
+        Return::Unwrapped,
+        Target::Structural(Structural::UnwrapOrElse)
+    ),
+    method!(
+        "ok_or",
+        [Option],
+        1,
+        [Argument::Any],
+        Return::OkOrResult,
+        Target::Structural(Structural::OkOr)
+    ),
+    method!(
+        "expect",
+        [Option, Result],
+        1,
+        [Argument::Str],
+        Return::Unwrapped,
+        Target::Structural(Structural::Expect)
+    ),
     method!("is_none", [Option], 0, [], Return::Bool, Target::Structural(Structural::IsNone)),
     method!(
         "unwrap",
@@ -716,6 +790,16 @@ pub static METHODS: &[Method] = &[
         Target::Structural(Structural::UnwrapOr)
     ),
 ];
+
+/// How many arguments the callback of `method` takes for a receiver of `kind`.
+/// Shared by the checker and the evaluator so they never disagree.
+pub fn callback_arity(method: &str, receiver: Kind) -> usize {
+    match (method, receiver) {
+        ("map" | "parallel_map", Kind::Map) => 2,
+        ("unwrap_or_else", Kind::Option) => 0,
+        _ => 1,
+    }
+}
 
 pub fn lookup(name: &str) -> Option<&'static Method> {
     METHODS.iter().find(|method| method.name == name)

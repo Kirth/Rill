@@ -362,7 +362,7 @@ fn invalid_methods_fail_statically_or_when_dynamic_data_is_checked_at_runtime() 
     }
     for source in [
         "1.trim()",
-        "[].get(0)",
+        "[].get(\"a\")",
         "{}.get(1)",
         "[].take(\"two\")",
         "[].map(2)",
@@ -407,34 +407,39 @@ fn registry_arities_conform_between_checker_and_evaluator() {
         if let Target::Builtin(implementation) = method.target {
             assert_eq!(implementation.name(), method.name);
         }
-        let receiver = match method.name {
-            "await" => r#"["true"].spawn()"#.to_string(),
-            "is_ok" | "is_err" | "ok" | "err" => "ok(1)".to_string(),
-            "is_some" | "is_none" => "some(1)".to_string(),
-            "unwrap" | "unwrap_or" if method.receivers.contains(&Kind::Result) => {
-                "ok(1)".to_string()
-            }
-            "run" | "spawn" => r#"["true"]"#.to_string(),
-            "parallel" => "[]".to_string(),
-            "map" | "parallel_map" => "[]".to_string(),
-            _ => match method.receivers.first().copied().unwrap_or(Kind::Unknown) {
-                Kind::Unknown | Kind::Null => "null".to_string(),
-                Kind::Str => r#""abc""#.to_string(),
-                Kind::List => "[]".to_string(),
-                Kind::Map => "{}".to_string(),
-                Kind::Path => format!(r#"path("{}")"#, scratch.0.join(method.name).display()),
-                Kind::Regex => "/a/".to_string(),
-                Kind::Duration => "0s".to_string(),
-                Kind::Int => "0".to_string(),
-                Kind::Float => "0.0".to_string(),
-                Kind::Bool => "true".to_string(),
-                Kind::Tuple => "(1, 2)".to_string(),
-                Kind::ProcessHandle => r#"["true"].spawn()"#.to_string(),
-                Kind::Option => "some(1)".to_string(),
-                Kind::Result => "ok(1)".to_string(),
-                other => panic!("no conformance receiver for {other:?}"),
-            },
+        let receiver_kind = match method.name {
+            "await" => Kind::ProcessHandle,
+            "is_ok" | "is_err" | "ok" | "err" => Kind::Result,
+            "is_some" | "is_none" => Kind::Option,
+            "unwrap" | "unwrap_or" if method.receivers.contains(&Kind::Result) => Kind::Result,
+            "run" | "spawn" | "parallel" | "map" | "parallel_map" => Kind::List,
+            _ => method.receivers.first().copied().unwrap_or(Kind::Unknown),
         };
+        let receiver = match (method.name, receiver_kind) {
+            ("run" | "spawn", _) => r#"["true"]"#.to_string(),
+            (_, Kind::ProcessHandle) => r#"["true"].spawn()"#.to_string(),
+            (_, Kind::Unknown | Kind::Null) => "null".to_string(),
+            (_, Kind::Str) => r#""abc""#.to_string(),
+            (_, Kind::List) => "[]".to_string(),
+            (_, Kind::Map) => "{}".to_string(),
+            (_, Kind::Path) => format!(r#"path("{}")"#, scratch.0.join(method.name).display()),
+            (_, Kind::Regex) => "/a/".to_string(),
+            (_, Kind::Duration) => "0s".to_string(),
+            (_, Kind::Int) => "0".to_string(),
+            (_, Kind::Float) => "0.0".to_string(),
+            (_, Kind::Bool) => "true".to_string(),
+            (_, Kind::Tuple) => "(1, 2)".to_string(),
+            (_, Kind::Option) => "some(1)".to_string(),
+            (_, Kind::Result) => "ok(1)".to_string(),
+            (_, other) => panic!("no conformance receiver for {other:?}"),
+        };
+        let callback =
+            match (method.name, rill::methods::callback_arity(method.name, receiver_kind)) {
+                ("and_then", _) => "|x| some(x)",
+                (_, 0) => "|| null",
+                (_, 2) => "|k, v| k",
+                _ => "|x| x",
+            };
         let arguments = method
             .arguments
             .iter()
@@ -442,11 +447,12 @@ fn registry_arities_conform_between_checker_and_evaluator() {
                 Argument::Any => "null",
                 Argument::Str => r#""a""#,
                 Argument::Int => "0",
-                Argument::Function => "|x| x",
+                Argument::Function => callback,
                 Argument::List => "[]",
                 Argument::Map => "{}",
                 Argument::PathOrStr | Argument::JoinPart => r#""child""#,
                 Argument::MatchPattern => r#""a""#,
+                Argument::KeyOrIndex => r#""a""#,
                 Argument::NamedBool(name) => {
                     assert_eq!(*name, "all");
                     "all=true"

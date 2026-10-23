@@ -203,6 +203,7 @@ pub(crate) fn check_module(
         try_kinds: Vec::new(),
         loop_depth: 0,
         loop_stack: Vec::new(),
+        closure_param_hints: None,
         for_body_depth: 0,
         function_depth: 0,
         parallel_floor: None,
@@ -226,6 +227,9 @@ struct Checker {
     /// Enclosing loops, innermost last; `Some` collects `break` value types
     /// for a `loop {}` and `None` marks `while`/`for`.
     loop_stack: Vec<Option<Type>>,
+    /// Parameter types for the next closure literal checked, inferred from the
+    /// method or function it is passed to.
+    closure_param_hints: Option<Vec<Type>>,
     /// While checking a parallel body: scopes below this index belong to the
     /// enclosing sequential code and may not be assigned to.
     parallel_floor: Option<usize>,
@@ -946,8 +950,9 @@ impl Checker {
                 self.return_expected = Some(Type::Unknown);
                 self.function_depth += 1;
                 self.env.push();
-                for param in params {
-                    self.env.set(param.clone(), Type::Unknown);
+                let hints = self.closure_param_hints.take().unwrap_or_default();
+                for (index, param) in params.iter().enumerate() {
+                    self.env.set(param.clone(), hints.get(index).cloned().unwrap_or(Type::Unknown));
                 }
                 let return_type = self.check_stmts(body);
                 let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
@@ -1156,13 +1161,18 @@ impl Checker {
                 _ => {}
             }
             let ty = if method.argument(index) == crate::methods::Argument::Function {
+                let hints = callback_param_types(name, &receiver);
                 self.env.push();
-                self.env.set("it".into(), receiver.list_item());
+                self.env.set("it".into(), hints.first().cloned().unwrap_or(Type::Unknown));
+                if matches!(arg.unspanned(), Expr::Closure { .. }) {
+                    self.closure_param_hints = Some(hints);
+                }
                 let ty = if matches!(name, "parallel_map" | "parallel_filter") {
                     self.in_parallel_body(|checker| checker.check_callback_expr(arg))
                 } else {
                     self.check_callback_expr(arg)
                 };
+                self.closure_param_hints = None;
                 self.env.pop();
                 ty?
             } else {
@@ -1253,7 +1263,14 @@ impl Checker {
         }
         let mut provided = vec![false; arity.unwrap_or(positional.len())];
         for (index, arg) in positional.iter().enumerate() {
-            let actual = self.check_expr(arg)?;
+            if let (Expr::Closure { .. }, Some(Type::Function { params: Some(hints), .. })) =
+                (arg.unspanned(), params.as_ref().and_then(|p| p.get(index)))
+            {
+                self.closure_param_hints = Some(hints.clone());
+            }
+            let actual = self.check_expr(arg);
+            self.closure_param_hints = None;
+            let actual = actual?;
             if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
                 ensure_assignable(expected, &actual)?;
             }
@@ -1572,8 +1589,6 @@ impl Checker {
         callback: &Type,
     ) -> Result<(), RillError> {
         let arity = match collection {
-            Type::Map if matches!(name, "map" | "parallel_map") => 2,
-            Type::List(_) => 1,
             Type::Unknown => {
                 if matches!(callback, Type::Function { arity: Some(2), .. })
                     && matches!(name, "map" | "parallel_map")
@@ -1585,17 +1600,25 @@ impl Checker {
                 }
                 1
             }
+            Type::List(_) | Type::Map | Type::Option(_) | Type::Result(..) => {
+                crate::methods::callback_arity(name, method_kind(collection))
+            }
             _ => return Err(RillError::new(format!("{name} cannot iterate {collection}"))),
         };
         if let Type::Function { arity: Some(actual), .. } = callback {
             if *actual != arity {
                 return Err(RillError::new(format!(
-                    "{name} callback needs {arity} arg, got {actual}"
+                    "{name} callback needs {arity} arg{}, got {actual}",
+                    if arity == 1 { "" } else { "s" }
                 )));
             }
             return Ok(());
         }
-        self.check_callback(name, callback.clone())
+        if arity == 1 {
+            self.check_callback(name, callback.clone())
+        } else {
+            Ok(())
+        }
     }
 
     fn check_callback(&self, name: &str, callback_ty: Type) -> Result<(), RillError> {
@@ -1900,6 +1923,34 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
             Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Unknown])))
         }
         Return::MapEntries => Type::List(Box::new(Type::Tuple(vec![Type::Str, Type::Unknown]))),
+        Return::Mapped => {
+            let produced = args.first().map(function_return).unwrap_or(Type::Unknown);
+            match receiver {
+                Type::Option(_) => Type::Option(Box::new(produced)),
+                Type::Result(_, error) => Type::Result(Box::new(produced), error.clone()),
+                Type::List(_) | Type::Map => Type::List(Box::new(produced)),
+                _ => Type::Unknown,
+            }
+        }
+        Return::MappedErr => match receiver {
+            Type::Result(value, _) => Type::Result(
+                value.clone(),
+                Box::new(args.first().map(function_return).unwrap_or(Type::Unknown)),
+            ),
+            _ => Type::Unknown,
+        },
+        Return::AndThen => args.first().map(function_return).unwrap_or(Type::Unknown),
+        Return::OkOrResult => match receiver {
+            Type::Option(value) => Type::Result(
+                value.clone(),
+                Box::new(args.first().cloned().unwrap_or(Type::Unknown)),
+            ),
+            _ => Type::Unknown,
+        },
+        Return::GetResult => match receiver {
+            Type::List(item) => Type::Option(item.clone()),
+            _ => Type::Unknown,
+        },
         Return::ZipPairs => Type::List(Box::new(Type::Tuple(vec![
             receiver.list_item(),
             args.first().map_or(Type::Unknown, Type::list_item),
@@ -2228,6 +2279,20 @@ fn operator_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::In => "in",
         BinaryOp::NotIn => "not in",
         BinaryOp::Coalesce => "??",
+    }
+}
+
+/// Parameter types for the callback of `method` on `receiver`, used to type
+/// closure parameters and the implicit `.` argument.
+fn callback_param_types(method: &str, receiver: &Type) -> Vec<Type> {
+    match (method, receiver) {
+        (_, Type::List(item)) => vec![(**item).clone()],
+        ("map" | "parallel_map", Type::Map) => vec![Type::Str, Type::Unknown],
+        ("map" | "and_then", Type::Option(inner)) => vec![(**inner).clone()],
+        ("map" | "and_then", Type::Result(value, _)) => vec![(**value).clone()],
+        ("map_err" | "unwrap_or_else", Type::Result(_, error)) => vec![(**error).clone()],
+        ("unwrap_or_else", Type::Option(_)) => Vec::new(),
+        _ => Vec::new(),
     }
 }
 

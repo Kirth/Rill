@@ -360,11 +360,11 @@ fn load(cmd: Str) {
     let out = run! $*cmd
     out.trim()
 }
-load("echo hi").map(|x| x)
+load("echo hi").trim()
 "#;
     let program = rill::parser::parse(source).unwrap();
     let error = rill::typeck::check(&program).unwrap_err();
-    assert!(error.to_string().contains(".map() is not supported on Result"), "{error}");
+    assert!(error.to_string().contains(".trim() is not supported on Result"), "{error}");
     assert!(error.help_text().unwrap_or_default().contains("unwrap it first"));
     check_ok(
         r#"

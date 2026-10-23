@@ -1946,7 +1946,7 @@ impl Evaluator {
                         Value::Function(function) => function.function.params.len(),
                         _ => unreachable!("callback kind was validated"),
                     };
-                    let expected = if matches!(receiver, Value::Map(_)) { 2 } else { 1 };
+                    let expected = crate::methods::callback_arity(name, kind);
                     if actual != expected {
                         return Err(RillError::new(format!(
                             ".{name}() callback needs {expected} args, got {actual}"
@@ -2057,6 +2057,45 @@ impl Evaluator {
             (Structural::UnwrapOr, Value::Option(value)) => {
                 let default = self.eval_expr(&args[0])?;
                 Ok(value.map(|value| *value).unwrap_or(default))
+            }
+            (Structural::AndThen, Value::Option(Some(value)))
+            | (Structural::AndThen, Value::Result(Ok(value))) => {
+                let result = self.apply_unary(&args[0], *value)?;
+                if !matches!(result, Value::Option(_) | Value::Result(_)) {
+                    return Err(RillError::new(format!(
+                        "and_then callback must return an Option or Result, got {}",
+                        result.type_name()
+                    ))
+                    .into());
+                }
+                Ok(result)
+            }
+            (Structural::AndThen, other) => Ok(other),
+            (Structural::MapErr, Value::Result(Err(error))) => {
+                Ok(Value::Result(Err(Box::new(self.apply_unary(&args[0], *error)?))))
+            }
+            (Structural::MapErr, other) => Ok(other),
+            (Structural::UnwrapOrElse, Value::Option(Some(value)))
+            | (Structural::UnwrapOrElse, Value::Result(Ok(value))) => Ok(*value),
+            (Structural::UnwrapOrElse, Value::Option(None)) => {
+                let callback = self.eval_expr(&args[0])?;
+                self.call_callable(callback, Vec::new())
+            }
+            (Structural::UnwrapOrElse, Value::Result(Err(error))) => {
+                self.apply_unary(&args[0], *error)
+            }
+            (Structural::OkOr, Value::Option(Some(value))) => Ok(Value::Result(Ok(value))),
+            (Structural::OkOr, Value::Option(None)) => {
+                Ok(Value::Result(Err(Box::new(self.eval_expr(&args[0])?))))
+            }
+            (Structural::Expect, Value::Option(Some(value)))
+            | (Structural::Expect, Value::Result(Ok(value))) => Ok(*value),
+            (Structural::Expect, Value::Option(None)) => {
+                Err(RillError::new(self.eval_expr(&args[0])?.as_string_lossy()).into())
+            }
+            (Structural::Expect, Value::Result(Err(error))) => {
+                let message = self.eval_expr(&args[0])?.as_string_lossy();
+                Err(RillError::new(format!("{message}: {error}")).into())
             }
             (Structural::DurationSecs, Value::Duration(d)) => Ok(Value::Int(d.as_secs() as i64)),
             (Structural::DurationMillis, Value::Duration(d)) => {
@@ -2369,15 +2408,31 @@ impl Evaluator {
                 if args.len() != 2 {
                     return Err(RillError::new("get needs 2 args").into());
                 }
-                let map = self.eval_expr(&args[0])?;
-                let key = self.eval_expr(&args[1])?.as_string_lossy();
-                match map {
-                    Value::Map(values) => Ok(values.get(&key).cloned().unwrap_or(Value::Null)),
-                    Value::Null => Ok(Value::Null),
-                    other => {
-                        Err(RillError::new(format!("get needs a Map, got {}", other.type_name()))
-                            .into())
+                let receiver = self.eval_expr(&args[0])?;
+                let key = self.eval_expr(&args[1])?;
+                match receiver {
+                    Value::Map(values) => {
+                        Ok(values.get(&key.as_string_lossy()).cloned().unwrap_or(Value::Null))
                     }
+                    Value::Null => Ok(Value::Null),
+                    Value::List(items) => {
+                        let Value::Int(index) = key else {
+                            return Err(RillError::new(format!(
+                                "list get needs an Int index, got {}",
+                                key.type_name()
+                            ))
+                            .into());
+                        };
+                        let len = items.len() as i64;
+                        let position = if index < 0 { len + index } else { index };
+                        let found = usize::try_from(position).ok().and_then(|p| items.get(p));
+                        Ok(Value::Option(found.cloned().map(Box::new)))
+                    }
+                    other => Err(RillError::new(format!(
+                        "get needs a Map or List, got {}",
+                        other.type_name()
+                    ))
+                    .into()),
                 }
             }
             "spawn" => {
@@ -2572,14 +2627,14 @@ impl Evaluator {
                 let Value::List(items) = val else {
                     return Err(RillError::new("first needs a List").into());
                 };
-                Ok(items.into_iter().next().unwrap_or(Value::Null))
+                Ok(Value::Option(items.into_iter().next().map(Box::new)))
             }
             "last" => {
                 let val = self.eval_expr(&args[0])?;
                 let Value::List(items) = val else {
                     return Err(RillError::new("last needs a List").into());
                 };
-                Ok(items.into_iter().next_back().unwrap_or(Value::Null))
+                Ok(Value::Option(items.into_iter().next_back().map(Box::new)))
             }
             "slice" => {
                 let list = self.eval_expr(&args[0])?;
@@ -2848,10 +2903,19 @@ impl Evaluator {
                 }
                 Ok(Value::List(out))
             }
-            other => {
-                Err(RillError::new(format!("map needs a List or Map, got {}", other.type_name()))
-                    .into())
+            Value::Option(Some(value)) => {
+                Ok(Value::Option(Some(Box::new(self.apply_unary(mapper, *value)?))))
             }
+            Value::Option(None) => Ok(Value::Option(None)),
+            Value::Result(Ok(value)) => {
+                Ok(Value::Result(Ok(Box::new(self.apply_unary(mapper, *value)?))))
+            }
+            Value::Result(Err(error)) => Ok(Value::Result(Err(error))),
+            other => Err(RillError::new(format!(
+                "map needs a List, Map, Option, or Result, got {}",
+                other.type_name()
+            ))
+            .into()),
         }
     }
 
