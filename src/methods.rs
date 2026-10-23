@@ -758,23 +758,39 @@ pub fn namespace_method(module: &str, name: &str) -> Option<NamespaceCall> {
     })
 }
 
+/// The standard namespaces that `use` accepts and that resolve as `name.func(...)`.
+pub const NAMESPACES: &[&str] = &[
+    "json", "toml", "yaml", "csv", "url", "path", "fs", "process", "time", "regex", "archive",
+    "hashes",
+];
+
 pub fn is_namespace(name: &str) -> bool {
-    matches!(
-        name,
-        "json"
-            | "toml"
-            | "yaml"
-            | "csv"
-            | "url"
-            | "path"
-            | "fs"
-            | "process"
-            | "time"
-            | "regex"
-            | "archive"
-            | "hashes"
-            | "Stream"
-    )
+    NAMESPACES.contains(&name) || name == "Stream"
+}
+
+/// Names of the functions available on a namespace, for diagnostics.
+pub fn namespace_functions(module: &str) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = NAMESPACE_ALIASES
+        .iter()
+        .filter(|alias| alias.module == module)
+        .map(|alias| alias.name)
+        .collect();
+    names.extend(METHODS.iter().filter_map(|method| match method.target {
+        Target::Module(target_module, name) if target_module == module => Some(name),
+        _ => None,
+    }));
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Names of the methods a receiver of `kind` accepts, for diagnostics.
+pub fn methods_for(kind: Kind) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> =
+        METHODS.iter().filter(|method| method.accepts(kind)).map(|method| method.name).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// Whether an expression starts with a receiver-relative method, e.g. .map(f).take(2).

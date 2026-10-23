@@ -298,3 +298,86 @@ fn parallel_bodies_cannot_assign_outer_vars() {
     check_ok("parallel for x in [1, 2] { var n = 0\nn += x\nemit n }");
     check_ok("var n = 0\nfor x in [1, 2] { n += x }");
 }
+
+fn check_help(source: &str) -> String {
+    let program = rill::parser::parse(source).expect("parse");
+    let error = rill::typeck::check(&program).expect_err(source);
+    error.help_text().unwrap_or_default().to_string()
+}
+
+#[test]
+fn unknown_names_come_with_suggestions() {
+    assert_eq!(check_help("let host = 1\nhots"), "did you mean `host`?");
+    assert_eq!(check_help("let host = 1\nhots()"), "did you mean `host`?");
+    assert_eq!(check_help("\"a\".lnes()"), "did you mean `.lines()`?");
+    assert_eq!(check_help("path(\"x\").read()"), "`.read()` was renamed; use `.read_text()`");
+    assert_eq!(check_help("use jsn"), "did you mean `json`?");
+    assert_eq!(check_help("json.parze(\"1\")"), "did you mean `parse`?");
+    assert_eq!(check_help("let r = run true\nr.oute"), "did you mean `out`?");
+    assert_eq!(check_help("let r = run true\nr.zzz"), "");
+    assert!(check_err("lines(\"a\")").contains("was removed; use receiver.lines(...)"));
+}
+
+#[test]
+fn rejects_reassignment_with_a_different_type() {
+    let err = check_err("var x = 1\nx = \"s\"");
+    assert!(err.contains("cannot assign Str to 'x', which has type Int"), "{err}");
+    check_ok("var t = 0\nt += 1.5\nlet f: Float = t");
+    check_ok("var xs = []\nxs += [1]\nlet n: List[Int] = xs");
+    check_ok("var v = null\nv = 1\nlet n: Int = v");
+}
+
+#[test]
+fn rejects_assignment_to_undeclared_variable_with_suggestion() {
+    let program = rill::parser::parse("let total = 1\ntotl = 5").unwrap();
+    let error = rill::typeck::check(&program).unwrap_err();
+    assert!(error.to_string().contains("assignment to undeclared variable 'totl'"), "{error}");
+    assert_eq!(error.help_text(), Some("did you mean `total`?"));
+    assert!(error.span.is_some(), "statement errors carry spans");
+}
+
+#[test]
+fn rejects_non_bool_while_condition() {
+    let err = check_err("while 5 { }");
+    assert!(err.contains("while condition must be Bool, got Int"), "{err}");
+    check_ok("var i = 0\nwhile i < 3 { i += 1 }");
+}
+
+#[test]
+fn rejects_function_that_may_not_return() {
+    let err = check_err("fn f(x: Int) -> Int { if x > 0 { return 1 } }");
+    assert!(err.contains("can finish without a value"), "{err}");
+    check_ok("fn g(x: Int) -> Int { if x > 0 { return 1 } else { return 2 } }");
+    check_ok("fn h() -> Int { match 1 { _ => 1 } }");
+    check_ok("fn k(x: Int) -> Int { if x > 0 { return 1 }\nx * 2 }");
+}
+
+#[test]
+fn infers_result_for_functions_using_try_and_rejects_map_on_it() {
+    let source = r#"
+fn load(cmd: Str) {
+    let out = run! $*cmd
+    out.trim()
+}
+load("echo hi").map(|x| x)
+"#;
+    let program = rill::parser::parse(source).unwrap();
+    let error = rill::typeck::check(&program).unwrap_err();
+    assert!(error.to_string().contains(".map() is not supported on Result"), "{error}");
+    assert!(error.help_text().unwrap_or_default().contains("unwrap it first"));
+    check_ok(
+        r#"
+fn load(cmd: Str) {
+    let out = run! $*cmd
+    out.trim()
+}
+fn main() -> Result[Str, Error] {
+    let text = load("echo hi")?
+    ok(text)
+}
+let first = |xs| { let x = xs.find(. != "")?
+x.upper() }
+let s: Option[Str] = first(["", "a"])
+"#,
+    );
+}

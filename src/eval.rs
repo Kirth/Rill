@@ -1204,6 +1204,7 @@ impl Evaluator {
                                     }],
                                     return_type: None,
                                     body: vec![Stmt::Return(Some(call))],
+                                    propagation: PropagationCell::new(Propagation::None),
                                 },
                                 None,
                             ));
@@ -1328,7 +1329,7 @@ impl Evaluator {
                     flow => Err(EvalError::Control(flow)),
                 }
             }
-            Expr::Closure { params, body } => Ok(self.make_function(
+            Expr::Closure { params, body, propagation } => Ok(self.make_function(
                 Function {
                     params: params
                         .iter()
@@ -1336,6 +1337,7 @@ impl Evaluator {
                         .collect(),
                     return_type: None,
                     body: body.clone(),
+                    propagation: propagation.clone(),
                 },
                 None,
             )),
@@ -3190,6 +3192,7 @@ impl Evaluator {
                             params: vec![Param { name: "_arg".to_string(), type_name: None }],
                             return_type: None,
                             body: vec![Stmt::Return(Some(call))],
+                            propagation: PropagationCell::new(Propagation::None),
                         },
                         None,
                     ));
@@ -4155,6 +4158,21 @@ fn contains_implicit(expr: &Expr) -> bool {
 }
 
 fn wrap_declared_result(function: &Function, value: Value) -> Value {
+    if function.return_type.is_none() {
+        // An unannotated body that can propagate a failure always returns the
+        // inferred wrapper, so success and failure have the same shape.
+        return match function.propagation.get() {
+            Propagation::None => value,
+            Propagation::Result => match value {
+                Value::Result(_) | Value::Option(_) => value,
+                other => Value::Result(Ok(Box::new(other))),
+            },
+            Propagation::Option => match value {
+                Value::Result(_) | Value::Option(_) => value,
+                other => Value::Option(Some(Box::new(other))),
+            },
+        };
+    }
     match function.return_type.as_ref() {
         Some(TypeName::Result(..)) if !matches!(value, Value::Result(_)) => {
             Value::Result(Ok(Box::new(value)))

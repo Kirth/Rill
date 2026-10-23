@@ -7,6 +7,7 @@ pub mod methods;
 pub mod parser;
 pub mod pathresolver;
 pub mod runtime;
+pub mod suggest;
 pub mod typeck;
 pub mod types;
 

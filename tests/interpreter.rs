@@ -1341,3 +1341,32 @@ fn set_env_is_evaluator_local_and_visible_to_children() {
     assert_eq!(run(source), Value::Str("42".into()));
     assert!(std::env::var_os("RILL_EVAL_LOCAL").is_none(), "host environment must not change");
 }
+
+// ── Unannotated functions that propagate with `?` or `run!` ──────────────────
+
+#[test]
+fn unannotated_propagating_functions_return_consistent_wrappers() {
+    let source = r#"
+        fn shout(cmd: Str) {
+            let out = run! $*cmd
+            out.trim().upper()
+        }
+        fn first_nonempty(xs) {
+            let x = xs.find(. != "")?
+            x
+        }
+        let f = |x| { let v = ok(x)?
+            v + 1 }
+        [shout("printf hi"), shout("false").is_err(), first_nonempty(["", "a"]), first_nonempty([""]), f(1)]
+    "#;
+    assert_eq!(
+        run(source),
+        Value::List(vec![
+            Value::Result(Ok(Box::new(Value::Str("HI".into())))),
+            Value::Bool(true),
+            Value::Option(Some(Box::new(Value::Str("a".into())))),
+            Value::Option(None),
+            Value::Result(Ok(Box::new(Value::Int(2)))),
+        ])
+    );
+}

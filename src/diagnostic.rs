@@ -31,14 +31,20 @@ pub struct RillError {
     pub exit_code: Option<i32>,
     pub kind: ErrorKind,
     pub severity: Severity,
+    /// Rarely-populated details, boxed to keep `Result<_, RillError>` small.
+    extras: Option<Box<Extras>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Extras {
     /// A short suggestion shown under the report ("did you mean ...").
-    pub help: Option<String>,
+    help: Option<String>,
     /// Further diagnostics reported together with this one.
-    pub related: Vec<RillError>,
+    related: Vec<RillError>,
     /// Overrides the code derived from `kind`.
-    pub code: Option<&'static str>,
+    code: Option<&'static str>,
     /// Extra labelled spans, e.g. "this block was opened here".
-    pub secondary: Vec<(Span, String)>,
+    secondary: Vec<(Span, String)>,
 }
 
 impl RillError {
@@ -50,11 +56,12 @@ impl RillError {
             exit_code: None,
             kind: ErrorKind::Runtime,
             severity: Severity::Error,
-            help: None,
-            related: Vec::new(),
-            code: None,
-            secondary: Vec::new(),
+            extras: None,
         }
+    }
+
+    fn extras(&mut self) -> &mut Extras {
+        self.extras.get_or_insert_with(Default::default)
     }
 
     pub fn spanned(message: impl Into<String>, span: Span) -> Self {
@@ -64,8 +71,16 @@ impl RillError {
     pub fn warning(message: impl Into<String>, code: &'static str) -> Self {
         let mut warning = Self::new(message);
         warning.severity = Severity::Warning;
-        warning.code = Some(code);
+        warning.extras().code = Some(code);
         warning
+    }
+
+    pub fn help_text(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|extras| extras.help.as_deref())
+    }
+
+    pub fn related_errors(&self) -> &[RillError] {
+        self.extras.as_ref().map_or(&[], |extras| extras.related.as_slice())
     }
 
     pub fn exit(code: i32) -> Self {
@@ -89,23 +104,31 @@ impl RillError {
     }
 
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
-        self.help = Some(help.into());
+        self.extras().help = Some(help.into());
         self
     }
 
+    /// Attach help only when there is some, keeping call sites tidy.
+    pub fn with_optional_help(self, help: Option<String>) -> Self {
+        match help {
+            Some(help) => self.with_help(help),
+            None => self,
+        }
+    }
+
     pub fn with_code(mut self, code: &'static str) -> Self {
-        self.code = Some(code);
+        self.extras().code = Some(code);
         self
     }
 
     pub fn with_related(mut self, related: Vec<RillError>) -> Self {
-        self.related = related;
+        self.extras().related = related;
         self
     }
 
     /// Add a secondary labelled span to the report.
     pub fn with_label(mut self, span: Span, text: impl Into<String>) -> Self {
-        self.secondary.push((span, text.into()));
+        self.extras().secondary.push((span, text.into()));
         self
     }
 
@@ -124,9 +147,11 @@ impl RillError {
         if self.source.is_none() {
             self.source = Some(source.clone());
         }
-        for related in &mut self.related {
-            if related.source.is_none() {
-                related.source = Some(source.clone());
+        if let Some(extras) = &mut self.extras {
+            for related in &mut extras.related {
+                if related.source.is_none() {
+                    related.source = Some(source.clone());
+                }
             }
         }
         self
@@ -134,7 +159,8 @@ impl RillError {
 
     /// The diagnostic code shown in reports, e.g. `rill::type`.
     pub fn code_name(&self) -> &'static str {
-        self.code.unwrap_or(match self.kind {
+        let explicit = self.extras.as_ref().and_then(|extras| extras.code);
+        explicit.unwrap_or(match self.kind {
             ErrorKind::Parse => "rill::parse",
             ErrorKind::Type => "rill::type",
             ErrorKind::Runtime => "rill::runtime",
@@ -199,7 +225,7 @@ impl Diagnostic for RillError {
     }
 
     fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        self.help.as_ref().map(|help| Box::new(help) as Box<dyn fmt::Display>)
+        self.help_text().map(|help| Box::new(help) as Box<dyn fmt::Display>)
     }
 
     fn source_code(&self) -> Option<&dyn SourceCode> {
@@ -213,20 +239,23 @@ impl Diagnostic for RillError {
         let primary = self.span.map(|span| {
             LabeledSpan::new_primary_with_span(Some(self.message.clone()), to_span(span))
         });
-        let secondary = self.secondary.iter().map(move |(span, text)| {
-            LabeledSpan::new_with_span(Some(text.clone()), to_span(*span))
-        });
-        if primary.is_none() && self.secondary.is_empty() {
+        let secondary: &[(Span, String)] =
+            self.extras.as_ref().map_or(&[], |extras| extras.secondary.as_slice());
+        if primary.is_none() && secondary.is_empty() {
             return None;
         }
+        let secondary = secondary.iter().map(move |(span, text)| {
+            LabeledSpan::new_with_span(Some(text.clone()), to_span(*span))
+        });
         Some(Box::new(primary.into_iter().chain(secondary)))
     }
 
     fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
-        if self.related.is_empty() {
+        let related = self.related_errors();
+        if related.is_empty() {
             return None;
         }
-        Some(Box::new(self.related.iter().map(|related| related as &dyn Diagnostic)))
+        Some(Box::new(related.iter().map(|related| related as &dyn Diagnostic)))
     }
 }
 

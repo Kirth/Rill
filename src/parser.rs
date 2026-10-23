@@ -1334,7 +1334,8 @@ impl Parser {
             None
         };
         let body = self.parse_block()?;
-        Ok(Stmt::Fn { name, function: Function { params, return_type, body } })
+        let propagation = initial_propagation(&body);
+        Ok(Stmt::Fn { name, function: Function { params, return_type, body, propagation } })
     }
 
     fn parse_for_expr(
@@ -1611,7 +1612,8 @@ impl Parser {
                 } else {
                     vec![Stmt::Expr(self.parse_expr(0)?)]
                 };
-                Ok(Expr::Closure { params, body })
+                let propagation = initial_propagation(&body);
+                Ok(Expr::Closure { params, body, propagation })
             }
             TokenKind::Dot => {
                 if let TokenKind::Ident(name) = self.peek_kind() {
@@ -2112,6 +2114,87 @@ enum ParsedOp {
     Pipe(PipeKind),
     Match,
     Index,
+}
+
+/// `Result` when a body can propagate a failure with `?` or `run!` (not
+/// counting nested functions and closures, which propagate on their own).
+fn initial_propagation(body: &[Stmt]) -> PropagationCell {
+    PropagationCell::new(if stmts_propagate(body) {
+        Propagation::Result
+    } else {
+        Propagation::None
+    })
+}
+
+fn stmts_propagate(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt.unspanned() {
+        Stmt::Located { stmt, .. } => stmts_propagate(std::slice::from_ref(stmt)),
+        Stmt::Let { expr, .. }
+        | Stmt::Expr(expr)
+        | Stmt::Emit(expr)
+        | Stmt::Assign { expr, .. }
+        | Stmt::AssignEnv { expr, .. }
+        | Stmt::Return(Some(expr)) => expr_propagates(expr),
+        Stmt::IndexAssign { index, expr, .. } => expr_propagates(index) || expr_propagates(expr),
+        Stmt::If { cond, then_body, else_body, .. } => {
+            expr_propagates(cond) || stmts_propagate(then_body) || stmts_propagate(else_body)
+        }
+        Stmt::While { cond, body } => expr_propagates(cond) || stmts_propagate(body),
+        Stmt::WithEnv { bindings, body } => {
+            bindings.iter().any(|(_, expr)| expr_propagates(expr)) || stmts_propagate(body)
+        }
+        Stmt::On { host, body } => expr_propagates(host) || stmts_propagate(body),
+        Stmt::Fn { .. }
+        | Stmt::Use(_)
+        | Stmt::Args(_)
+        | Stmt::InputLines
+        | Stmt::Return(None)
+        | Stmt::Continue
+        | Stmt::Break => false,
+    })
+}
+
+fn expr_propagates(expr: &Expr) -> bool {
+    match expr.unspanned() {
+        Expr::Try(_) => true,
+        Expr::Command(command) => {
+            command.check_exit
+                || command.argv.iter().any(command_arg_propagates)
+                || command.redirects.iter().any(|redirect| command_arg_propagates(&redirect.target))
+                || command.config.iter().any(|(_, value)| expr_propagates(value))
+        }
+        Expr::List(items) | Expr::Tuple(items) => items.iter().any(expr_propagates),
+        Expr::Map(pairs) => pairs.iter().any(|(_, value)| expr_propagates(value)),
+        Expr::Call { callee, args } => expr_propagates(callee) || args.iter().any(expr_propagates),
+        Expr::Field { base, .. } => expr_propagates(base),
+        Expr::Index { base, index } => expr_propagates(base) || expr_propagates(index),
+        Expr::Binary { left, right, .. } | Expr::Pipe { left, right, .. } => {
+            expr_propagates(left) || expr_propagates(right)
+        }
+        Expr::RegexMatch { value, .. }
+        | Expr::RegexSubstitution { value, .. }
+        | Expr::NamedArg { value, .. }
+        | Expr::Unary { operand: value, .. } => expr_propagates(value),
+        Expr::Match { value, arms } => {
+            expr_propagates(value) || arms.iter().any(|arm| expr_propagates(&arm.expr))
+        }
+        Expr::For { iter, body, workers, .. } => {
+            expr_propagates(iter)
+                || stmts_propagate(body)
+                || workers.as_deref().is_some_and(expr_propagates)
+        }
+        Expr::Block(body) => stmts_propagate(body),
+        Expr::Located { expr, .. } => expr_propagates(expr),
+        Expr::Closure { .. }
+        | Expr::Literal(_)
+        | Expr::Ident(_)
+        | Expr::Implicit
+        | Expr::ImplicitField(_) => false,
+    }
+}
+
+fn command_arg_propagates(arg: &CommandArg) -> bool {
+    matches!(arg, CommandArg::Expr(expr) if expr_propagates(expr))
 }
 
 fn describe_expr(expr: &Expr) -> &'static str {

@@ -10,6 +10,61 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: Option<TypeName>,
     pub body: Vec<Stmt>,
+    /// How an unannotated body that uses `?` or `run!` wraps its result.
+    pub propagation: PropagationCell,
+}
+
+/// What an unannotated function or closure returns when its body can
+/// propagate a failure with `?` or `run!`.  The parser sets `Result` when the
+/// body contains either; the checker refines it to `Option` when every `?`
+/// applies to an Option; a declared return type disables it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Propagation {
+    None,
+    Result,
+    Option,
+}
+
+/// Shared, thread-safe cell so the checker can record its decision on the
+/// AST the evaluator later reads.
+#[derive(Debug)]
+pub struct PropagationCell(std::sync::atomic::AtomicU8);
+
+impl PropagationCell {
+    pub fn new(propagation: Propagation) -> Self {
+        let cell = Self(std::sync::atomic::AtomicU8::new(0));
+        cell.set(propagation);
+        cell
+    }
+
+    pub fn get(&self) -> Propagation {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => Propagation::Result,
+            2 => Propagation::Option,
+            _ => Propagation::None,
+        }
+    }
+
+    pub fn set(&self, propagation: Propagation) {
+        let raw = match propagation {
+            Propagation::None => 0,
+            Propagation::Result => 1,
+            Propagation::Option => 2,
+        };
+        self.0.store(raw, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Clone for PropagationCell {
+    fn clone(&self) -> Self {
+        Self::new(self.get())
+    }
+}
+
+impl PartialEq for PropagationCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +264,7 @@ pub enum Expr {
     Closure {
         params: Vec<String>,
         body: Vec<Stmt>,
+        propagation: PropagationCell,
     },
     Unary {
         op: UnaryOp,

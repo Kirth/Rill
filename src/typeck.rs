@@ -146,6 +146,22 @@ impl Env {
     fn scope_index(&self, name: &str) -> Option<usize> {
         self.scopes.iter().rposition(|scope| scope.contains_key(name))
     }
+
+    /// Change the type of an existing binding in the scope that declares it.
+    fn retype(&mut self, name: &str, ty: Type) {
+        if let Some(binding) = self.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name)) {
+            binding.ty = ty;
+        }
+    }
+
+    /// Every name currently in scope, for suggestions.
+    fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> =
+            self.scopes.iter().flat_map(|scope| scope.keys().map(String::as_str)).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
 }
 
 pub fn check(program: &Program) -> Result<(), RillError> {
@@ -170,6 +186,7 @@ pub(crate) fn check_module(
     let mut checker = Checker {
         env,
         return_expected: None,
+        try_kinds: Vec::new(),
         loop_depth: 0,
         for_body_depth: 0,
         function_depth: 0,
@@ -178,9 +195,18 @@ pub(crate) fn check_module(
     checker.check_program(program)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TryKind {
+    Option,
+    Result,
+    Unknown,
+}
+
 struct Checker {
     env: Env,
     return_expected: Option<Type>,
+    /// The kinds of `?` and `run!` seen in the function body being checked.
+    try_kinds: Vec<TryKind>,
     loop_depth: usize,
     /// While checking a parallel body: scopes below this index belong to the
     /// enclosing sequential code and may not be assigned to.
@@ -272,6 +298,20 @@ impl Checker {
         Ok(ModuleExports { symbols })
     }
 
+    fn unknown_identifier(&self, name: &str) -> RillError {
+        RillError::new(format!("unknown identifier '{name}'"))
+            .with_optional_help(crate::suggest::did_you_mean(name, self.env.names()))
+    }
+
+    fn unknown_function(&self, name: &str) -> RillError {
+        let help = if crate::methods::lookup(name).is_some() {
+            Some(format!("`{name}` is a method; call it on a value as `value.{name}(...)`"))
+        } else {
+            crate::suggest::did_you_mean(name, self.env.names())
+        };
+        RillError::new(format!("unknown function '{name}'")).with_optional_help(help)
+    }
+
     fn ensure_assignable_in_parallel(&self, name: &str) -> Result<(), RillError> {
         if let (Some(floor), Some(index)) = (self.parallel_floor, self.env.scope_index(name)) {
             if index < floor {
@@ -308,24 +348,15 @@ impl Checker {
                 self.check_stmt(stmt).map_err(|error| error.with_span(*span))
             }
             Stmt::Use(module) => {
-                if !matches!(
-                    module.as_str(),
-                    "json"
-                        | "toml"
-                        | "yaml"
-                        | "csv"
-                        | "url"
-                        | "path"
-                        | "fs"
-                        | "process"
-                        | "time"
-                        | "regex"
-                        | "archive"
-                        | "hashes"
-                ) && !module.starts_with("./")
+                if !crate::methods::NAMESPACES.contains(&module.as_str())
+                    && !module.starts_with("./")
                     && !module.starts_with("../")
                 {
-                    return Err(RillError::new(format!("unknown module '{module}'")));
+                    return Err(RillError::new(format!("unknown module '{module}'"))
+                        .with_optional_help(crate::suggest::did_you_mean(
+                            module,
+                            crate::methods::NAMESPACES.iter().copied(),
+                        )));
                 }
                 Ok(Type::Null)
             }
@@ -350,7 +381,7 @@ impl Checker {
                 ensure_assignable(&Type::Str, &ty)?;
                 Ok(Type::Null)
             }
-            Stmt::Assign { name, expr, .. } => {
+            Stmt::Assign { name, op, expr } => {
                 self.ensure_assignable_in_parallel(name)?;
                 if matches!(self.env.is_mutable(name), Some(false)) {
                     return Err(RillError::new(format!(
@@ -360,7 +391,34 @@ impl Checker {
                         "declare it with `var {name} = ...` to allow reassignment"
                     )));
                 }
-                self.check_expr(expr)?;
+                let Some(current) = self.env.get(name) else {
+                    return Err(RillError::new(format!(
+                        "assignment to undeclared variable '{name}'"
+                    ))
+                    .with_help(
+                        crate::suggest::did_you_mean(name, self.env.names())
+                            .unwrap_or_else(|| format!("declare it first with `var {name} = ...`")),
+                    ));
+                };
+                let value_ty = self.check_expr(expr)?;
+                let assigned = compound_assignment_type(*op, &current, &value_ty)?;
+                if matches!(current, Type::Null | Type::Unknown)
+                    || ensure_assignable(&current, &assigned).is_ok()
+                {
+                    if !assigned.is_unknown() && current != assigned {
+                        self.env.retype(name, common_type(current, assigned));
+                    }
+                } else if ensure_assignable(&assigned, &current).is_ok() {
+                    // Widening (Int -> Float): the variable takes the wider type.
+                    self.env.retype(name, assigned);
+                } else {
+                    return Err(RillError::new(format!(
+                        "cannot assign {assigned} to '{name}', which has type {current}"
+                    ))
+                    .with_help(format!(
+                        "declare a new variable, or convert with `{current}(...)`"
+                    )));
+                }
                 Ok(Type::Null)
             }
             Stmt::IndexAssign { name, index, op, expr } => {
@@ -373,10 +431,7 @@ impl Checker {
                         "declare it with `var {name} = ...` to allow reassignment"
                     )));
                 }
-                let collection = self
-                    .env
-                    .get(name)
-                    .ok_or_else(|| RillError::new(format!("unknown identifier '{name}'")))?;
+                let collection = self.env.get(name).ok_or_else(|| self.unknown_identifier(name))?;
                 let index_ty = self.check_expr(index)?;
                 let value_ty = self.check_expr(expr)?;
                 if let Type::Tuple(elements) = collection {
@@ -436,29 +491,44 @@ impl Checker {
                 }
                 let previous_return = self.return_expected.take();
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let previous_tries = std::mem::take(&mut self.try_kinds);
                 self.function_depth += 1;
                 self.return_expected = function.return_type.as_ref().map(type_from_name);
                 let checked = self.check_stmts(&function.body).and_then(|body_ty| {
                     if let Some(return_type) = &function.return_type {
+                        let declared = type_from_name(return_type);
                         let last_span = function.body.last().and_then(|s| match s.unspanned() {
                             Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Emit(e) => e.span(),
                             Stmt::Let { expr, .. } => expr.span(),
                             _ => None,
                         });
-                        ensure_function_return(&type_from_name(return_type), &body_ty).map_err(
-                            |e| match last_span {
-                                Some(s) => e.with_span(s),
-                                None => e,
-                            },
-                        )?;
+                        ensure_function_return(&declared, &body_ty).map_err(|e| match last_span {
+                            Some(s) => e.with_span(s),
+                            None => e,
+                        })?;
+                        if !matches!(declared, Type::Null | Type::Unknown)
+                            && !stmts_always_yield(&function.body)
+                        {
+                            return Err(RillError::new(format!(
+                                "function '{name}' is declared to return {declared} but can finish without a value"
+                            ))
+                            .with_help("add a `return` or a final expression on every path"));
+                        }
                     }
                     Ok(body_ty)
                 });
+                let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
                 self.return_expected = previous_return;
                 self.loop_depth = previous_loop;
                 self.function_depth -= 1;
                 self.env.pop();
                 let body_ty = checked?;
+                let body_ty = infer_propagation(
+                    &function.propagation,
+                    function.return_type.is_some(),
+                    &tries,
+                    body_ty,
+                );
                 self.env.set(
                     name.clone(),
                     Type::Function {
@@ -557,7 +627,12 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::While { cond, body } => {
-                self.check_expr(cond)?;
+                let cond_ty = self.check_expr(cond)?;
+                if !matches!(cond_ty, Type::Bool | Type::Unknown) {
+                    return Err(RillError::new(format!(
+                        "while condition must be Bool, got {cond_ty}"
+                    )));
+                }
                 self.loop_depth += 1;
                 self.check_stmts(body)?;
                 self.loop_depth -= 1;
@@ -593,9 +668,7 @@ impl Checker {
                 if name == "none" {
                     return Ok(Type::Option(Box::new(Type::Unknown)));
                 }
-                self.env
-                    .get(name)
-                    .ok_or_else(|| RillError::new(format!("unknown identifier '{name}'")))
+                self.env.get(name).ok_or_else(|| self.unknown_identifier(name))
             }
             Expr::List(items) => {
                 let mut item_ty = Type::Unknown;
@@ -635,6 +708,9 @@ impl Checker {
             Expr::Binary { op, left, right } => self.check_binary(*op, left, right),
             Expr::Pipe { kind, left, right } => self.check_pipe(*kind, left, right),
             Expr::Command(command) => {
+                if command.check_exit {
+                    self.try_kinds.push(TryKind::Result);
+                }
                 self.check_command(command)?;
                 Ok(if command.check_exit { Type::Str } else { Type::ProcessResult })
             }
@@ -659,9 +735,18 @@ impl Checker {
             Expr::Match { value, arms } => self.check_match(value, arms),
             Expr::NamedArg { value, .. } => self.check_expr(value),
             Expr::Try(inner) => match self.check_expr(inner)? {
-                Type::Option(value) => Ok(*value),
-                Type::Result(value, _) => Ok(*value),
-                Type::Unknown => Ok(Type::Unknown),
+                Type::Option(value) => {
+                    self.try_kinds.push(TryKind::Option);
+                    Ok(*value)
+                }
+                Type::Result(value, _) => {
+                    self.try_kinds.push(TryKind::Result);
+                    Ok(*value)
+                }
+                Type::Unknown => {
+                    self.try_kinds.push(TryKind::Unknown);
+                    Ok(Type::Unknown)
+                }
                 other => Err(RillError::new(format!("? needs Option or Result, got {other}"))),
             },
             Expr::For { mode, workers, pattern, iter, body } => {
@@ -708,9 +793,10 @@ impl Checker {
                 self.env.pop();
                 Ok(ty)
             }
-            Expr::Closure { params, body } => {
+            Expr::Closure { params, body, propagation } => {
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let previous_return = self.return_expected.take();
+                let previous_tries = std::mem::take(&mut self.try_kinds);
                 self.return_expected = Some(Type::Unknown);
                 self.function_depth += 1;
                 self.env.push();
@@ -718,14 +804,16 @@ impl Checker {
                     self.env.set(param.clone(), Type::Unknown);
                 }
                 let return_type = self.check_stmts(body);
+                let tries = std::mem::replace(&mut self.try_kinds, previous_tries);
                 self.loop_depth = previous_loop;
                 self.return_expected = previous_return;
                 self.function_depth -= 1;
                 self.env.pop();
+                let return_type = infer_propagation(propagation, false, &tries, return_type?);
                 Ok(Type::Function {
                     arity: Some(params.len()),
                     params: None,
-                    return_type: Box::new(return_type?),
+                    return_type: Box::new(return_type),
                 })
             }
             Expr::Unary { op: UnaryOp::Not, operand } => {
@@ -782,7 +870,7 @@ impl Checker {
                     if let Some(call) = crate::methods::namespace_method(module, name) {
                         return self.check_namespace_method(module, name, call, args);
                     }
-                    return Err(RillError::new(format!("{module} has no function '{name}'")));
+                    return Err(unknown_namespace_function(module, name));
                 }
             }
             if crate::methods::lookup(name).is_some() {
@@ -858,7 +946,18 @@ impl Checker {
         let kind = method_kind(&receiver);
         let method = crate::methods::lookup(name)
             .ok_or_else(|| RillError::new(format!("unknown method .{name}()")))?;
-        method.validate(kind, args.len()).map_err(RillError::new)?;
+        method.validate(kind, args.len()).map_err(|message| {
+            let error = RillError::new(message);
+            match receiver {
+                Type::Result(..) => error.with_help(
+                    "this value is a Result; unwrap it first with `?`, `.unwrap()`, or a match",
+                ),
+                Type::Option(..) => error.with_help(
+                    "this value is an Option; unwrap it first with `?`, `.unwrap_or(...)`, or a match",
+                ),
+                _ => error,
+            }
+        })?;
         let mut arg_types = Vec::new();
         for (index, arg) in args.iter().enumerate() {
             match (arg.unspanned(), method.argument(index)) {
@@ -958,10 +1057,7 @@ impl Checker {
             }
             return Ok(resolve_method_return(builtin.returns, &Type::Unknown, &arg_types));
         }
-        let ty = self
-            .env
-            .get(name)
-            .ok_or_else(|| RillError::new(format!("unknown function '{name}'")))?;
+        let ty = self.env.get(name).ok_or_else(|| self.unknown_function(name))?;
         let Type::Function { arity, params, return_type } = ty else {
             return Err(RillError::new(format!("{name} is not callable")));
         };
@@ -1041,7 +1137,7 @@ impl Checker {
                         return_type: Box::new(Type::Unknown),
                     });
                 }
-                return Err(RillError::new(format!("{module} has no function '{name}'")));
+                return Err(unknown_namespace_function(module, name));
             }
         }
         let base_ty = self.check_expr(base)?;
@@ -1050,7 +1146,11 @@ impl Checker {
                 "status" => Ok(Type::Int),
                 "out" | "err" => Ok(Type::Str),
                 "ok" => Ok(Type::Bool),
-                _ => Err(RillError::new(format!("ProcessResult has no field '{name}'"))),
+                _ => Err(RillError::new(format!("ProcessResult has no field '{name}'"))
+                    .with_optional_help(crate::suggest::did_you_mean(
+                        name,
+                        ["status", "out", "err", "ok"],
+                    ))),
             },
             Type::Map | Type::Unknown => Ok(Type::Unknown),
             ref ty
@@ -1059,7 +1159,7 @@ impl Checker {
             {
                 Err(RillError::new(format!(".{name} is a method; call .{name}(...)")))
             }
-            other => Err(RillError::new(format!("{other} has no field '{name}'"))),
+            other => Err(unknown_member(&other, name)),
         }
     }
 
@@ -1741,6 +1841,9 @@ fn compound_assignment_type(op: AssignOp, current: &Type, value: &Type) -> Resul
     }
     match (op, current, value) {
         (AssignOp::Add, Type::Str, Type::Str) => Ok(Type::Str),
+        (AssignOp::Add, Type::List(current), Type::List(value)) => {
+            Ok(Type::List(Box::new(common_type((**current).clone(), (**value).clone()))))
+        }
         (
             AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div,
             Type::Int | Type::Float,
@@ -1760,4 +1863,78 @@ fn compile_regex(pattern: &str) -> Result<regex::Regex, RillError> {
 fn regex_capture_names(pattern: &str) -> Result<Vec<String>, RillError> {
     let regex = compile_regex(pattern)?;
     Ok(regex.capture_names().flatten().map(ToString::to_string).collect())
+}
+
+fn unknown_namespace_function(module: &str, name: &str) -> RillError {
+    RillError::new(format!("{module} has no function '{name}'")).with_optional_help(
+        crate::suggest::did_you_mean(name, crate::methods::namespace_functions(module)),
+    )
+}
+
+/// Error for `value.name` when `value`'s type has no such field or method.
+fn unknown_member(ty: &Type, name: &str) -> RillError {
+    let help = if let Some(renamed) = crate::methods::moved_function(name) {
+        Some(format!("`.{name}()` was renamed; use `.{renamed}()`"))
+    } else {
+        crate::suggest::closest(name, crate::methods::methods_for(method_kind(ty)))
+            .map(|candidate| format!("did you mean `.{candidate}()`?"))
+    };
+    RillError::new(format!("{ty} has no field '{name}'")).with_optional_help(help)
+}
+
+/// Decide what an unannotated propagating body returns, record it on the AST
+/// for the evaluator, and produce the type callers see.
+fn infer_propagation(
+    cell: &PropagationCell,
+    annotated: bool,
+    tries: &[TryKind],
+    body_ty: Type,
+) -> Type {
+    if annotated || tries.is_empty() {
+        cell.set(Propagation::None);
+        return body_ty;
+    }
+    let all_option = tries.iter().all(|kind| *kind == TryKind::Option);
+    if all_option {
+        cell.set(Propagation::Option);
+        match body_ty {
+            Type::Option(_) | Type::Result(..) => body_ty,
+            other => Type::Option(Box::new(other)),
+        }
+    } else {
+        cell.set(Propagation::Result);
+        match body_ty {
+            Type::Option(_) | Type::Result(..) => body_ty,
+            other => Type::Result(Box::new(other), Box::new(Type::Unknown)),
+        }
+    }
+}
+
+/// Whether every path through `stmts` ends by producing a value: a `return`,
+/// a final expression, an `if`/`else` or `match` whose branches all do, or a
+/// call that never returns.
+fn stmts_always_yield(stmts: &[Stmt]) -> bool {
+    let Some(last) = stmts.last() else {
+        return false;
+    };
+    match last.unspanned() {
+        Stmt::Return(_) => true,
+        Stmt::Expr(expr) => expr_always_yields(expr),
+        Stmt::If { then_body, else_body, .. } => {
+            !else_body.is_empty() && stmts_always_yield(then_body) && stmts_always_yield(else_body)
+        }
+        Stmt::Located { stmt, .. } => stmts_always_yield(std::slice::from_ref(stmt)),
+        _ => false,
+    }
+}
+
+fn expr_always_yields(expr: &Expr) -> bool {
+    match expr.unspanned() {
+        Expr::Match { arms, .. } => arms.iter().all(|arm| expr_always_yields(&arm.expr)),
+        Expr::Block(body) => stmts_always_yield(body),
+        Expr::Call { callee, .. } => {
+            !matches!(callee.unspanned(), Expr::Ident(name) if name == "print" || name == "warn")
+        }
+        _ => true,
+    }
 }
