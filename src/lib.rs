@@ -8,6 +8,7 @@ pub mod parser;
 pub mod pathresolver;
 pub mod runtime;
 pub mod suggest;
+pub mod term;
 pub mod typeck;
 pub mod types;
 
@@ -382,43 +383,111 @@ pub fn compile(source: &str) -> Result<CompiledProgram, RillError> {
     })
 }
 
+/// Help text for a script's `args { }` declaration (shown for `--help`).
 pub fn cli_help(group: &ast::ArgGroup) -> String {
-    cli_help_named(group, "rill")
+    cli_help_named(group, "rill <script>")
 }
 
 fn cli_help_named(group: &ast::ArgGroup, usage: &str) -> String {
-    let mut help = format!("Usage: {usage} [options] [arguments]\n\nOptions:\n");
-    for field in &group.fields {
-        let short = field.short.as_ref().map(|value| format!("-{}, ", value)).unwrap_or_default();
-        let default = field.default.as_ref().map(|_| " [default]").unwrap_or("");
-        help.push_str(&format!(
-            "  {}--{}{} {}\n",
-            short,
-            field.name,
-            default,
-            field.description.as_deref().unwrap_or("")
-        ));
+    let positionals: Vec<&ast::ArgDecl> =
+        group.fields.iter().filter(|field| is_positional(field)).collect();
+    let mut help = format!("Usage: {usage} [options]");
+    for field in &positionals {
+        help.push_str(&format!(" <{}>", field.name));
     }
     if !group.subcommands.is_empty() {
-        help.push_str("\nSubcommands:\n");
-        for child in &group.subcommands {
-            help.push_str(&format!("  {}\n", child.name));
-            append_group_summary(&mut help, child, 4);
+        help.push_str(" <command> [command options]");
+    }
+    help.push('\n');
+    if !positionals.is_empty() {
+        help.push_str("\nArguments:\n");
+        for field in &positionals {
+            help.push_str(&format!(
+                "  {:<22} {}\n",
+                format!("<{}>", field.name),
+                field.description.as_deref().unwrap_or("")
+            ));
         }
     }
-    help.push_str("  -h, --help\n");
-    help
+    help.push_str("\nOptions:\n");
+    for field in &group.fields {
+        help.push_str(&format!("  {:<22} {}\n", option_flags(field), option_summary(field)));
+    }
+    help.push_str(&format!("  {:<22} show this help\n", "-h, --help"));
+    if !group.subcommands.is_empty() {
+        help.push_str("\nCommands:\n");
+        for child in group.subcommands.iter().flat_map(|child| {
+            if child.name == "command" {
+                child.subcommands.iter().collect::<Vec<_>>()
+            } else {
+                vec![child]
+            }
+        }) {
+            help.push_str(&format!("  {}\n", child.name));
+            append_group_summary(&mut help, child, 6);
+        }
+    }
+    help.trim_end().to_string()
+}
+
+fn is_positional(field: &ast::ArgDecl) -> bool {
+    field.default.is_none()
+        && !matches!(field.type_name, ast::TypeName::Bool | ast::TypeName::Option(_))
+}
+
+fn option_flags(field: &ast::ArgDecl) -> String {
+    let short =
+        field.short.as_ref().map(|value| format!("-{value}, ")).unwrap_or_else(|| "    ".into());
+    if matches!(field.type_name, ast::TypeName::Bool) {
+        format!("{short}--{}", field.name)
+    } else {
+        format!("{short}--{} <{}>", field.name, type_label(&field.type_name))
+    }
+}
+
+fn option_summary(field: &ast::ArgDecl) -> String {
+    let mut parts = Vec::new();
+    if let Some(description) = &field.description {
+        parts.push(description.clone());
+    }
+    match (&field.default, &field.type_name) {
+        (Some(default), _) => parts.push(format!("[default: {}]", render_default(default))),
+        (None, ast::TypeName::Option(_)) => parts.push("[optional]".to_string()),
+        (None, ast::TypeName::Bool) => {}
+        (None, _) => parts.push("[required]".to_string()),
+    }
+    parts.join(" ")
+}
+
+fn render_default(expr: &ast::Expr) -> String {
+    match expr.unspanned() {
+        ast::Expr::Literal(ast::Literal::Str(text)) => format!("{text:?}"),
+        ast::Expr::Literal(ast::Literal::Int(value)) => value.to_string(),
+        ast::Expr::Literal(ast::Literal::Float(value)) => value.to_string(),
+        ast::Expr::Literal(ast::Literal::Bool(value)) => value.to_string(),
+        ast::Expr::Literal(ast::Literal::Null) => "null".to_string(),
+        ast::Expr::Literal(ast::Literal::Duration(value)) => types::format_duration(*value),
+        _ => "...".to_string(),
+    }
+}
+
+fn type_label(type_name: &ast::TypeName) -> String {
+    match type_name {
+        ast::TypeName::Option(inner) => type_label(inner),
+        ast::TypeName::Int => "Int".into(),
+        ast::TypeName::Float => "Float".into(),
+        ast::TypeName::Str => "Str".into(),
+        ast::TypeName::Path => "Path".into(),
+        ast::TypeName::Duration => "Duration".into(),
+        ast::TypeName::Bool => "Bool".into(),
+        _ => "value".into(),
+    }
 }
 
 fn append_group_summary(help: &mut String, group: &ast::ArgGroup, indent: usize) {
     let padding = " ".repeat(indent);
     for field in &group.fields {
-        help.push_str(&format!(
-            "{padding}--{}{} {}\n",
-            field.name,
-            if field.default.is_some() { " [default]" } else { "" },
-            field.description.as_deref().unwrap_or("")
-        ));
+        help.push_str(&format!("{padding}{:<20} {}\n", option_flags(field), option_summary(field)));
     }
     for child in &group.subcommands {
         help.push_str(&format!("{padding}{}\n", child.name));

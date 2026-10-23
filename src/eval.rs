@@ -1537,14 +1537,14 @@ impl Evaluator {
                     .fields
                     .iter()
                     .find(|field| field.name == name)
-                    .ok_or_else(|| RillError::new(format!("unknown option '--{name}'")))?;
+                    .ok_or_else(|| usage_error(format!("unknown option '--{name}'")))?;
                 if matches!(field.type_name, TypeName::Bool) {
                     values.insert(field.name.clone(), Value::Bool(true));
                 } else {
                     index += 1;
-                    let value = raw.get(index).ok_or_else(|| {
-                        RillError::new(format!("option '--{name}' needs a value"))
-                    })?;
+                    let value = raw
+                        .get(index)
+                        .ok_or_else(|| usage_error(format!("option '--{name}' needs a value")))?;
                     values.insert(
                         field.name.clone(),
                         parse_arg_value(value, &field.type_name, &|name| {
@@ -1558,14 +1558,14 @@ impl Evaluator {
                     .fields
                     .iter()
                     .find(|field| field.short.as_deref() == Some(short))
-                    .ok_or_else(|| RillError::new(format!("unknown option '-{short}'")))?;
+                    .ok_or_else(|| usage_error(format!("unknown option '-{short}'")))?;
                 if matches!(field.type_name, TypeName::Bool) {
                     values.insert(field.name.clone(), Value::Bool(true));
                 } else {
                     index += 1;
-                    let value = raw.get(index).ok_or_else(|| {
-                        RillError::new(format!("option '-{short}' needs a value"))
-                    })?;
+                    let value = raw
+                        .get(index)
+                        .ok_or_else(|| usage_error(format!("option '-{short}' needs a value")))?;
                     values.insert(
                         field.name.clone(),
                         parse_arg_value(value, &field.type_name, &|name| {
@@ -1606,11 +1606,9 @@ impl Evaluator {
                     );
                     position += 1;
                 } else {
-                    return Err(RillError::new(format!(
-                        "missing required argument '{}'",
-                        field.name
-                    ))
-                    .into());
+                    return Err(
+                        usage_error(format!("missing required argument '{}'", field.name)).into()
+                    );
                 }
             }
         }
@@ -1622,7 +1620,7 @@ impl Evaluator {
             );
         }
         if position < positional.len() {
-            return Err(RillError::new("too many positional arguments").into());
+            return Err(usage_error("too many positional arguments").into());
         }
         Ok(values)
     }
@@ -2842,7 +2840,11 @@ impl Evaluator {
             Builtin::Type => Ok(Value::Str(self.eval_expr(&args[0])?.type_name().to_string())),
             Builtin::PrettyPrint => {
                 let value = self.eval_expr(&args[0])?;
-                println!("{}{}", pretty_value(&value, 0), ANSI_RESET);
+                if crate::term::color_enabled() {
+                    println!("{}{}", pretty_value(&value, 0), ANSI_RESET);
+                } else {
+                    println!("{}", pretty_value(&value, 0));
+                }
                 Ok(Value::Null)
             }
             Builtin::Print | Builtin::Prin | Builtin::Warn => {
@@ -3828,6 +3830,9 @@ const ANSI_RED: &str = "\x1b[31m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 
 fn pretty_color(color: &str, value: impl AsRef<str>) -> String {
+    if !crate::term::color_enabled() {
+        return value.as_ref().to_string();
+    }
     format!("{color}{}{ANSI_RESET}", value.as_ref())
 }
 
@@ -4321,6 +4326,13 @@ fn normalize_runtime_index(index: i64, len: usize, kind: &str) -> Result<usize, 
     } else {
         Ok(normalized as usize)
     }
+}
+
+/// A script-argument error: reported with `rill::usage` and exit status 2.
+fn usage_error(message: impl Into<String>) -> RillError {
+    RillError::new(message)
+        .with_code("rill::usage")
+        .with_help("run the script with --help for usage")
 }
 
 fn parse_arg_value(
