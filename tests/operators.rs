@@ -347,3 +347,69 @@ fn closure_parameters_are_inferred_from_the_receiver() {
     assert!(fails("let o = some(1)\nlet f = |x| x\no.unwrap_or_else(f)")
         .contains("needs 0 args, got 1"));
 }
+
+#[test]
+fn match_literals_tuples_lists_and_guards() {
+    assert_eq!(run("match 2 { 1 | 2 => \"low\", _ => \"high\" }"), Value::Str("low".into()));
+    assert_eq!(run("match -1 { -1 => \"neg\", _ => \"other\" }"), Value::Str("neg".into()));
+    assert_eq!(run("match 1.0 { 1 => \"one\", _ => \"other\" }"), Value::Str("one".into()));
+    assert_eq!(run("match \"b\" { \"a\" => 1, \"b\" => 2, _ => 3 }"), Value::Int(2));
+    assert_eq!(run("match true { true => 1, false => 0 }"), Value::Int(1));
+    assert_eq!(run("match null { null => \"n\", _ => \"o\" }"), Value::Str("n".into()));
+    assert_eq!(run("match (1, \"a\") { (1, s) => s, _ => \"\" }"), Value::Str("a".into()));
+    assert_eq!(run("match [1, 2, 3] { [first, ..] => first, _ => 0 }"), Value::Int(1));
+    assert_eq!(run("match [1, 2] { [a, b] => a + b, _ => 0 }"), Value::Int(3));
+    assert_eq!(run("match [1, 2, 3] { [a, b] => a + b, _ => 0 }"), Value::Int(0));
+    assert_eq!(run("match [] { [] => \"empty\", _ => \"full\" }"), Value::Str("empty".into()));
+    assert_eq!(
+        run(
+            "match some(5) { some(n) if n > 3 => \"big\", some(_) => \"small\", none => \"none\" }"
+        ),
+        Value::Str("big".into())
+    );
+    assert_eq!(run("match ok(some(1)) { ok(some(x)) => x, _ => 0 }"), Value::Int(1));
+    assert_eq!(run("match err(\"e\") { ok(v) => v, err(e) => e.upper() }"), Value::Str("E".into()));
+    assert_eq!(
+        run("match 7 { n if n % 2 == 0 => \"even\", n => \"odd\" }"),
+        Value::Str("odd".into())
+    );
+    assert_eq!(
+        run("match \"a-1\" { /^(?<k>\\w)-(?<v>\\d)$/ | /^(?<k>\\w)=(?<v>\\d)$/ => \"$k$v\", _ => \"\" }"),
+        Value::Str("a1".into())
+    );
+    assert_eq!(run("match {a: 1} { m => m.a }"), Value::Int(1));
+    assert_eq!(run("match \"zzz\" { /a/ => 1 }"), Value::Null);
+}
+
+#[test]
+fn match_exhaustiveness_and_pattern_types() {
+    assert!(check_err("match some(1) { some(x) => x }").contains("non-exhaustive match on Option"));
+    assert!(check_err("match true { true => 1 }").contains("non-exhaustive match on Bool"));
+    assert!(check_err("match ok(1) { ok(x) => x }").contains("non-exhaustive match on Result"));
+    assert!(
+        check_err("match some(1) { some(x) if x > 0 => x, none => 0 }").contains("non-exhaustive")
+    );
+    let ok_sources = [
+        "match some(1) { some(x) => x, none => 0 }",
+        "match ok(1) { ok(x) => x, err(_) => 0 }",
+        "match true { true => 1, false => 0 }",
+        "match 1 { 1 => \"one\" }",
+        "match \"x\" { /a/ => 1 }",
+        "match some(1) { some(_) | none => 0 }",
+    ];
+    for source in ok_sources {
+        let program = rill::parser::parse(source).expect(source);
+        rill::typeck::check(&program).expect(source);
+    }
+    assert!(
+        check_err("match 1 { some(x) => x, _ => 0 }").contains("some pattern cannot match a Int")
+    );
+    assert!(check_err("match 1 { \"a\" => 1, _ => 0 }")
+        .contains("pattern of type Str cannot match a Int"));
+    assert!(check_err("match (1, 2) { (a, b, c) => a, _ => 0 }")
+        .contains("has 3 elements but the value has 2"));
+    assert!(check_err("match 1 { a | 2 => a, _ => 0 }").contains("bind the same names"));
+    assert!(check_err("match 1 { n if n => 1, _ => 0 }").contains("match guard must be Bool"));
+    let error = rill::parser::parse("match \"a\" { \"{x}\" => 1, _ => 0 }").unwrap_err();
+    assert!(error.to_string().contains("interpolation is not allowed"), "{error}");
+}

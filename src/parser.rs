@@ -1180,8 +1180,10 @@ fn regex_literal_context(previous: Option<&TokenKind>) -> bool {
             TokenKind::Match
                 | TokenKind::LParen
                 | TokenKind::LBrace
+                | TokenKind::LBracket
                 | TokenKind::Comma
                 | TokenKind::FatArrow
+                | TokenKind::Pipe
                 | TokenKind::Newline
                 | TokenKind::Semi
         ) | None
@@ -2061,60 +2063,132 @@ impl Parser {
         self.skip_separators();
         let mut arms = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            let token = self.next();
-            let pattern = match token.kind {
-                TokenKind::Regex(pattern) => MatchPattern::Regex(pattern),
-                TokenKind::Ident(name) if name == "_" => MatchPattern::Wildcard,
-                TokenKind::Ident(name)
-                    if matches!(name.as_str(), "ok" | "err" | "some" | "none") =>
-                {
-                    let binding = if name != "none" && self.peek_kind() == TokenKind::LParen {
-                        self.next(); // consume (
-                        let tok = self.next();
-                        let b = match tok.kind {
-                            TokenKind::Ident(n) if n == "_" => None,
-                            TokenKind::Ident(n) => Some(n),
-                            other => {
-                                return Err(RillError::spanned(
-                                    format!(
-                                        "expected binding name or `_` in match arm, found {}",
-                                        other.describe()
-                                    ),
-                                    tok.span,
-                                ))
-                            }
-                        };
-                        self.expect(TokenKind::RParen)?;
-                        b
-                    } else {
-                        None
-                    };
-                    match name.as_str() {
-                        "ok" => MatchPattern::Ok(binding),
-                        "err" => MatchPattern::Err(binding),
-                        "some" => MatchPattern::Some(binding),
-                        "none" => MatchPattern::None,
-                        _ => unreachable!(),
-                    }
-                }
-                other => {
-                    return Err(RillError::spanned(
-                        format!(
-                            "expected regex pattern or `_` in match arm, found {}",
-                            other.describe()
-                        ),
-                        token.span,
-                    ))
-                }
-            };
+            let pattern = self.parse_pattern()?;
+            let guard = if self.consume(TokenKind::If) { Some(self.parse_expr(0)?) } else { None };
             self.expect(TokenKind::FatArrow)?;
             let expr = self.parse_expr(0)?;
-            arms.push(MatchArm { pattern, expr });
+            arms.push(MatchArm { pattern, guard, expr });
             self.consume(TokenKind::Comma);
             self.skip_separators();
         }
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::Match { value: Box::new(value), arms })
+    }
+
+    /// A match pattern, including `a | b` alternatives.
+    fn parse_pattern(&mut self) -> Result<Pattern, RillError> {
+        let first = self.parse_pattern_primary()?;
+        if !self.at(TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first];
+        while self.consume(TokenKind::Pipe) {
+            alternatives.push(self.parse_pattern_primary()?);
+        }
+        Ok(Pattern::Or(alternatives))
+    }
+
+    fn parse_pattern_primary(&mut self) -> Result<Pattern, RillError> {
+        let token = self.next();
+        Ok(match token.kind {
+            TokenKind::Regex(pattern) => Pattern::Regex(pattern),
+            TokenKind::Number(text) => Pattern::Literal(parse_number(&text, token.span)?),
+            TokenKind::Minus => {
+                let number = self.next();
+                let TokenKind::Number(text) = number.kind else {
+                    return Err(RillError::spanned(
+                        format!("expected a number after `-` in pattern, found {}", number.kind.describe()),
+                        number.span,
+                    ));
+                };
+                Pattern::Literal(match parse_number(&text, number.span)? {
+                    Literal::Int(value) => Literal::Int(-value),
+                    Literal::Float(value) => Literal::Float(-value),
+                    _ => {
+                        return Err(RillError::spanned(
+                            "only numbers can be negated in a pattern",
+                            number.span,
+                        ))
+                    }
+                })
+            }
+            TokenKind::Str(parts) => match self.build_string(parts)? {
+                Expr::Literal(Literal::Str(text)) => Pattern::Literal(Literal::Str(text)),
+                _ => {
+                    return Err(RillError::spanned(
+                        "interpolation is not allowed in a match pattern",
+                        token.span,
+                    )
+                    .with_help("bind the value with a name and compare it in a guard"))
+                }
+            },
+            TokenKind::True => Pattern::Literal(Literal::Bool(true)),
+            TokenKind::False => Pattern::Literal(Literal::Bool(false)),
+            TokenKind::Null => Pattern::Literal(Literal::Null),
+            TokenKind::Ident(name) if name == "_" => Pattern::Wildcard,
+            TokenKind::Ident(name) if name == "none" => Pattern::None,
+            TokenKind::Ident(name) if matches!(name.as_str(), "ok" | "err" | "some") => {
+                let inner = if self.consume(TokenKind::LParen) {
+                    let inner = self.parse_pattern()?;
+                    self.expect(TokenKind::RParen)?;
+                    inner
+                } else {
+                    Pattern::Wildcard
+                };
+                match name.as_str() {
+                    "ok" => Pattern::Ok(Box::new(inner)),
+                    "err" => Pattern::Err(Box::new(inner)),
+                    _ => Pattern::Some(Box::new(inner)),
+                }
+            }
+            TokenKind::Ident(name) => Pattern::Bind(name),
+            TokenKind::LParen => {
+                let mut items = Vec::new();
+                loop {
+                    self.skip_newlines();
+                    items.push(self.parse_pattern()?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                if items.len() == 1 {
+                    items.pop().expect("one item")
+                } else {
+                    Pattern::Tuple(items)
+                }
+            }
+            TokenKind::LBracket => {
+                let mut items = Vec::new();
+                let mut rest = false;
+                loop {
+                    self.skip_newlines();
+                    if self.at(TokenKind::RBracket) {
+                        break;
+                    }
+                    if self.consume(TokenKind::DotDot) {
+                        rest = true;
+                        self.skip_newlines();
+                        break;
+                    }
+                    items.push(self.parse_pattern()?);
+                    self.skip_newlines();
+                    if !self.consume(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                Pattern::List { items, rest }
+            }
+            other => {
+                return Err(RillError::spanned(
+                    format!("expected a pattern in match arm, found {}", other.describe()),
+                    token.span,
+                )
+                .with_help("patterns are literals, names, `_`, /regex/, (a, b), [a, ..], some(p), ok(p), err(p), or none"))
+            }
+        })
     }
 
     fn parse_command(&mut self, span: Span) -> Result<Expr, RillError> {
@@ -2606,7 +2680,10 @@ fn expr_propagates(expr: &Expr) -> bool {
         | Expr::NamedArg { value, .. }
         | Expr::Unary { operand: value, .. } => expr_propagates(value),
         Expr::Match { value, arms } => {
-            expr_propagates(value) || arms.iter().any(|arm| expr_propagates(&arm.expr))
+            expr_propagates(value)
+                || arms.iter().any(|arm| {
+                    expr_propagates(&arm.expr) || arm.guard.as_ref().is_some_and(expr_propagates)
+                })
         }
         Expr::For { iter, body, workers, .. } => {
             expr_propagates(iter)

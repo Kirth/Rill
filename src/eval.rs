@@ -1710,49 +1710,23 @@ impl Evaluator {
     fn eval_match(&mut self, value: &Expr, arms: &[MatchArm]) -> Result<Value, EvalError> {
         let val = self.eval_expr(value)?;
         for arm in arms {
-            // Try to match structurally; returns Some(Option<(name, bound_value)>) on match.
-            let structural = match (&arm.pattern, &val) {
-                (MatchPattern::Ok(binding), Value::Result(Ok(inner))) => {
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
-                }
-                (MatchPattern::Err(binding), Value::Result(Err(inner))) => {
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
-                }
-                (MatchPattern::Some(binding), Value::Option(Some(inner))) => {
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
-                }
-                (MatchPattern::None, Value::Option(None)) => Some(None),
-                (MatchPattern::Wildcard, _) => Some(None),
-                (
-                    MatchPattern::Regex(_)
-                    | MatchPattern::Ok(_)
-                    | MatchPattern::Err(_)
-                    | MatchPattern::Some(_)
-                    | MatchPattern::None,
-                    _,
-                ) => None,
-            };
-            if let Some(binding) = structural {
-                self.env.push();
-                if let Some((name, bound_val)) = binding {
-                    self.env.set(name, bound_val);
-                }
-                let result = self.eval_expr(&arm.expr);
-                self.env.pop();
-                return result;
+            let mut bindings = Vec::new();
+            if !match_pattern(&arm.pattern, &val, &mut bindings)? {
+                continue;
             }
-            // Fall back to regex matching (stringifies the value).
-            if let MatchPattern::Regex(pattern) = &arm.pattern {
-                let s = val.as_string_lossy();
-                if let Some(captures) = regex_captures(&s, pattern)? {
-                    self.env.push();
-                    for (name, value) in captures {
-                        self.env.set(name, Value::Str(value));
-                    }
-                    let result = self.eval_expr(&arm.expr);
-                    self.env.pop();
-                    return result;
+            let result = self.scoped(|evaluator| {
+                for (name, bound) in bindings {
+                    evaluator.env.set(name, bound);
                 }
+                if let Some(guard) = &arm.guard {
+                    if !evaluator.eval_expr(guard)?.truthy() {
+                        return Ok(None);
+                    }
+                }
+                evaluator.eval_expr(&arm.expr).map(Some)
+            })?;
+            if let Some(result) = result {
+                return Ok(result);
             }
         }
         Ok(Value::Null)
@@ -4466,6 +4440,80 @@ fn contains_implicit(expr: &Expr) -> bool {
         }),
         Expr::If { cond, .. } => contains_implicit(cond),
         Expr::Loop { .. } => false,
+    }
+}
+
+/// Match `value` against `pattern`, collecting bound names.  Regex patterns
+/// match the value's text form, so non-strings still work as before.
+fn match_pattern(
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut Vec<(String, Value)>,
+) -> Result<bool, RillError> {
+    Ok(match (pattern, value) {
+        (Pattern::Wildcard, _) => true,
+        (Pattern::Bind(name), _) => {
+            bindings.push((name.clone(), value.clone()));
+            true
+        }
+        (Pattern::Literal(literal), _) => values_equal(&literal_value(literal), value),
+        (Pattern::Regex(regex), _) => match regex_captures(&value.as_string_lossy(), regex)? {
+            Some(captures) => {
+                bindings.extend(captures.into_iter().map(|(name, text)| (name, Value::Str(text))));
+                true
+            }
+            None => false,
+        },
+        (Pattern::Tuple(items), Value::Tuple(values)) => {
+            items.len() == values.len() && match_all(items, values, bindings)?
+        }
+        (Pattern::List { items, rest }, Value::List(values)) => {
+            let length_ok =
+                if *rest { values.len() >= items.len() } else { values.len() == items.len() };
+            length_ok && match_all(items, &values[..items.len()], bindings)?
+        }
+        (Pattern::Some(inner), Value::Option(Some(value)))
+        | (Pattern::Ok(inner), Value::Result(Ok(value)))
+        | (Pattern::Err(inner), Value::Result(Err(value))) => {
+            match_pattern(inner, value, bindings)?
+        }
+        (Pattern::None, Value::Option(None)) => true,
+        (Pattern::Or(alternatives), _) => {
+            for alternative in alternatives {
+                let mut scratch = Vec::new();
+                if match_pattern(alternative, value, &mut scratch)? {
+                    bindings.extend(scratch);
+                    return Ok(true);
+                }
+            }
+            false
+        }
+        _ => false,
+    })
+}
+
+fn match_all(
+    patterns: &[Pattern],
+    values: &[Value],
+    bindings: &mut Vec<(String, Value)>,
+) -> Result<bool, RillError> {
+    for (pattern, value) in patterns.iter().zip(values) {
+        if !match_pattern(pattern, value, bindings)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn literal_value(literal: &Literal) -> Value {
+    match literal {
+        Literal::Null => Value::Null,
+        Literal::Bool(value) => Value::Bool(*value),
+        Literal::Int(value) => Value::Int(*value),
+        Literal::Float(value) => Value::Float(*value),
+        Literal::Duration(value) => Value::Duration(*value),
+        Literal::Str(value) => Value::Str(value.clone()),
+        Literal::Regex(value) => Value::Regex(value.clone()),
     }
 }
 

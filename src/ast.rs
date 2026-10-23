@@ -350,18 +350,49 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
-    pub pattern: MatchPattern,
+    pub pattern: Pattern,
+    /// `pattern if guard => ...`
+    pub guard: Option<Expr>,
     pub expr: Expr,
 }
 
+/// A `match` arm pattern.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MatchPattern {
-    Regex(String),
+pub enum Pattern {
+    /// `_`
     Wildcard,
-    Ok(Option<String>),
-    Err(Option<String>),
-    Some(Option<String>),
+    /// A name that binds the matched value.
+    Bind(String),
+    /// `1`, `-2.5`, `"text"`, `true`, `null`
+    Literal(Literal),
+    /// `/regex/` with named captures bound as `Str`.
+    Regex(String),
+    /// `(a, _)`
+    Tuple(Vec<Pattern>),
+    /// `[a, b]`, or `[first, ..]` when `rest` is set.
+    List {
+        items: Vec<Pattern>,
+        rest: bool,
+    },
+    Some(Box<Pattern>),
     None,
+    Ok(Box<Pattern>),
+    Err(Box<Pattern>),
+    /// `a | b`
+    Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// Whether the pattern matches every value of its type.
+    pub fn is_irrefutable(&self) -> bool {
+        match self {
+            Pattern::Wildcard | Pattern::Bind(_) => true,
+            Pattern::Tuple(items) => items.iter().all(Pattern::is_irrefutable),
+            Pattern::List { items, rest } => *rest && items.is_empty(),
+            Pattern::Or(alternatives) => alternatives.iter().any(Pattern::is_irrefutable),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

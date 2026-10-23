@@ -1311,49 +1311,159 @@ impl Checker {
 
     fn check_match(&mut self, value: &Expr, arms: &[MatchArm]) -> Result<Type, RillError> {
         let value_ty = self.check_expr(value)?;
-        let is_structural =
-            matches!(value_ty, Type::Option(_) | Type::Result(_, _) | Type::Unknown);
-        let is_str = matches!(value_ty, Type::Str | Type::Unknown);
         let mut result_ty = Type::Unknown;
+        let mut coverage = Coverage::default();
         for arm in arms {
             self.env.push();
-            match &arm.pattern {
-                MatchPattern::Regex(pattern) => {
-                    if !is_str {
+            let checked = self.check_pattern(&arm.pattern, &value_ty).and_then(|bindings| {
+                for (name, ty) in bindings {
+                    self.env.set(name, ty);
+                }
+                if let Some(guard) = &arm.guard {
+                    let guard_ty = self.check_expr(guard)?;
+                    if !matches!(guard_ty, Type::Bool | Type::Unknown) {
                         return Err(RillError::new(format!(
-                            "regex match arm requires Str value, got {value_ty}"
+                            "match guard must be Bool, got {guard_ty}"
                         )));
                     }
-                    for name in regex_capture_names(pattern)? {
-                        self.env.set(name, Type::Str);
-                    }
+                } else {
+                    coverage.add(&arm.pattern);
                 }
-                MatchPattern::Ok(binding) | MatchPattern::Err(binding) => {
-                    if !is_structural {
-                        return Err(RillError::new(format!(
-                            "ok/err match arm requires Result value, got {value_ty}"
-                        )));
-                    }
-                    if let Some(name) = binding {
-                        self.env.set(name.clone(), Type::Unknown);
-                    }
-                }
-                MatchPattern::Some(binding) => {
-                    if !is_structural {
-                        return Err(RillError::new(format!(
-                            "some match arm requires Option value, got {value_ty}"
-                        )));
-                    }
-                    if let Some(name) = binding {
-                        self.env.set(name.clone(), Type::Unknown);
-                    }
-                }
-                MatchPattern::None | MatchPattern::Wildcard => {}
-            }
-            result_ty = common_type(result_ty, self.check_expr(&arm.expr)?);
+                self.check_expr(&arm.expr)
+            });
             self.env.pop();
+            result_ty = common_type(result_ty, checked?);
+        }
+        if !coverage.complete(&value_ty) {
+            let missing = match &value_ty {
+                Type::Bool => "add arms for `true` and `false`, or `_`",
+                Type::Option(_) => "add a `none` arm, or `_`",
+                Type::Result(..) => "add `ok(_)` and `err(_)` arms, or `_`",
+                Type::Null => "add a `null` arm, or `_`",
+                _ => {
+                    // Other types may fall through to null, as before.
+                    return Ok(common_type(result_ty, Type::Null));
+                }
+            };
+            return Err(
+                RillError::new(format!("non-exhaustive match on {value_ty}")).with_help(missing)
+            );
         }
         Ok(result_ty)
+    }
+
+    /// Check a pattern against the matched value's type and return the names
+    /// it binds with their types.
+    fn check_pattern(
+        &mut self,
+        pattern: &Pattern,
+        value_ty: &Type,
+    ) -> Result<Vec<(String, Type)>, RillError> {
+        let unknown = value_ty.is_unknown();
+        match pattern {
+            Pattern::Wildcard => Ok(Vec::new()),
+            Pattern::Bind(name) => Ok(vec![(name.clone(), value_ty.clone())]),
+            Pattern::Literal(literal) => {
+                let literal_ty = type_from_literal(literal);
+                let compatible = unknown
+                    || match (&literal_ty, value_ty) {
+                        (Type::Int | Type::Float, Type::Int | Type::Float) => true,
+                        (Type::Null, Type::Option(_)) => false,
+                        (left, right) => left == right,
+                    };
+                if !compatible {
+                    return Err(RillError::new(format!(
+                        "pattern of type {literal_ty} cannot match a {value_ty}"
+                    )));
+                }
+                Ok(Vec::new())
+            }
+            Pattern::Regex(regex) => {
+                if !matches!(value_ty, Type::Str | Type::Unknown) {
+                    return Err(RillError::new(format!(
+                        "regex match arm requires Str value, got {value_ty}"
+                    )));
+                }
+                Ok(regex_capture_names(regex)?.into_iter().map(|name| (name, Type::Str)).collect())
+            }
+            Pattern::Tuple(items) => {
+                let element_types = match value_ty {
+                    Type::Tuple(elements) if elements.len() == items.len() => elements.clone(),
+                    Type::Tuple(elements) => {
+                        return Err(RillError::new(format!(
+                            "tuple pattern has {} elements but the value has {}",
+                            items.len(),
+                            elements.len()
+                        )))
+                    }
+                    Type::Unknown => vec![Type::Unknown; items.len()],
+                    other => {
+                        return Err(RillError::new(format!("tuple pattern cannot match a {other}")))
+                    }
+                };
+                let mut bindings = Vec::new();
+                for (item, element_ty) in items.iter().zip(&element_types) {
+                    bindings.extend(self.check_pattern(item, element_ty)?);
+                }
+                Ok(bindings)
+            }
+            Pattern::List { items, .. } => {
+                let item_ty = match value_ty {
+                    Type::List(item) => (**item).clone(),
+                    Type::Unknown => Type::Unknown,
+                    other => {
+                        return Err(RillError::new(format!("list pattern cannot match a {other}")))
+                    }
+                };
+                let mut bindings = Vec::new();
+                for item in items {
+                    bindings.extend(self.check_pattern(item, &item_ty)?);
+                }
+                Ok(bindings)
+            }
+            Pattern::Some(inner) => match value_ty {
+                Type::Option(value) => self.check_pattern(inner, value),
+                Type::Unknown => self.check_pattern(inner, &Type::Unknown),
+                other => Err(RillError::new(format!("some pattern cannot match a {other}"))),
+            },
+            Pattern::None => match value_ty {
+                Type::Option(_) | Type::Unknown => Ok(Vec::new()),
+                other => Err(RillError::new(format!("none pattern cannot match a {other}"))),
+            },
+            Pattern::Ok(inner) => match value_ty {
+                Type::Result(value, _) => self.check_pattern(inner, value),
+                Type::Unknown => self.check_pattern(inner, &Type::Unknown),
+                other => Err(RillError::new(format!("ok pattern cannot match a {other}"))),
+            },
+            Pattern::Err(inner) => match value_ty {
+                Type::Result(_, error) => self.check_pattern(inner, error),
+                Type::Unknown => self.check_pattern(inner, &Type::Unknown),
+                other => Err(RillError::new(format!("err pattern cannot match a {other}"))),
+            },
+            Pattern::Or(alternatives) => {
+                let mut merged: Option<Vec<(String, Type)>> = None;
+                for alternative in alternatives {
+                    let mut bindings = self.check_pattern(alternative, value_ty)?;
+                    bindings.sort_by(|a, b| a.0.cmp(&b.0));
+                    match &mut merged {
+                        None => merged = Some(bindings),
+                        Some(existing) => {
+                            let same_names = existing.len() == bindings.len()
+                                && existing.iter().zip(&bindings).all(|(a, b)| a.0 == b.0);
+                            if !same_names {
+                                return Err(RillError::new(
+                                    "every alternative of an or-pattern must bind the same names",
+                                ));
+                            }
+                            for (slot, (_, ty)) in existing.iter_mut().zip(bindings) {
+                                slot.1 = common_type(slot.1.clone(), ty);
+                            }
+                        }
+                    }
+                }
+                Ok(merged.unwrap_or_default())
+            }
+        }
     }
 
     fn check_field(&mut self, base: &Expr, name: &str) -> Result<Type, RillError> {
@@ -2279,6 +2389,51 @@ fn operator_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::In => "in",
         BinaryOp::NotIn => "not in",
         BinaryOp::Coalesce => "??",
+    }
+}
+
+/// Which cases unguarded match arms have covered, for exhaustiveness.
+#[derive(Default)]
+struct Coverage {
+    irrefutable: bool,
+    saw_true: bool,
+    saw_false: bool,
+    saw_null: bool,
+    saw_none: bool,
+    saw_some: bool,
+    saw_ok: bool,
+    saw_err: bool,
+}
+
+impl Coverage {
+    fn add(&mut self, pattern: &Pattern) {
+        match pattern {
+            _ if pattern.is_irrefutable() => self.irrefutable = true,
+            Pattern::Literal(Literal::Bool(true)) => self.saw_true = true,
+            Pattern::Literal(Literal::Bool(false)) => self.saw_false = true,
+            Pattern::Literal(Literal::Null) => self.saw_null = true,
+            Pattern::None => self.saw_none = true,
+            Pattern::Some(inner) if inner.is_irrefutable() => self.saw_some = true,
+            Pattern::Ok(inner) if inner.is_irrefutable() => self.saw_ok = true,
+            Pattern::Err(inner) if inner.is_irrefutable() => self.saw_err = true,
+            Pattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    self.add(alternative);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn complete(&self, value_ty: &Type) -> bool {
+        self.irrefutable
+            || match value_ty {
+                Type::Bool => self.saw_true && self.saw_false,
+                Type::Null => self.saw_null,
+                Type::Option(_) => self.saw_none && self.saw_some,
+                Type::Result(..) => self.saw_ok && self.saw_err,
+                _ => false,
+            }
     }
 }
 

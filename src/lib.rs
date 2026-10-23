@@ -300,6 +300,9 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_expr_imports(value, imports);
             for arm in arms {
                 collect_expr_imports(&arm.expr, imports);
+                if let Some(guard) = &arm.guard {
+                    collect_expr_imports(guard, imports);
+                }
             }
         }
         ast::Expr::For { iter, body, .. } => {
@@ -543,7 +546,10 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
             expr_needs_input(value)
         }
         ast::Expr::Match { value, arms } => {
-            expr_needs_input(value) || arms.iter().any(|arm| expr_needs_input(&arm.expr))
+            expr_needs_input(value)
+                || arms.iter().any(|arm| {
+                    expr_needs_input(&arm.expr) || arm.guard.as_ref().is_some_and(expr_needs_input)
+                })
         }
         ast::Expr::NamedArg { value, .. }
         | ast::Expr::Try(value)
