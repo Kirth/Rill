@@ -2488,7 +2488,22 @@ impl Parser {
             "Float" => TypeName::Float,
             "Str" => TypeName::Str,
             "Bytes" => TypeName::Bytes,
-            "Map" => TypeName::Map,
+            "Map" => {
+                if self.consume(TokenKind::LBracket) {
+                    let key_token = self.peek().clone();
+                    let key = self.parse_type_name()?;
+                    if key != TypeName::Str {
+                        return Err(RillError::spanned("Map keys are always Str", key_token.span)
+                            .with_help("write `Map[Str, V]`"));
+                    }
+                    self.expect(TokenKind::Comma)?;
+                    let value = self.parse_type_name()?;
+                    self.expect(TokenKind::RBracket)?;
+                    TypeName::Map(Some(Box::new(value)))
+                } else {
+                    TypeName::Map(None)
+                }
+            }
             "Duration" => TypeName::Duration,
             "Path" => TypeName::Path,
             "Regex" => TypeName::Regex,

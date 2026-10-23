@@ -382,3 +382,40 @@ let s: Option[Str] = first(["", "a"])
 "#,
     );
 }
+
+#[test]
+fn map_annotations_infer_value_types() {
+    check_ok(
+        r#"
+let m: Map[Str, Int] = {a: 1}
+let n: Int = m.a
+let i: Int = m["a"]
+for (k, v) in m { let x: Int = v }
+let vs: List[Int] = m.values()
+let es: List[Tuple[Str, Int]] = m.entries()
+let doubled: List[Int] = m.map(|k, v| v * 2)
+let inferred = {x: 1, y: 2}
+let y: Int = inferred.y
+"#,
+    );
+    assert!(rill::parser::parse("let bad: Map[Int, Int] = {}").is_err());
+    assert!(check_err("let m: Map[Str, Int] = {a: \"x\"}").contains("expected Int, got Str"));
+    assert!(
+        check_err("let m: Map[Str, Int] = {a: 1}\nm.a.upper()").contains("not supported on Int")
+    );
+    check_ok("let m: Map[Str, Int] = {}\nvar n = m\nn = {b: 2}");
+}
+
+#[test]
+fn common_type_merges_option_and_result() {
+    check_ok(
+        r#"
+let flag = true
+let o = if flag { some(1) } else { none }
+let i: Int = o ?? 0
+let r = if flag { ok(1) } else { err("e") }
+let v: Int = r.unwrap_or(0)
+let z: Int = if flag { 1 } else { 2 }
+"#,
+    );
+}

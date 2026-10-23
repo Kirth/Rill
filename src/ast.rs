@@ -103,7 +103,8 @@ pub enum TypeName {
     ListAny,
     List(Box<TypeName>),
     Tuple(Vec<TypeName>),
-    Map,
+    /// `Map` or `Map[Str, V]`; keys are always strings.
+    Map(Option<Box<TypeName>>),
     Duration,
     Path,
     Regex,

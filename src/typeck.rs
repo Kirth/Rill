@@ -15,7 +15,8 @@ enum Type {
     Bytes,
     List(Box<Type>),
     Tuple(Vec<Type>),
-    Map,
+    /// A string-keyed map and the type of its values.
+    Map(Box<Type>),
     Duration,
     Path,
     Regex,
@@ -43,6 +44,10 @@ impl Type {
 
     fn is_numeric(&self) -> bool {
         matches!(self, Type::Int | Type::Float | Type::Unknown)
+    }
+
+    fn map_any() -> Type {
+        Type::Map(Box::new(Type::Unknown))
     }
 
     fn list_item(&self) -> Type {
@@ -75,7 +80,8 @@ impl fmt::Display for Type {
                 }
                 write!(f, "]")
             }
-            Type::Map => write!(f, "Map"),
+            Type::Map(value) if value.is_unknown() => write!(f, "Map"),
+            Type::Map(value) => write!(f, "Map[Str, {value}]"),
             Type::Duration => write!(f, "Duration"),
             Type::Path => write!(f, "Path"),
             Type::Regex => write!(f, "Regex"),
@@ -108,8 +114,8 @@ impl Env {
             root.insert(name.to_string(), TypeBinding { ty, mutable: true });
         };
         insert(&mut root, "args", Type::List(Box::new(Type::Str)));
-        insert(&mut root, "env", Type::Map);
-        insert(&mut root, "input", Type::Map);
+        insert(&mut root, "env", Type::Map(Box::new(Type::Str)));
+        insert(&mut root, "input", Type::map_any());
         for builtin in crate::methods::BUILTINS {
             insert(
                 &mut root,
@@ -329,7 +335,8 @@ impl Checker {
         match place.unspanned() {
             Expr::Ident(name) => self.env.get(name).ok_or_else(|| self.unknown_identifier(name)),
             Expr::Field { base, name } => match self.check_place(base)? {
-                Type::Map | Type::Unknown => Ok(Type::Unknown),
+                Type::Map(value) => Ok(*value),
+                Type::Unknown => Ok(Type::Unknown),
                 other => Err(RillError::new(format!("cannot assign to field '{name}' of {other}"))),
             },
             Expr::Index { base, index } => {
@@ -340,13 +347,13 @@ impl Checker {
                         ensure_assignable(&Type::Int, &index_ty)?;
                         Ok(*item)
                     }
-                    Type::Map => {
+                    Type::Map(value) => {
                         if !matches!(index_ty, Type::Str | Type::Int | Type::Unknown) {
                             return Err(RillError::new(format!(
                                 "map key must be Str, got {index_ty}"
                             )));
                         }
-                        Ok(Type::Unknown)
+                        Ok(*value)
                     }
                     Type::Tuple(elements) => {
                         ensure_assignable(&Type::Int, &index_ty)?;
@@ -538,7 +545,7 @@ impl Checker {
                 for child in &group.subcommands {
                     self.check_arg_group(child)?;
                 }
-                self.env.set("args".to_string(), Type::Map);
+                self.env.set("args".to_string(), Type::map_any());
                 Ok(Type::Null)
             }
             Stmt::InputLines => Ok(Type::Null),
@@ -776,10 +783,11 @@ impl Checker {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Type::Tuple),
             Expr::Map(pairs) => {
+                let mut value_ty = Type::Unknown;
                 for (_, expr) in pairs {
-                    self.check_expr(expr)?;
+                    value_ty = common_type(value_ty, self.check_expr(expr)?);
                 }
-                Ok(Type::Map)
+                Ok(Type::Map(Box::new(value_ty)))
             }
             Expr::Call { callee, args } => self.check_call(callee, args),
             Expr::Index { base, index } => {
@@ -869,7 +877,7 @@ impl Checker {
                     }
                 }
                 let iter_ty = self.check_expr(iter)?;
-                if !matches!(iter_ty, Type::List(_) | Type::Map | Type::Stream | Type::Unknown) {
+                if !matches!(iter_ty, Type::List(_) | Type::Map(_) | Type::Stream | Type::Unknown) {
                     return Err(RillError::new(format!(
                         "for loop needs List, Map, or Stream, got {iter_ty}"
                     )));
@@ -882,8 +890,8 @@ impl Checker {
                 };
                 self.env.push();
                 let item_ty = match iter_ty {
-                    Type::Stream => Type::Map,
-                    Type::Map => Type::Tuple(vec![Type::Str, Type::Unknown]),
+                    Type::Stream => Type::map_any(),
+                    Type::Map(value) => Type::Tuple(vec![Type::Str, *value]),
                     other => other.list_item(),
                 };
                 self.bind_pattern(pattern, item_ty, true)?;
@@ -1502,7 +1510,8 @@ impl Checker {
                         ["status", "out", "err", "ok"],
                     ))),
             },
-            Type::Map | Type::Unknown => Ok(Type::Unknown),
+            Type::Map(value) => Ok(*value),
+            Type::Unknown => Ok(Type::Unknown),
             ref ty
                 if crate::methods::lookup(name)
                     .is_some_and(|method| method.accepts(method_kind(ty))) =>
@@ -1548,14 +1557,14 @@ impl Checker {
             }
             BinaryOp::In | BinaryOp::NotIn => {
                 match &right_ty {
-                    Type::List(_) | Type::Map | Type::Str | Type::Unknown => {}
+                    Type::List(_) | Type::Map(_) | Type::Str | Type::Unknown => {}
                     other => {
                         return Err(RillError::new(format!(
                             "`in` needs a List, Map, or Str on the right, got {other}"
                         )))
                     }
                 }
-                if matches!(right_ty, Type::Map | Type::Str)
+                if matches!(right_ty, Type::Map(_) | Type::Str)
                     && !matches!(left_ty, Type::Str | Type::Unknown)
                 {
                     return Err(RillError::new(format!(
@@ -1710,7 +1719,7 @@ impl Checker {
                 }
                 1
             }
-            Type::List(_) | Type::Map | Type::Option(_) | Type::Result(..) => {
+            Type::List(_) | Type::Map(_) | Type::Option(_) | Type::Result(..) => {
                 crate::methods::callback_arity(name, method_kind(collection))
             }
             _ => return Err(RillError::new(format!("{name} cannot iterate {collection}"))),
@@ -1781,7 +1790,7 @@ impl Checker {
                 }
                 "env" => {
                     let ty = self.check_expr(expr)?;
-                    if !matches!(ty, Type::Map | Type::Unknown) {
+                    if !matches!(ty, Type::Map(_) | Type::Unknown) {
                         return Err(RillError::spanned(
                             format!("command env config needs Map, got {ty}"),
                             command.span,
@@ -1956,7 +1965,7 @@ fn type_from_value(value: &Value) -> Type {
             items.iter().fold(Type::Unknown, |acc, item| common_type(acc, type_from_value(item))),
         )),
         Value::Tuple(items) => Type::Tuple(items.iter().map(type_from_value).collect()),
-        Value::Map(_) => Type::Map,
+        Value::Map(_) => Type::map_any(),
         Value::Duration(_) => Type::Duration,
         Value::Path(_) => Type::Path,
         Value::Regex(_) => Type::Regex,
@@ -1991,7 +2000,7 @@ fn method_kind(ty: &Type) -> crate::methods::Kind {
         Type::Float => Kind::Float,
         Type::List(_) => Kind::List,
         Type::Tuple(_) => Kind::Tuple,
-        Type::Map => Kind::Map,
+        Type::Map(_) => Kind::Map,
         Type::Path => Kind::Path,
         Type::Regex => Kind::Regex,
         Type::Duration => Kind::Duration,
@@ -2014,7 +2023,7 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::Int => Type::Int,
         Return::Float => Type::Float,
         Return::Str => Type::Str,
-        Return::Map => Type::Map,
+        Return::Map => Type::map_any(),
         Return::Path => Type::Path,
         Return::ProcessResult => Type::ProcessResult,
         Return::ProcessHandle => Type::ProcessHandle,
@@ -2032,13 +2041,23 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::ListTupleUnknown => {
             Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Unknown])))
         }
-        Return::MapEntries => Type::List(Box::new(Type::Tuple(vec![Type::Str, Type::Unknown]))),
+        Return::MapEntries => {
+            let value = match receiver {
+                Type::Map(value) => (**value).clone(),
+                _ => Type::Unknown,
+            };
+            Type::List(Box::new(Type::Tuple(vec![Type::Str, value])))
+        }
+        Return::MapValues => Type::List(Box::new(match receiver {
+            Type::Map(value) => (**value).clone(),
+            _ => Type::Unknown,
+        })),
         Return::Mapped => {
             let produced = args.first().map(function_return).unwrap_or(Type::Unknown);
             match receiver {
                 Type::Option(_) => Type::Option(Box::new(produced)),
                 Type::Result(_, error) => Type::Result(Box::new(produced), error.clone()),
-                Type::List(_) | Type::Map => Type::List(Box::new(produced)),
+                Type::List(_) | Type::Map(_) => Type::List(Box::new(produced)),
                 _ => Type::Unknown,
             }
         }
@@ -2108,7 +2127,9 @@ fn type_from_name(name: &TypeName) -> Type {
         TypeName::ListAny => Type::List(Box::new(Type::Unknown)),
         TypeName::List(inner) => Type::List(Box::new(type_from_name(inner))),
         TypeName::Tuple(elements) => Type::Tuple(elements.iter().map(type_from_name).collect()),
-        TypeName::Map => Type::Map,
+        TypeName::Map(value) => {
+            Type::Map(Box::new(value.as_deref().map(type_from_name).unwrap_or(Type::Unknown)))
+        }
         TypeName::Duration => Type::Duration,
         TypeName::Path => Type::Path,
         TypeName::Regex => Type::Regex,
@@ -2140,6 +2161,7 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
         (Type::Float, Type::Int) => Ok(()),
         (Type::Error, Type::Str) => Ok(()),
         (Type::List(expected), Type::List(actual)) => ensure_assignable(expected, actual),
+        (Type::Map(expected), Type::Map(actual)) => ensure_assignable(expected, actual),
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
             for (expected, actual) in expected.iter().zip(actual) {
                 ensure_assignable(expected, actual)?;
@@ -2303,9 +2325,27 @@ fn common_type(left: Type, right: Type) -> Type {
     match (left, right) {
         (Type::Int, Type::Float) | (Type::Float, Type::Int) => Type::Float,
         (Type::List(left), Type::List(right)) => Type::List(Box::new(common_type(*left, *right))),
+        (Type::Map(left), Type::Map(right)) => Type::Map(Box::new(common_type(*left, *right))),
+        (Type::Option(left), Type::Option(right)) => {
+            Type::Option(Box::new(common_type(*left, *right)))
+        }
+        (Type::Result(left, left_error), Type::Result(right, right_error)) => Type::Result(
+            Box::new(common_type(*left, *right)),
+            Box::new(common_type(*left_error, *right_error)),
+        ),
         (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => Type::Tuple(
             left.into_iter().zip(right).map(|(left, right)| common_type(left, right)).collect(),
         ),
+        (
+            Type::Function { arity: left_arity, return_type: left_return, .. },
+            Type::Function { arity: right_arity, return_type: right_return, .. },
+        ) if left_arity == right_arity => Type::Function {
+            arity: left_arity,
+            required: None,
+            params: None,
+            names: None,
+            return_type: Box::new(common_type(*left_return, *right_return)),
+        },
         _ => Type::Unknown,
     }
 }
@@ -2442,7 +2482,7 @@ impl Coverage {
 fn callback_param_types(method: &str, receiver: &Type) -> Vec<Type> {
     match (method, receiver) {
         (_, Type::List(item)) => vec![(**item).clone()],
-        ("map" | "parallel_map", Type::Map) => vec![Type::Str, Type::Unknown],
+        ("map" | "parallel_map", Type::Map(value)) => vec![Type::Str, (**value).clone()],
         ("map" | "and_then", Type::Option(inner)) => vec![(**inner).clone()],
         ("map" | "and_then", Type::Result(value, _)) => vec![(**value).clone()],
         ("map_err" | "unwrap_or_else", Type::Result(_, error)) => vec![(**error).clone()],

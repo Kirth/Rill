@@ -236,7 +236,9 @@ fn nested_place_assignment() {
         run("var xs = [[1]]\nxs[0] += [2]\nxs[0]"),
         Value::List(vec![Value::Int(1), Value::Int(2)])
     );
-    assert!(fails("var m = {a: 1}\nm.missing.inner = 1").contains("key 'missing' not in map"));
+    assert!(fails("var m: Map = {a: 1}\nm.missing.inner = 1").contains("key 'missing' not in map"));
+    assert!(check_err("var m = {a: 1}\nm.missing.inner = 1")
+        .contains("cannot assign to field 'inner' of Int"));
     assert!(check_err("let m = {a: 1}\nm.a = 2").contains("immutable variable 'm'"));
     assert!(check_err("var s = \"x\"\ns[0] = \"y\"").contains("cannot assign into Str"));
     assert!(check_err("var xs = [1]\nxs[0] = \"s\"").contains("expected Int, got Str"));

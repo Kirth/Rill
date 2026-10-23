@@ -229,6 +229,8 @@ pub enum Return {
     ListTupleUnknown,
     /// `List[Tuple[Str, V]]` from a Map.
     MapEntries,
+    /// `List[V]` from a Map.
+    MapValues,
     /// `map`: `List[R]` for lists and maps, `Option[R]`, or `Result[R, E]`.
     Mapped,
     /// `map_err`: `Result[T, R]`.
@@ -622,7 +624,7 @@ pub static METHODS: &[Method] = &[
         Target::Builtin(BuiltinMethod::IndexOf)
     ),
     method!("keys", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Keys)),
-    method!("values", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Values)),
+    method!("values", [Map], 0, [], Return::MapValues, Target::Builtin(BuiltinMethod::Values)),
     method!("entries", [Map], 0, [], Return::MapEntries, Target::Builtin(BuiltinMethod::Entries)),
     method!(
         "contains_key",
