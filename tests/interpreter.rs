@@ -1,12 +1,18 @@
 use rill::types::Value;
-use std::sync::Mutex;
 
 fn run(source: &str) -> Value {
     rill::run_source(source, Vec::new()).expect(source)
 }
 
-/// Mutex that serialises tests which mutate the HOME environment variable.
-static HOME_LOCK: Mutex<()> = Mutex::new(());
+/// Run `source` with the host environment plus `overrides`, without touching
+/// the test process's own environment.
+fn run_with_env(source: &str, overrides: &[(&str, &str)]) -> Value {
+    let mut environment = rill::eval::process_environment();
+    for (name, value) in overrides {
+        environment.insert(name.to_string(), value.to_string());
+    }
+    rill::run_source_with_environment(source, Vec::new(), None, environment).expect(source)
+}
 
 #[test]
 fn cli_args_and_input_lines_are_available_to_scripts() {
@@ -306,19 +312,13 @@ impl Drop for Scratch {
 
 #[test]
 fn tilde_prefix_in_path_expands_to_home() {
-    let _guard = HOME_LOCK.lock().unwrap();
     let scratch = Scratch::new();
     std::fs::write(scratch.0.join("tilde.txt"), "tilde").unwrap();
 
-    let old_home = std::env::var_os("HOME");
-    unsafe { std::env::set_var("HOME", &scratch.0) };
-
-    let value = run(r#"path("~/tilde.txt").read_text()"#);
-
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    let value = run_with_env(
+        r#"path("~/tilde.txt").read_text()"#,
+        &[("HOME", scratch.0.to_str().unwrap())],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("tilde".to_string())))));
 }
@@ -328,12 +328,10 @@ fn dollar_env_var_in_path_expands() {
     let scratch = Scratch::new();
     std::fs::write(scratch.0.join("env.txt"), "env").unwrap();
 
-    // Set a Rill-level variable (accessible via env.MYDIR) and also a process var.
-    unsafe { std::env::set_var("RILL_TEST_PATHDIR", scratch.0.to_str().unwrap()) };
-
-    let value = run(r#"path("$RILL_TEST_PATHDIR/env.txt").read_text()"#);
-
-    unsafe { std::env::remove_var("RILL_TEST_PATHDIR") };
+    let value = run_with_env(
+        r#"path("$RILL_TEST_PATHDIR/env.txt").read_text()"#,
+        &[("RILL_TEST_PATHDIR", scratch.0.to_str().unwrap())],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("env".to_string())))));
 }
@@ -342,11 +340,10 @@ fn dollar_env_var_in_path_expands() {
 fn braced_dollar_var_in_path_expands() {
     let scratch = Scratch::new();
     std::fs::write(scratch.0.join("braced.txt"), "braced").unwrap();
-    unsafe { std::env::set_var("RILL_TEST_BDIR", scratch.0.to_str().unwrap()) };
-
-    let value = run(r#"path("${RILL_TEST_BDIR}/braced.txt").read_text()"#);
-
-    unsafe { std::env::remove_var("RILL_TEST_BDIR") };
+    let value = run_with_env(
+        r#"path("${RILL_TEST_BDIR}/braced.txt").read_text()"#,
+        &[("RILL_TEST_BDIR", scratch.0.to_str().unwrap())],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("braced".to_string())))));
 }
@@ -357,9 +354,7 @@ fn braced_dollar_with_default_uses_default_when_unset() {
     std::fs::write(scratch.0.join("dflt.txt"), "default").unwrap();
     let dir = scratch.0.to_str().unwrap().to_string();
 
-    // Make sure the var is not set.
-    unsafe { std::env::remove_var("RILL_NONEXISTENT_9f3a") };
-
+    // The variable is not set in the host environment.
     let value = run(&format!(r#"path("${{RILL_NONEXISTENT_9f3a:-{dir}}}/dflt.txt").read_text()"#));
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("default".to_string())))));
 }
@@ -370,31 +365,22 @@ fn braced_dollar_with_default_uses_var_when_set() {
     std::fs::write(scratch.0.join("set.txt"), "set").unwrap();
     let dir = scratch.0.to_str().unwrap().to_string();
 
-    unsafe { std::env::set_var("RILL_TEST_SET_VAR", &dir) };
-
-    let value = run(r#"path("${RILL_TEST_SET_VAR:-/wrong}/set.txt").read_text()"#);
-
-    unsafe { std::env::remove_var("RILL_TEST_SET_VAR") };
+    let value = run_with_env(
+        r#"path("${RILL_TEST_SET_VAR:-/wrong}/set.txt").read_text()"#,
+        &[("RILL_TEST_SET_VAR", &dir)],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("set".to_string())))));
 }
 
 #[test]
 fn yaml_read_expands_tilde_in_path() {
-    let _guard = HOME_LOCK.lock().unwrap();
     let scratch = Scratch::new();
     let yaml_path = scratch.0.join("data.yml");
     std::fs::write(&yaml_path, "key: value\n").unwrap();
 
-    let old_home = std::env::var_os("HOME");
-    unsafe { std::env::set_var("HOME", &scratch.0) };
-
-    let value = run(r#"yaml.read("~/data.yml")"#);
-
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    let value =
+        run_with_env(r#"yaml.read("~/data.yml")"#, &[("HOME", scratch.0.to_str().unwrap())]);
 
     let Value::Result(Ok(map_val)) = value else {
         panic!("expected Ok result, got {value:?}");
@@ -412,12 +398,11 @@ fn path_join_expands_child() {
     std::fs::write(scratch.0.join("joined.txt"), "joined").unwrap();
     let dir = scratch.0.to_str().unwrap().to_string();
 
-    unsafe { std::env::set_var("RILL_TEST_JOINDIR", &dir) };
-
-    let value = run(r#"use path
-path("/").join("$RILL_TEST_JOINDIR/joined.txt").read_text()"#);
-
-    unsafe { std::env::remove_var("RILL_TEST_JOINDIR") };
+    let value = run_with_env(
+        r#"use path
+path("/").join("$RILL_TEST_JOINDIR/joined.txt").read_text()"#,
+        &[("RILL_TEST_JOINDIR", &dir)],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("joined".to_string())))));
 }
@@ -430,14 +415,13 @@ fn dollar_var_in_path_is_rill_binding_before_env() {
     let dir = scratch.0.to_str().unwrap();
 
     // Process env points somewhere wrong.
-    unsafe { std::env::set_var("RILL_SHADOW_VAR", "/dev/null") };
-
-    let value = run(&format!(
-        r#"let RILL_SHADOW_VAR = "{dir}"
+    let value = run_with_env(
+        &format!(
+            r#"let RILL_SHADOW_VAR = "{dir}"
 path("$RILL_SHADOW_VAR/binding.txt").read_text()"#
-    ));
-
-    unsafe { std::env::remove_var("RILL_SHADOW_VAR") };
+        ),
+        &[("RILL_SHADOW_VAR", "/dev/null")],
+    );
 
     assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("binding".to_string())))));
 }
@@ -468,8 +452,7 @@ fn string_interpolation_supports_braced_var_with_default() {
 
 #[test]
 fn command_supports_braced_var_default() {
-    // ${VAR:-default} in a command arg.
-    unsafe { std::env::remove_var("RILL_CMD_DFLT") };
+    // ${VAR:-default} in a command arg; the variable is not set in the host environment.
     let Value::ProcessResult(result) = run(r#"run printf "${RILL_CMD_DFLT:-hello}""#) else {
         panic!("expected ProcessResult");
     };
@@ -489,22 +472,11 @@ run printf "${MY_MSG:-wrong}""#)
 #[test]
 fn command_word_leading_tilde_expands() {
     // A bare word starting with `~/` should expand to $HOME/...
-    let _guard = HOME_LOCK.lock().unwrap();
-    let old_home = std::env::var_os("HOME");
-    unsafe { std::env::set_var("HOME", "/tmp") };
-
-    let Value::ProcessResult(result) = run(r#"run printf "%s" ~/foo"#) else {
-        match old_home {
-            Some(h) => unsafe { std::env::set_var("HOME", h) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
+    let Value::ProcessResult(result) =
+        run_with_env(r#"run printf "%s" ~/foo"#, &[("HOME", "/tmp")])
+    else {
         panic!("expected ProcessResult");
     };
-
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
 
     assert_eq!(result.stdout_text_lossy(), "/tmp/foo");
 }
@@ -1298,4 +1270,74 @@ fn map_equality_ignores_order_and_so_does_difference() {
         run(r#"[3, 1, 3, 2].group_by(|x| Str(x)).keys()"#),
         Value::List(vec![Value::Str("3".into()), Value::Str("1".into()), Value::Str("2".into())])
     );
+}
+
+// ── Scoping model: let by value, var by shared cell, lexical hoisted fns ──────
+
+#[test]
+fn closures_share_mutable_var_bindings() {
+    assert_eq!(run("var n = 0\n[1, 2, 3].map(|x| { n += x })\nn"), Value::Int(6));
+}
+
+#[test]
+fn named_functions_share_mutable_var_bindings() {
+    assert_eq!(run("var n = 0\nfn bump() { n += 1 }\nbump()\nbump()\nn"), Value::Int(2));
+}
+
+#[test]
+fn var_shadowing_after_capture_creates_new_cell() {
+    assert_eq!(run("var v = 1\nlet f = |x| v + x\nvar v = 2\nf(0)"), Value::Int(1));
+}
+
+#[test]
+fn named_functions_are_lexically_scoped_not_dynamic() {
+    let error = rill::run_source("fn f() { x }\nfn g() { let x = 1\nf() }\ng()", vec![])
+        .expect_err("dynamic lookup must fail");
+    assert!(error.to_string().contains("unknown identifier 'x'"), "{error}");
+}
+
+#[test]
+fn functions_can_call_functions_declared_later_and_recurse() {
+    let source = r#"
+        fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
+        fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+        [is_even(10), is_odd(7), is_even(3)]
+    "#;
+    assert_eq!(
+        run(source),
+        Value::List(vec![Value::Bool(true), Value::Bool(true), Value::Bool(false)])
+    );
+}
+
+#[test]
+fn function_used_before_definition_statement_errors() {
+    let error = rill::run_source("fn a() { b() }\na()\nfn b() { 1 }", vec![])
+        .expect_err("calling a hoisted but undefined function must fail");
+    assert!(error.to_string().contains("used before its definition"), "{error}");
+}
+
+#[test]
+fn with_env_applies_to_called_functions_and_is_restored() {
+    let source = r#"
+        fn show() { env.get("RILL_WITH_ENV_TEST") }
+        fn with_env_probe() {
+            var seen = null
+            with env { RILL_WITH_ENV_TEST = "x" } { seen = show() }
+            seen
+        }
+        let inside = with_env_probe()
+        [inside, show()]
+    "#;
+    assert_eq!(run(source), Value::List(vec![Value::Str("x".into()), Value::Null]));
+}
+
+#[test]
+fn set_env_is_evaluator_local_and_visible_to_children() {
+    let source = r#"
+        set_env("RILL_EVAL_LOCAL", "42")
+        let result = run printenv RILL_EVAL_LOCAL
+        result.out.trim()
+    "#;
+    assert_eq!(run(source), Value::Str("42".into()));
+    assert!(std::env::var_os("RILL_EVAL_LOCAL").is_none(), "host environment must not change");
 }

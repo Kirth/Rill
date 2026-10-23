@@ -141,6 +141,11 @@ impl Env {
     fn is_mutable(&self, name: &str) -> Option<bool> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.mutable))
     }
+
+    /// Index of the scope that declares `name`, counted from the root.
+    fn scope_index(&self, name: &str) -> Option<usize> {
+        self.scopes.iter().rposition(|scope| scope.contains_key(name))
+    }
 }
 
 pub fn check(program: &Program) -> Result<(), RillError> {
@@ -162,8 +167,14 @@ pub(crate) fn check_module(
             env.set(name.clone(), ty.clone());
         }
     }
-    let mut checker =
-        Checker { env, return_expected: None, loop_depth: 0, for_body_depth: 0, function_depth: 0 };
+    let mut checker = Checker {
+        env,
+        return_expected: None,
+        loop_depth: 0,
+        for_body_depth: 0,
+        function_depth: 0,
+        parallel_floor: None,
+    };
     checker.check_program(program)
 }
 
@@ -171,6 +182,9 @@ struct Checker {
     env: Env,
     return_expected: Option<Type>,
     loop_depth: usize,
+    /// While checking a parallel body: scopes below this index belong to the
+    /// enclosing sequential code and may not be assigned to.
+    parallel_floor: Option<usize>,
     for_body_depth: usize,
     function_depth: usize,
 }
@@ -258,6 +272,28 @@ impl Checker {
         Ok(ModuleExports { symbols })
     }
 
+    fn ensure_assignable_in_parallel(&self, name: &str) -> Result<(), RillError> {
+        if let (Some(floor), Some(index)) = (self.parallel_floor, self.env.scope_index(name)) {
+            if index < floor {
+                return Err(RillError::new(format!(
+                    "cannot assign to outer variable '{name}' from a parallel body; collect results with emit or parallel_map"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Run `check` with the parallel-assignment floor set to the current scope depth.
+    fn in_parallel_body<T>(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<T, RillError>,
+    ) -> Result<T, RillError> {
+        let previous = self.parallel_floor.replace(self.env.scopes.len());
+        let result = check(self);
+        self.parallel_floor = previous;
+        result
+    }
+
     fn check_stmts(&mut self, stmts: &[Stmt]) -> Result<Type, RillError> {
         let mut last = Type::Null;
         for stmt in stmts {
@@ -312,6 +348,7 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::Assign { name, expr, .. } => {
+                self.ensure_assignable_in_parallel(name)?;
                 if matches!(self.env.is_mutable(name), Some(false)) {
                     return Err(RillError::new(format!(
                         "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
@@ -321,6 +358,7 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::IndexAssign { name, index, op, expr } => {
+                self.ensure_assignable_in_parallel(name)?;
                 if matches!(self.env.is_mutable(name), Some(false)) {
                     return Err(RillError::new(format!(
                         "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
@@ -391,24 +429,27 @@ impl Checker {
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
                 self.function_depth += 1;
                 self.return_expected = function.return_type.as_ref().map(type_from_name);
-                let body_ty = self.check_stmts(&function.body)?;
-                if let Some(return_type) = &function.return_type {
-                    let last_span = function.body.last().and_then(|s| match s {
-                        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Emit(e) => e.span(),
-                        Stmt::Let { expr, .. } => expr.span(),
-                        _ => None,
-                    });
-                    ensure_function_return(&type_from_name(return_type), &body_ty).map_err(
-                        |e| match last_span {
-                            Some(s) => e.with_span(s),
-                            None => e,
-                        },
-                    )?;
-                }
+                let checked = self.check_stmts(&function.body).and_then(|body_ty| {
+                    if let Some(return_type) = &function.return_type {
+                        let last_span = function.body.last().and_then(|s| match s {
+                            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Emit(e) => e.span(),
+                            Stmt::Let { expr, .. } => expr.span(),
+                            _ => None,
+                        });
+                        ensure_function_return(&type_from_name(return_type), &body_ty).map_err(
+                            |e| match last_span {
+                                Some(s) => e.with_span(s),
+                                None => e,
+                            },
+                        )?;
+                    }
+                    Ok(body_ty)
+                });
                 self.return_expected = previous_return;
                 self.loop_depth = previous_loop;
                 self.function_depth -= 1;
                 self.env.pop();
+                let body_ty = checked?;
                 self.env.set(
                     name.clone(),
                     Type::Function {
@@ -629,16 +670,24 @@ impl Checker {
                         "for loop needs List or Stream, got {iter_ty}"
                     )));
                 }
+                let parallel = !matches!(mode, ForMode::Sequential);
+                let previous_floor = if parallel {
+                    self.parallel_floor.replace(self.env.scopes.len())
+                } else {
+                    self.parallel_floor
+                };
                 self.env.push();
                 let item_ty =
                     if matches!(iter_ty, Type::Stream) { Type::Map } else { iter_ty.list_item() };
                 self.bind_pattern(pattern, item_ty, true)?;
                 self.loop_depth += 1;
                 self.for_body_depth += 1;
-                self.check_stmts(body)?;
+                let checked = self.check_stmts(body);
                 self.for_body_depth -= 1;
                 self.loop_depth -= 1;
                 self.env.pop();
+                self.parallel_floor = previous_floor;
+                checked?;
                 Ok(match mode {
                     ForMode::Sequential | ForMode::Parallel => Type::List(Box::new(Type::Unknown)),
                     ForMode::Race => Type::Unknown,
@@ -659,7 +708,7 @@ impl Checker {
                 for param in params {
                     self.env.set(param.clone(), Type::Unknown);
                 }
-                let return_type = self.check_stmts(body)?;
+                let return_type = self.check_stmts(body);
                 self.loop_depth = previous_loop;
                 self.return_expected = previous_return;
                 self.function_depth -= 1;
@@ -667,7 +716,7 @@ impl Checker {
                 Ok(Type::Function {
                     arity: Some(params.len()),
                     params: None,
-                    return_type: Box::new(return_type),
+                    return_type: Box::new(return_type?),
                 })
             }
             Expr::Unary { op: UnaryOp::Not, operand } => {
@@ -822,7 +871,11 @@ impl Checker {
             let ty = if method.argument(index) == crate::methods::Argument::Function {
                 self.env.push();
                 self.env.set("it".into(), receiver.list_item());
-                let ty = self.check_callback_expr(arg);
+                let ty = if matches!(name, "parallel_map" | "parallel_filter") {
+                    self.in_parallel_body(|checker| checker.check_callback_expr(arg))
+                } else {
+                    self.check_callback_expr(arg)
+                };
                 self.env.pop();
                 ty?
             } else {
@@ -1393,12 +1446,7 @@ fn type_from_value(value: &Value) -> Type {
         Value::ProcessHandle(_) => Type::ProcessHandle,
         Value::Stream(_) => Type::Stream,
         Value::Function(function) => Type::Function {
-            arity: Some(function.params.len()),
-            params: None,
-            return_type: Box::new(Type::Unknown),
-        },
-        Value::Closure(closure) => Type::Function {
-            arity: Some(closure.function.params.len()),
+            arity: Some(function.function.params.len()),
             params: None,
             return_type: Box::new(Type::Unknown),
         },

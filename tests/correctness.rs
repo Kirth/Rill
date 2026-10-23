@@ -11,7 +11,8 @@ fn run_parallel(source: &str, parallelism: usize) -> Result<Value, rill::diagnos
     let executor = rill::eval::ParallelExecutor::new(
         NonZeroUsize::new(parallelism).expect("nonzero parallelism"),
     )?;
-    rill::eval::Evaluator::with_executor(vec![], None, executor).eval_program(&program)
+    rill::eval::Evaluator::with_executor(vec![], None, rill::eval::process_environment(), executor)
+        .eval_program(&program)
 }
 
 #[test]
@@ -310,4 +311,19 @@ fn race_cancels_a_process_handle_owned_by_a_losing_branch() {
     assert_eq!(run_parallel(&source, 2).unwrap(), Value::Int(0));
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(!marker.exists(), "losing branch-owned handle escaped cancellation");
+}
+
+#[test]
+fn parallel_bodies_cannot_assign_outer_vars_through_functions() {
+    let source = "var n = 0\nfn bump() { n += 1 }\nparallel for x in [1, 2] { bump() }";
+    let error = rill::run_source(source, vec![]).expect_err("outer write must fail");
+    assert!(error.to_string().contains("outer variable 'n'"), "{error}");
+}
+
+#[test]
+fn append_in_loop_is_linear() {
+    let started = std::time::Instant::now();
+    let value = run("var xs = []\nvar i = 0\nwhile i < 20000 { xs += [i]; i += 1 }\nxs.len()");
+    assert_eq!(value, Value::Int(20000));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
 }

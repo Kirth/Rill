@@ -4,7 +4,7 @@ use std::path::PathBuf;
 /// Resolves a path template with tilde and variable expansion.
 ///
 /// Expansion order:
-/// 1. Leading `~` or `~/` → HOME; `~user` → that user's home directory.
+/// 1. Leading `~` or `~/` → `lookup("HOME")`; `~user` → that user's home directory.
 /// 2. `$NAME`, `${NAME}`, `${NAME:-default}` via `lookup` (Rill binding first, then
 ///    process env at the call site), inserting values literally to prevent
 ///    double expansion.  Default expressions are themselves expanded recursively.
@@ -39,10 +39,6 @@ impl UserLookup for OsUserLookup {
     }
 }
 
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
 fn os_home_for(username: &str) -> Option<PathBuf> {
     use std::ffi::CString;
     let c_name = CString::new(username).ok()?;
@@ -67,9 +63,9 @@ fn expand_template(
         chars.next();
         match chars.peek() {
             // `~` alone or `~/`
-            None | Some((_, '/')) => match home_dir() {
-                Some(home) => result.push_str(&home.to_string_lossy()),
-                None => result.push('~'),
+            None | Some((_, '/')) => match lookup("HOME") {
+                Some(home) if !home.is_empty() => result.push_str(&home),
+                _ => result.push('~'),
             },
             // `~username` – only valid username chars (alphanumeric / _ / -)
             Some((_, c)) if c.is_ascii_alphanumeric() || *c == '_' => {
@@ -225,18 +221,14 @@ mod tests {
 
     #[test]
     fn tilde_alone_expands_to_home() {
-        // Tilde expansion reads HOME from std::env.  Set a controlled value.
-        let old = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/home/testuser") };
-        let r = resolve_with_users("~", &env_lookup(&[]), &FakeUsers(vec![])).unwrap();
+        // Tilde expansion reads HOME through the lookup, never from std::env.
+        let home = env_lookup(&[("HOME", "/home/testuser")]);
+        let r = resolve_with_users("~", &home, &FakeUsers(vec![])).unwrap();
         assert_eq!(r, PathBuf::from("/home/testuser"));
-        let r2 = resolve_with_users("~/data", &env_lookup(&[]), &FakeUsers(vec![])).unwrap();
+        let r2 = resolve_with_users("~/data", &home, &FakeUsers(vec![])).unwrap();
         assert_eq!(r2, PathBuf::from("/home/testuser/data"));
-        // Restore.
-        match old {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
+        let r3 = resolve_with_users("~/data", &env_lookup(&[]), &FakeUsers(vec![])).unwrap();
+        assert_eq!(r3, PathBuf::from("~/data"));
     }
 
     #[test]

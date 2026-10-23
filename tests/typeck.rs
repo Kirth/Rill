@@ -283,3 +283,18 @@ fn bad(value: Int) -> Int {
     );
     assert!(err.contains("expected Int, got Str"));
 }
+
+#[test]
+fn parallel_bodies_cannot_assign_outer_vars() {
+    for source in [
+        "var n = 0\nparallel for x in [1, 2] { n += x }",
+        "var n = 0\nrace for x in [1, 2] { n = x }",
+        "var n = 0\n[1, 2].parallel_map(|x| { n += x })",
+        "var xs = [0]\n[1, 2].parallel_filter(|x| { xs[0] = x\ntrue })",
+    ] {
+        let message = check_err(source);
+        assert!(message.contains("outer variable"), "{source}: {message}");
+    }
+    check_ok("parallel for x in [1, 2] { var n = 0\nn += x\nemit n }");
+    check_ok("var n = 0\nfor x in [1, 2] { n += x }");
+}

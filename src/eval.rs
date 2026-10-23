@@ -5,7 +5,7 @@ use crate::runtime::{
     run_command, run_command_cancellable, run_pipeline, run_pipeline_cancellable,
     ssh_control_options, CommandIo, ProcessRuntime, ProcessSpec, StreamMode, TokioProcessRuntime,
 };
-use crate::types::{Map, Binding, Closure, ErrorKind, ErrorValue, Value};
+use crate::types::{Binding, ErrorKind, ErrorValue, FunctionValue, Map, Scope, Slot, Value};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,75 +47,148 @@ impl ParallelExecutor {
     }
 }
 
+/// The host process environment as the evaluator's initial environment map.
+pub fn process_environment() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .map(|(name, value)| {
+            (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct Env {
-    scopes: Vec<Arc<BTreeMap<String, Binding>>>,
+    scopes: Vec<Arc<Scope>>,
+    /// Scopes below this index belong to an enclosing evaluator.  A parallel
+    /// worker may read them but must not assign into them.
+    frozen: usize,
 }
 
 impl Env {
     fn new(args: Vec<String>, input: Option<String>) -> Self {
-        let mut root = BTreeMap::new();
-        let insert = |root: &mut BTreeMap<String, Binding>, name: &str, value: Value| {
-            root.insert(name.to_string(), Binding { value, mutable: true });
-        };
-        insert(&mut root, "args", Value::List(args.into_iter().map(Value::Str).collect()));
-        let mut environment: Vec<(String, String)> = std::env::vars_os()
-            .map(|(name, value)| {
-                (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())
-            })
-            .collect();
-        environment.sort();
-        let environment: Map =
-            environment.into_iter().map(|(name, value)| (name, Value::Str(value))).collect();
-        insert(&mut root, "env", Value::Map(environment));
+        let mut root = Scope::new();
+        root.insert(
+            "args".to_string(),
+            Binding::cell(Value::List(args.into_iter().map(Value::Str).collect())),
+        );
         let lines =
             input.unwrap_or_default().lines().map(|line| Value::Str(line.to_string())).collect();
-        insert(
-            &mut root,
-            "input",
-            Value::Map(Map::from_iter([("lines".to_string(), Value::List(lines))])),
+        root.insert(
+            "input".to_string(),
+            Binding::cell(Value::Map(Map::from_iter([("lines".to_string(), Value::List(lines))]))),
         );
-        Self { scopes: vec![Arc::new(root)] }
+        Self { scopes: vec![Arc::new(root)], frozen: 0 }
     }
 
     fn push(&mut self) {
-        self.scopes.push(Arc::new(BTreeMap::new()));
+        self.scopes.push(Arc::new(Scope::new()));
     }
 
     fn pop(&mut self) {
         self.scopes.pop();
     }
 
-    fn set(&mut self, name: String, value: Value) {
+    fn current(&mut self) -> &mut Scope {
         Arc::make_mut(self.scopes.last_mut().expect("env always has root scope"))
-            .insert(name, Binding { value, mutable: true });
+    }
+
+    /// Declare a mutable binding in the innermost scope.
+    fn set(&mut self, name: String, value: Value) {
+        self.current().insert(name, Binding::cell(value));
     }
 
     fn bind(&mut self, name: String, value: Value, mutable: bool) {
-        Arc::make_mut(self.scopes.last_mut().expect("env always has root scope"))
-            .insert(name, Binding { value, mutable });
+        let binding = if mutable { Binding::cell(value) } else { Binding::value(value) };
+        self.current().insert(name, binding);
+    }
+
+    /// Reserve a slot for a function declared later in the current block.
+    fn hoist(&mut self, name: &str) {
+        self.current()
+            .insert(name.to_string(), Binding { slot: Slot::Hoisted(Arc::new(OnceLock::new())) });
+    }
+
+    /// Define a function in the current scope.  `make` receives the scope
+    /// chain the function closes over, which already contains the function's
+    /// own slot so that recursion works.
+    fn define_function(
+        &mut self,
+        name: &str,
+        make: impl FnOnce(Vec<Arc<Scope>>) -> Arc<FunctionValue>,
+    ) {
+        let lock = match self.scopes.last().and_then(|scope| scope.get(name)) {
+            Some(Binding { slot: Slot::Hoisted(lock) }) if lock.get().is_none() => lock.clone(),
+            _ => {
+                let lock = Arc::new(OnceLock::new());
+                self.current()
+                    .insert(name.to_string(), Binding { slot: Slot::Hoisted(lock.clone()) });
+                lock
+            }
+        };
+        let function = make(self.scopes.clone());
+        let _ = lock.set(function);
+    }
+
+    fn find(&self, name: &str) -> Option<(usize, &Binding)> {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, scope)| scope.get(name).map(|binding| (index, binding)))
+    }
+
+    /// Look a name up, distinguishing "unknown" from "declared below".
+    fn lookup(&self, name: &str) -> Result<Option<Value>, RillError> {
+        let Some((_, binding)) = self.find(name) else {
+            return Ok(None);
+        };
+        Ok(Some(match &binding.slot {
+            Slot::Value(value) => value.clone(),
+            Slot::Cell(cell) => cell.read().unwrap_or_else(|error| error.into_inner()).clone(),
+            Slot::Hoisted(lock) => match lock.get() {
+                Some(function) => Value::Function(function.clone()),
+                None => {
+                    return Err(RillError::new(format!(
+                        "function '{name}' is used before its definition"
+                    )))
+                }
+            },
+        }))
     }
 
     fn get(&self, name: &str) -> Option<Value> {
-        self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.value.clone()))
+        self.lookup(name).ok().flatten()
     }
 
-    fn rebind(&mut self, name: &str, value: Value) -> Result<bool, RillError> {
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                let binding = Arc::make_mut(scope)
-                    .get_mut(name)
-                    .expect("binding checked before copy-on-write");
-                if !binding.mutable {
-                    return Err(RillError::new(format!(
-                        "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
-                    )));
-                }
-                binding.value = value;
-                return Ok(true);
+    /// Mutate a `var` binding in place.  Returns `Ok(false)` when the name is
+    /// not declared at all.
+    fn update(
+        &mut self,
+        name: &str,
+        mutate: impl FnOnce(&mut Value) -> Result<(), RillError>,
+    ) -> Result<bool, RillError> {
+        let Some((index, binding)) = self.find(name) else {
+            return Ok(false);
+        };
+        let cell = match &binding.slot {
+            Slot::Cell(cell) => cell.clone(),
+            Slot::Value(_) => {
+                return Err(RillError::new(format!(
+                    "cannot assign to immutable variable '{name}' (declared with 'let'; use 'var' for mutable variables)"
+                )))
             }
+            Slot::Hoisted(_) => {
+                return Err(RillError::new(format!("cannot assign to function '{name}'")))
+            }
+        };
+        if index < self.frozen {
+            return Err(RillError::new(format!(
+                "cannot assign to outer variable '{name}' from a parallel body; collect results with emit or parallel_map"
+            )));
         }
-        Ok(false)
+        let mut guard = cell.write().unwrap_or_else(|error| error.into_inner());
+        mutate(&mut guard)?;
+        Ok(true)
     }
 }
 
@@ -189,8 +262,12 @@ impl EvalError {
     }
 }
 
+#[derive(Clone)]
 pub struct Evaluator {
     env: Env,
+    /// The process environment seen by `env.NAME`, `set_env`, `with env`, and
+    /// child processes.  Evaluator-local; the host process is never mutated.
+    environment: BTreeMap<String, String>,
     function_depth: usize,
     remote_prefix: Vec<Vec<String>>,
     executor: ParallelExecutor,
@@ -307,22 +384,76 @@ impl Evaluator {
     }
 
     pub fn with_input(args: Vec<String>, input: Option<String>) -> Self {
-        Self::with_executor(args, input, ParallelExecutor::shared())
+        Self::with_environment(args, input, process_environment())
+    }
+
+    pub fn with_environment(
+        args: Vec<String>,
+        input: Option<String>,
+        environment: BTreeMap<String, String>,
+    ) -> Self {
+        Self::with_executor(args, input, environment, ParallelExecutor::shared())
     }
 
     pub fn with_executor(
         args: Vec<String>,
         input: Option<String>,
+        environment: BTreeMap<String, String>,
         executor: ParallelExecutor,
     ) -> Self {
         Self {
             env: Env::new(args, input),
+            environment,
             function_depth: 0,
             remote_prefix: Vec::new(),
             executor,
             cancellation: CancellationToken::new(),
             cancellation_active: false,
         }
+    }
+
+    /// A child evaluator for a parallel worker.  It shares every binding
+    /// visible at the fork point but may not assign into them.
+    fn fork(&self, cancellation: CancellationToken) -> Self {
+        let mut env = self.env.clone();
+        env.frozen = env.scopes.len();
+        Self {
+            env,
+            environment: self.environment.clone(),
+            function_depth: self.function_depth,
+            remote_prefix: self.remote_prefix.clone(),
+            executor: self.executor.clone(),
+            cancellation,
+            cancellation_active: true,
+        }
+    }
+
+    /// Run `body` in a fresh scope that is popped even when `body` fails.
+    fn scoped<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, EvalError>,
+    ) -> Result<T, EvalError> {
+        self.env.push();
+        let result = body(self);
+        self.env.pop();
+        result
+    }
+
+    fn make_function(&self, function: Function, name: Option<String>) -> Value {
+        Value::Function(Arc::new(FunctionValue {
+            function: Arc::new(function),
+            captured: self.env.scopes.clone(),
+            name,
+        }))
+    }
+
+    fn environment_value(&self) -> Value {
+        Value::Map(
+            self.environment
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::Str(value.clone())))
+                .collect(),
+        )
     }
 
     fn check_cancelled(&self) -> Result<(), EvalError> {
@@ -394,27 +525,15 @@ impl Evaluator {
         }
     }
 
-    fn command_environment(&self) -> Result<BTreeMap<String, String>, RillError> {
-        let environment =
-            self.env.get("env").ok_or_else(|| RillError::new("environment is unavailable"))?;
-        let Value::Map(environment) = environment else {
-            return Err(RillError::new("environment is unavailable"));
-        };
-        Ok(environment.into_iter().map(|(name, value)| (name, value.as_string_lossy())).collect())
-    }
-
     fn lookup_environment_value(&self, name: &str) -> Option<Value> {
-        self.env.get(name).or_else(|| {
-            let Some(Value::Map(environment)) = self.env.get("env") else {
-                return None;
-            };
-            environment.get(name).cloned()
-        })
+        self.env
+            .get(name)
+            .or_else(|| self.environment.get(name).map(|value| Value::Str(value.clone())))
     }
 
     fn command_io_with_environment(&self, mut io: CommandIo) -> Result<CommandIo, RillError> {
         let explicit = std::mem::take(&mut io.env);
-        io.env = self.command_environment()?;
+        io.env = self.environment.clone();
         io.env.extend(explicit);
         Ok(io)
     }
@@ -467,7 +586,18 @@ impl Evaluator {
         }
     }
 
+    /// Reserve slots for every `fn` in `stmts` so that functions can call
+    /// each other regardless of declaration order.
+    fn hoist_functions(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let Stmt::Fn { name, .. } = stmt {
+                self.env.hoist(name);
+            }
+        }
+    }
+
     fn eval_stmts(&mut self, stmts: &[Stmt]) -> Result<Flow, EvalError> {
+        self.hoist_functions(stmts);
         let mut last = Value::Null;
         for stmt in stmts {
             let flow = match self.eval_stmt(stmt) {
@@ -487,6 +617,7 @@ impl Evaluator {
         &mut self,
         stmts: &[Stmt],
     ) -> Result<(Flow, Vec<Value>), EvalError> {
+        self.hoist_functions(stmts);
         let mut last = Value::Null;
         let mut emits = Vec::new();
         for stmt in stmts {
@@ -517,10 +648,9 @@ impl Evaluator {
     ) -> Result<Value, EvalError> {
         let cancellation = self.cancellation.child_token();
         let terminal = Arc::new(Mutex::new(None::<ParallelTerminal>));
-        let base_env = self.env.clone();
-        let function_depth = self.function_depth;
-        let remote_prefix = self.remote_prefix.clone();
         let executor = self.executor_for_parallelism(workers)?;
+        let mut template = self.fork(cancellation.clone());
+        template.executor = executor.clone();
         let results = executor.pool.install(|| {
             items
                 .into_par_iter()
@@ -528,16 +658,8 @@ impl Evaluator {
                     if cancellation.is_cancelled() {
                         return None;
                     }
-                    let mut child_env = base_env.clone();
-                    child_env.push();
-                    let mut child = Evaluator {
-                        env: child_env,
-                        function_depth,
-                        remote_prefix: remote_prefix.clone(),
-                        executor: executor.clone(),
-                        cancellation: cancellation.clone(),
-                        cancellation_active: true,
-                    };
+                    let mut child = template.clone();
+                    child.env.push();
                     if let Err(error) = child.bind_pattern(pattern, item) {
                         record_parallel_terminal(
                             &terminal,
@@ -599,25 +721,16 @@ impl Evaluator {
         let cancellation = self.cancellation.child_token();
         let state =
             Arc::new(RaceState { outcome: Mutex::new(None), cancellation: cancellation.clone() });
-        let base_env = self.env.clone();
-        let function_depth = self.function_depth;
-        let remote_prefix = self.remote_prefix.clone();
         let executor = self.executor_for_parallelism(workers)?;
+        let mut template = self.fork(cancellation.clone());
+        template.executor = executor.clone();
         executor.pool.install(|| {
             items.into_par_iter().for_each(|item| {
                 if cancellation.is_cancelled() {
                     return;
                 }
-                let mut child_env = base_env.clone();
-                child_env.push();
-                let mut child = Evaluator {
-                    env: child_env,
-                    function_depth,
-                    remote_prefix: remote_prefix.clone(),
-                    executor: executor.clone(),
-                    cancellation: cancellation.clone(),
-                    cancellation_active: true,
-                };
+                let mut child = template.clone();
+                child.env.push();
                 if let Err(error) = child.bind_pattern(pattern, item) {
                     state.finish(RaceOutcome::Terminal(ParallelTerminal::Runtime(match error {
                         EvalError::Runtime(error) => error,
@@ -646,6 +759,7 @@ impl Evaluator {
     }
 
     fn eval_stmts_for_race(&mut self, stmts: &[Stmt], state: &RaceState) {
+        self.hoist_functions(stmts);
         for stmt in stmts {
             if self.cancellation.is_cancelled() {
                 return;
@@ -766,149 +880,35 @@ impl Evaluator {
             }
             Stmt::Assign { name, op, expr } => {
                 let rhs = self.eval_expr(expr)?;
-                let value = if matches!(op, AssignOp::Assign) {
-                    rhs
-                } else {
-                    let cur = self.env.get(name).ok_or_else(|| {
-                        EvalError::Runtime(RillError::new(format!("unbound variable '{name}'")))
-                    })?;
-                    let bin_op = match op {
-                        AssignOp::Add => BinaryOp::Add,
-                        AssignOp::Sub => BinaryOp::Sub,
-                        AssignOp::Mul => BinaryOp::Mul,
-                        AssignOp::Div => BinaryOp::Div,
-                        AssignOp::Assign => unreachable!(),
-                    };
-                    numeric_binary(cur, rhs, bin_op).map_err(EvalError::Runtime)?
-                };
-                match self.env.rebind(name, value) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Err(EvalError::Runtime(RillError::new(format!(
-                            "assignment to undeclared variable '{name}'"
-                        ))))
-                    }
-                    Err(e) => return Err(EvalError::Runtime(e)),
+                let op = *op;
+                if !self.env.update(name, |current| apply_compound(current, rhs, op))? {
+                    return Err(EvalError::Runtime(RillError::new(format!(
+                        "assignment to undeclared variable '{name}'"
+                    ))));
                 }
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::IndexAssign { name, index, op, expr } => {
-                let collection = self.env.get(name).ok_or_else(|| {
-                    EvalError::Runtime(RillError::new(format!("unbound variable '{name}'")))
-                })?;
                 let idx_val = self.eval_expr(index)?;
                 let rhs = self.eval_expr(expr)?;
-                let updated = match collection {
-                    Value::Map(mut map) => {
-                        let key = match &idx_val {
-                            Value::Str(s) => s.clone(),
-                            Value::Int(i) => i.to_string(),
-                            other => {
-                                return Err(EvalError::Runtime(RillError::new(format!(
-                                    "map key must be Str or Int, got {}",
-                                    other.type_name()
-                                ))))
-                            }
-                        };
-                        let new_val = if matches!(op, AssignOp::Assign) {
-                            rhs
-                        } else {
-                            let cur = map.get(&key).cloned().unwrap_or(Value::Int(0));
-                            let bin_op = match op {
-                                AssignOp::Add => BinaryOp::Add,
-                                AssignOp::Sub => BinaryOp::Sub,
-                                AssignOp::Mul => BinaryOp::Mul,
-                                AssignOp::Div => BinaryOp::Div,
-                                AssignOp::Assign => unreachable!(),
-                            };
-                            numeric_binary(cur, rhs, bin_op).map_err(EvalError::Runtime)?
-                        };
-                        map.insert(key, new_val);
-                        Value::Map(map)
-                    }
-                    Value::List(mut items) => {
-                        let idx = match idx_val {
-                            Value::Int(i) => i,
-                            other => {
-                                return Err(EvalError::Runtime(RillError::new(format!(
-                                    "list index must be Int, got {}",
-                                    other.type_name()
-                                ))))
-                            }
-                        };
-                        let len = items.len() as i64;
-                        let i = if idx < 0 { len + idx } else { idx } as usize;
-                        if i >= items.len() {
-                            return Err(EvalError::Runtime(RillError::new(format!(
-                                "index {idx} out of bounds (len {len})"
-                            ))));
-                        }
-                        let new_val = if matches!(op, AssignOp::Assign) {
-                            rhs
-                        } else {
-                            let cur = items[i].clone();
-                            let bin_op = match op {
-                                AssignOp::Add => BinaryOp::Add,
-                                AssignOp::Sub => BinaryOp::Sub,
-                                AssignOp::Mul => BinaryOp::Mul,
-                                AssignOp::Div => BinaryOp::Div,
-                                AssignOp::Assign => unreachable!(),
-                            };
-                            numeric_binary(cur, rhs, bin_op).map_err(EvalError::Runtime)?
-                        };
-                        items[i] = new_val;
-                        Value::List(items)
-                    }
-                    Value::Tuple(mut items) => {
-                        let Some(literal_index) = constant_int_expr(index) else {
-                            return Err(EvalError::Runtime(RillError::new(
-                                "tuple assignment index must be an integer literal",
-                            )));
-                        };
-                        let Value::Int(index_value) = idx_val else {
-                            return Err(EvalError::Runtime(RillError::new(
-                                "tuple index must be Int",
-                            )));
-                        };
-                        debug_assert_eq!(literal_index, index_value);
-                        let position = normalize_runtime_index(index_value, items.len(), "tuple")?;
-                        let new_val = if matches!(op, AssignOp::Assign) {
-                            rhs
-                        } else {
-                            let bin_op = match op {
-                                AssignOp::Add => BinaryOp::Add,
-                                AssignOp::Sub => BinaryOp::Sub,
-                                AssignOp::Mul => BinaryOp::Mul,
-                                AssignOp::Div => BinaryOp::Div,
-                                AssignOp::Assign => unreachable!(),
-                            };
-                            numeric_binary(items[position].clone(), rhs, bin_op)
-                                .map_err(EvalError::Runtime)?
-                        };
-                        items[position] = new_val;
-                        Value::Tuple(items)
-                    }
-                    other => {
-                        return Err(EvalError::Runtime(RillError::new(format!(
-                            "cannot index-assign into {}",
-                            other.type_name()
-                        ))))
-                    }
-                };
-                match self.env.rebind(name, updated) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Err(EvalError::Runtime(RillError::new(format!(
-                            "assignment to undeclared variable '{name}'"
-                        ))))
-                    }
-                    Err(e) => return Err(EvalError::Runtime(e)),
+                let literal_index = constant_int_expr(index);
+                let op = *op;
+                let updated = self.env.update(name, |collection| {
+                    index_assign_in_place(collection, idx_val, literal_index, op, rhs)
+                })?;
+                if !updated {
+                    return Err(EvalError::Runtime(RillError::new(format!(
+                        "assignment to undeclared variable '{name}'"
+                    ))));
                 }
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::Args(_) | Stmt::InputLines => Ok(Flow::Value(Value::Null)),
             Stmt::Fn { name, function } => {
-                self.env.set(name.clone(), Value::Function(function.clone()));
+                let function = Arc::new(function.clone());
+                self.env.define_function(name, |captured| {
+                    Arc::new(FunctionValue { function, captured, name: Some(name.clone()) })
+                });
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::Emit(expr) => {
@@ -964,17 +964,12 @@ impl Evaluator {
                     .iter()
                     .map(|(name, expr)| Ok((name.clone(), self.eval_expr(expr)?.as_string_lossy())))
                     .collect::<Result<Vec<_>, EvalError>>()?;
-                let environment = self
-                    .env
-                    .get("env")
-                    .ok_or_else(|| RillError::new("environment is unavailable"))?;
-                self.env.push();
-                self.env.set("env".to_string(), environment);
-                let result = values
-                    .iter()
-                    .try_for_each(|(name, value)| self.set_environment(name, value.clone()))
-                    .and_then(|_| self.eval_stmts(body));
-                self.env.pop();
+                let saved = self.environment.clone();
+                for (name, value) in values {
+                    self.environment.insert(name, value);
+                }
+                let result = self.scoped(|evaluator| evaluator.eval_stmts(body));
+                self.environment = saved;
                 result
             }
             Stmt::On { host, body } => {
@@ -1039,10 +1034,13 @@ impl Evaluator {
                 if name == "none" {
                     return Ok(Value::Option(None));
                 }
-                Ok(self
-                    .env
-                    .get(name)
-                    .ok_or_else(|| RillError::new(format!("unknown identifier '{name}'")))?)
+                if let Some(value) = self.env.lookup(name)? {
+                    return Ok(value);
+                }
+                if name == "env" {
+                    return Ok(self.environment_value());
+                }
+                Err(RillError::new(format!("unknown identifier '{name}'")).into())
             }
             Expr::List(items) => items
                 .iter()
@@ -1148,8 +1146,8 @@ impl Evaluator {
                                 }),
                                 args: vec![Expr::Ident("_arg".to_string())],
                             };
-                            return Ok(Value::Closure(Closure {
-                                function: Function {
+                            return Ok(self.make_function(
+                                Function {
                                     params: vec![Param {
                                         name: "_arg".to_string(),
                                         type_name: None,
@@ -1157,8 +1155,8 @@ impl Evaluator {
                                     return_type: None,
                                     body: vec![Stmt::Return(Some(call))],
                                 },
-                                captured: self.env.scopes.clone(),
-                            }));
+                                None,
+                            ));
                         }
                         return Err(
                             RillError::new(format!("{module} has no function '{name}'")).into()
@@ -1211,10 +1209,10 @@ impl Evaluator {
                         match handle.next() {
                             None => break,
                             Some(item) => {
-                                self.env.push();
-                                self.bind_pattern(pattern, item)?;
-                                let result = self.eval_stmts_collecting_emits(body);
-                                self.env.pop();
+                                let result = self.scoped(|evaluator| {
+                                    evaluator.bind_pattern(pattern, item)?;
+                                    evaluator.eval_stmts_collecting_emits(body)
+                                });
                                 let (flow, emits) = result?;
                                 collected.extend(emits);
                                 match flow {
@@ -1247,10 +1245,10 @@ impl Evaluator {
                     ForMode::Sequential => {
                         let mut collected: Vec<Value> = Vec::new();
                         for item in list {
-                            self.env.push();
-                            self.bind_pattern(pattern, item)?;
-                            let result = self.eval_stmts_collecting_emits(body);
-                            self.env.pop();
+                            let result = self.scoped(|evaluator| {
+                                evaluator.bind_pattern(pattern, item)?;
+                                evaluator.eval_stmts_collecting_emits(body)
+                            });
                             let (flow, emits) = result?;
                             collected.extend(emits);
                             match flow {
@@ -1280,8 +1278,8 @@ impl Evaluator {
                     flow => Err(EvalError::Control(flow)),
                 }
             }
-            Expr::Closure { params, body } => Ok(Value::Closure(Closure {
-                function: Function {
+            Expr::Closure { params, body } => Ok(self.make_function(
+                Function {
                     params: params
                         .iter()
                         .map(|name| Param { name: name.clone(), type_name: None })
@@ -1289,8 +1287,8 @@ impl Evaluator {
                     return_type: None,
                     body: body.clone(),
                 },
-                captured: self.env.scopes.clone(),
-            })),
+                None,
+            )),
             Expr::Try(inner) => match self.eval_expr(inner)? {
                 Value::Option(Some(value)) => Ok(*value),
                 Value::Option(None) => self.propagate(Value::Option(None)),
@@ -1330,16 +1328,7 @@ impl Evaluator {
 
     fn set_environment(&mut self, name: &str, value: String) -> Result<(), EvalError> {
         self.check_cancelled()?;
-        let environment =
-            self.env.get("env").ok_or_else(|| RillError::new("environment is unavailable"))?;
-        let Value::Map(mut environment) = environment else {
-            return Err(RillError::new("environment is unavailable").into());
-        };
-        environment.insert(name.to_string(), Value::Str(value));
-        let environment = Value::Map(environment);
-        if !self.env.rebind("env", environment.clone())? {
-            self.env.set("env".to_string(), environment);
-        }
+        self.environment.insert(name.to_string(), value);
         Ok(())
     }
 
@@ -1355,11 +1344,7 @@ impl Evaluator {
         Ok(())
     }
 
-    fn parse_arg_group(
-        &mut self,
-        group: &ArgGroup,
-        raw: &[String],
-    ) -> Result<Map, EvalError> {
+    fn parse_arg_group(&mut self, group: &ArgGroup, raw: &[String]) -> Result<Map, EvalError> {
         let mut values = Map::new();
         let mut positional = Vec::new();
         let mut child = None;
@@ -1878,8 +1863,7 @@ impl Evaluator {
                 }
                 if method.argument(index) == crate::methods::Argument::Function {
                     let actual = match &value {
-                        Value::Function(function) => function.params.len(),
-                        Value::Closure(closure) => closure.function.params.len(),
+                        Value::Function(function) => function.function.params.len(),
                         _ => unreachable!("callback kind was validated"),
                     };
                     let expected = if matches!(receiver, Value::Map(_)) { 2 } else { 1 };
@@ -2605,7 +2589,7 @@ impl Evaluator {
                 Ok(Value::Map(base))
             }
             _ => {
-                if let Some(value) = self.env.get(name) {
+                if let Some(value) = self.env.lookup(name)? {
                     let values = args
                         .iter()
                         .map(|arg| self.eval_expr(arg))
@@ -2784,9 +2768,7 @@ impl Evaluator {
 
         let cancellation = self.cancellation.child_token();
         let terminal = Arc::new(Mutex::new(None::<ParallelTerminal>));
-        let base_env = self.env.clone();
-        let function_depth = self.function_depth;
-        let remote_prefix = self.remote_prefix.clone();
+        let template = self.fork(cancellation.clone());
         let executor = self.executor.clone();
         let out = executor.pool.install(|| {
             slots
@@ -2795,14 +2777,7 @@ impl Evaluator {
                     if cancellation.is_cancelled() {
                         return None;
                     }
-                    let mut child = Evaluator {
-                        env: base_env.clone(),
-                        function_depth,
-                        remote_prefix: remote_prefix.clone(),
-                        executor: executor.clone(),
-                        cancellation: cancellation.clone(),
-                        cancellation_active: true,
-                    };
+                    let mut child = template.clone();
                     let result = catch_parallel_job(|| {
                         if is_binary {
                             child.apply_binary(
@@ -2875,9 +2850,7 @@ impl Evaluator {
         let callback = args[1].clone();
         let cancellation = self.cancellation.child_token();
         let terminal = Arc::new(Mutex::new(None::<ParallelTerminal>));
-        let base_env = self.env.clone();
-        let function_depth = self.function_depth;
-        let remote_prefix = self.remote_prefix.clone();
+        let template = self.fork(cancellation.clone());
         let executor = self.executor.clone();
         let decisions = executor.pool.install(|| {
             items
@@ -2886,14 +2859,7 @@ impl Evaluator {
                     if cancellation.is_cancelled() {
                         return None;
                     }
-                    let mut child = Evaluator {
-                        env: base_env.clone(),
-                        function_depth,
-                        remote_prefix: remote_prefix.clone(),
-                        executor: executor.clone(),
-                        cancellation: cancellation.clone(),
-                        cancellation_active: true,
-                    };
+                    let mut child = template.clone();
                     match catch_parallel_job(|| child.apply_unary(&callback, item.clone())) {
                         Ok(value) => Some((item, value.truthy())),
                         Err(EvalError::Cancelled) => None,
@@ -3039,7 +3005,7 @@ impl Evaluator {
                 _ => {
                     let value = self
                         .env
-                        .get(name)
+                        .lookup(name)?
                         .ok_or_else(|| RillError::new(format!("unknown function '{name}'")))?;
                     self.call_callable(value, vec![item])
                 }
@@ -3115,10 +3081,15 @@ impl Evaluator {
 
     fn call_callable(&mut self, value: Value, args: Vec<Value>) -> Result<Value, EvalError> {
         match value {
-            Value::Function(function) => self.call_function_values(&function, args),
-            Value::Closure(closure) => {
-                let current = std::mem::replace(&mut self.env, Env { scopes: closure.captured });
-                let result = self.call_function_values(&closure.function, args);
+            Value::Function(function) => {
+                // Run the body in the scope chain the function closed over; a
+                // frame for its parameters is pushed on top.  The parallel
+                // write floor carries over so a worker cannot smuggle a write
+                // through a function defined outside the parallel body.
+                let frozen = self.env.frozen.min(function.captured.len());
+                let callee_env = Env { scopes: function.captured.clone(), frozen };
+                let current = std::mem::replace(&mut self.env, callee_env);
+                let result = self.call_function_values(&function.function, args);
                 self.env = current;
                 result
             }
@@ -3145,14 +3116,14 @@ impl Evaluator {
                         }),
                         args: vec![Expr::Ident("_arg".to_string())],
                     };
-                    return Ok(Value::Closure(Closure {
-                        function: Function {
+                    return Ok(self.make_function(
+                        Function {
                             params: vec![Param { name: "_arg".to_string(), type_name: None }],
                             return_type: None,
                             body: vec![Stmt::Return(Some(call))],
                         },
-                        captured: self.env.scopes.clone(),
-                    }));
+                        None,
+                    ));
                 }
                 return Err(RillError::new(format!("{module} has no function '{name}'")).into());
             }
@@ -3351,7 +3322,10 @@ impl Evaluator {
                 CommandArg::Word(value) => {
                     let interpolated = self.interpolate_string(value)?.as_string_lossy();
                     // Expand a leading tilde prefix from the source text.
-                    out.push(expand_tilde_prefix(&interpolated));
+                    out.push(expand_tilde_prefix(
+                        &interpolated,
+                        self.environment.get("HOME").map(String::as_str),
+                    ));
                 }
                 CommandArg::String(value) => {
                     out.push(self.interpolate_string(value)?.as_string_lossy());
@@ -3392,7 +3366,10 @@ impl Evaluator {
                                 // Expand leading tilde only when it is the very first
                                 // fragment of a Parts arg.
                                 if is_first {
-                                    arg.push_str(&expand_tilde_prefix(&s));
+                                    arg.push_str(&expand_tilde_prefix(
+                                        &s,
+                                        self.environment.get("HOME").map(String::as_str),
+                                    ));
                                 } else {
                                     arg.push_str(&s);
                                 }
@@ -3696,7 +3673,7 @@ fn method_kind(value: &Value) -> crate::methods::Kind {
         Value::ProcessHandle(_) => Kind::ProcessHandle,
         Value::Int(_) => Kind::Int,
         Value::Bool(_) => Kind::Bool,
-        Value::Function(_) | Value::Closure(_) => Kind::Function,
+        Value::Function(_) => Kind::Function,
         Value::Option(_) => Kind::Option,
         Value::Result(_) => Kind::Result,
         _ => Kind::Other,
@@ -3763,6 +3740,93 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
         return Err(RillError::new("floating-point overflow"));
     }
     Ok(Value::Float(value))
+}
+
+/// Apply `current <op>= rhs` in place.  List and string appends extend the
+/// existing value instead of rebuilding it, so repeated appends stay linear.
+fn apply_compound(current: &mut Value, rhs: Value, op: AssignOp) -> Result<(), RillError> {
+    let bin_op = match op {
+        AssignOp::Assign => {
+            *current = rhs;
+            return Ok(());
+        }
+        AssignOp::Add => BinaryOp::Add,
+        AssignOp::Sub => BinaryOp::Sub,
+        AssignOp::Mul => BinaryOp::Mul,
+        AssignOp::Div => BinaryOp::Div,
+    };
+    if bin_op == BinaryOp::Add {
+        match current {
+            Value::List(items) if matches!(rhs, Value::List(_)) => {
+                let Value::List(more) = rhs else { unreachable!() };
+                items.extend(more);
+                return Ok(());
+            }
+            Value::Str(text) if matches!(rhs, Value::Str(_)) => {
+                let Value::Str(more) = rhs else { unreachable!() };
+                text.push_str(&more);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    *current = numeric_binary(current.clone(), rhs, bin_op)?;
+    Ok(())
+}
+
+fn index_assign_in_place(
+    collection: &mut Value,
+    idx_val: Value,
+    literal_index: Option<i64>,
+    op: AssignOp,
+    rhs: Value,
+) -> Result<(), RillError> {
+    match collection {
+        Value::Map(map) => {
+            let key = match &idx_val {
+                Value::Str(s) => s.clone(),
+                Value::Int(i) => i.to_string(),
+                other => {
+                    return Err(RillError::new(format!(
+                        "map key must be Str or Int, got {}",
+                        other.type_name()
+                    )))
+                }
+            };
+            if matches!(op, AssignOp::Assign) {
+                map.insert(key, rhs);
+                return Ok(());
+            }
+            let slot = map.entry(key).or_insert(Value::Int(0));
+            apply_compound(slot, rhs, op)
+        }
+        Value::List(items) => {
+            let Value::Int(idx) = idx_val else {
+                return Err(RillError::new(format!(
+                    "list index must be Int, got {}",
+                    idx_val.type_name()
+                )));
+            };
+            let len = items.len() as i64;
+            let position = if idx < 0 { len + idx } else { idx };
+            if position < 0 || position >= len {
+                return Err(RillError::new(format!("index {idx} out of bounds (len {len})")));
+            }
+            apply_compound(&mut items[position as usize], rhs, op)
+        }
+        Value::Tuple(items) => {
+            let Some(literal_index) = literal_index else {
+                return Err(RillError::new("tuple assignment index must be an integer literal"));
+            };
+            let Value::Int(index_value) = idx_val else {
+                return Err(RillError::new("tuple index must be Int"));
+            };
+            debug_assert_eq!(literal_index, index_value);
+            let position = normalize_runtime_index(index_value, items.len(), "tuple")?;
+            apply_compound(&mut items[position], rhs, op)
+        }
+        other => Err(RillError::new(format!("cannot index-assign into {}", other.type_name()))),
+    }
 }
 
 fn check_numeric_operands(left: &Value, right: &Value, op: BinaryOp) -> Result<(), RillError> {
@@ -3930,11 +3994,11 @@ fn simple_glob_with_lookup(
         .collect()
 }
 
-fn expand_tilde_prefix(s: &str) -> String {
+fn expand_tilde_prefix(s: &str, home: Option<&str>) -> String {
     if s == "~" || s.starts_with("~/") {
-        if let Some(home) = crate::pathresolver::home_dir() {
+        if let Some(home) = home.filter(|home| !home.is_empty()) {
             let suffix = &s[1..];
-            return format!("{}{}", home.display(), suffix);
+            return format!("{home}{suffix}");
         }
     } else if let Some(rest) = s.strip_prefix('~') {
         let (user, suffix) = rest.split_once('/').unwrap_or((rest, ""));

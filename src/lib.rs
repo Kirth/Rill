@@ -384,12 +384,33 @@ pub fn run_source_with_input(
     run_compiled(&program, args, input)
 }
 
+/// Run a source string with an explicit process environment instead of the
+/// host's.  Useful for embedding and for deterministic tests.
+pub fn run_source_with_environment(
+    source: &str,
+    args: Vec<String>,
+    input: Option<String>,
+    environment: BTreeMap<String, String>,
+) -> Result<types::Value, RillError> {
+    let program = compile(source)?;
+    run_compiled_with_environment(&program, args, input, environment)
+}
+
 pub fn run_compiled(
     program: &CompiledProgram,
     args: Vec<String>,
     input: Option<String>,
 ) -> Result<types::Value, RillError> {
-    let mut evaluator = eval::Evaluator::with_input(args, input);
+    run_compiled_with_environment(program, args, input, eval::process_environment())
+}
+
+pub fn run_compiled_with_environment(
+    program: &CompiledProgram,
+    args: Vec<String>,
+    input: Option<String>,
+    environment: BTreeMap<String, String>,
+) -> Result<types::Value, RillError> {
+    let mut evaluator = eval::Evaluator::with_environment(args, input, environment);
     for module in &program.modules {
         evaluator
             .eval_module_program(&module.program)

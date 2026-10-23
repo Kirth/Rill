@@ -6,7 +6,7 @@ pub type Map = indexmap::IndexMap<String, Value>;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::Utf8Error;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +34,52 @@ pub struct ProcessResult {
     pub err: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// One name in a scope.
+///
+/// `let` bindings hold their value directly, so a closure that captured the
+/// scope keeps seeing the value it was created with.  `var` bindings are
+/// shared cells: every closure or function that captured the scope sees (and
+/// may perform) later assignments.  `fn` declarations are hoisted: the slot is
+/// reserved when the enclosing block starts and filled when the declaration
+/// runs, so functions can refer to each other regardless of order.
+#[derive(Debug, Clone)]
+pub enum Slot {
+    Value(Value),
+    Cell(Arc<RwLock<Value>>),
+    Hoisted(Arc<OnceLock<Arc<FunctionValue>>>),
+}
+
+#[derive(Debug, Clone)]
 pub struct Binding {
-    pub value: Value,
-    pub mutable: bool,
+    pub slot: Slot,
+}
+
+impl Binding {
+    pub fn value(value: Value) -> Self {
+        Self { slot: Slot::Value(value) }
+    }
+
+    pub fn cell(value: Value) -> Self {
+        Self { slot: Slot::Cell(Arc::new(RwLock::new(value))) }
+    }
+}
+
+/// One lexical scope: the names declared in a block, function body, or module.
+pub type Scope = BTreeMap<String, Binding>;
+
+/// A function or closure value together with the scope chain it closed over.
+#[derive(Debug)]
+pub struct FunctionValue {
+    pub function: Arc<crate::ast::Function>,
+    pub captured: Vec<Arc<Scope>>,
+    pub name: Option<String>,
+}
+
+impl PartialEq for FunctionValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && (Arc::ptr_eq(&self.function, &other.function) || self.function == other.function)
+    }
 }
 
 pub struct StreamHandle {
@@ -76,12 +118,6 @@ impl fmt::Debug for StreamHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StreamHandle").finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Closure {
-    pub function: crate::ast::Function,
-    pub captured: Vec<Arc<BTreeMap<String, Binding>>>,
 }
 
 impl ProcessResult {
@@ -126,8 +162,7 @@ pub enum Value {
     ProcessResult(ProcessResult),
     ProcessHandle(crate::runtime::ProcessHandle),
     Stream(StreamHandle),
-    Function(crate::ast::Function),
-    Closure(Closure),
+    Function(Arc<FunctionValue>),
 }
 
 impl Value {
@@ -152,7 +187,7 @@ impl Value {
             Value::Result(Err(_)) => false,
             Value::ProcessResult(v) => v.ok(),
             Value::ProcessHandle(_) | Value::Stream(_) => true,
-            Value::Function(_) | Value::Closure(_) => true,
+            Value::Function(_) => true,
         }
     }
 
@@ -176,7 +211,7 @@ impl Value {
             Value::ProcessResult(_) => "ProcessResult",
             Value::ProcessHandle(_) => "ProcessHandle",
             Value::Stream(_) => "Stream",
-            Value::Function(_) | Value::Closure(_) => "Function",
+            Value::Function(_) => "Function",
         }
     }
 
@@ -202,7 +237,7 @@ impl Value {
             Value::ProcessResult(v) => v.stdout_text_lossy().into_owned(),
             Value::ProcessHandle(_) => "<process handle>".to_string(),
             Value::Stream(_) => "<stream>".to_string(),
-            Value::Function(_) | Value::Closure(_) => "<function>".to_string(),
+            Value::Function(_) => "<function>".to_string(),
         }
     }
 }
@@ -257,7 +292,7 @@ impl fmt::Display for Value {
             Value::ProcessResult(v) => write!(f, "{}", v.stdout_text_lossy()),
             Value::ProcessHandle(_) => write!(f, "<process handle>"),
             Value::Stream(_) => write!(f, "<stream>"),
-            Value::Function(_) | Value::Closure(_) => write!(f, "<function>"),
+            Value::Function(_) => write!(f, "<function>"),
         }
     }
 }
