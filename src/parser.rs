@@ -8,11 +8,7 @@ enum TokenKind {
     Number(String),
     Str(String),
     Regex(String),
-    Substitution {
-        pattern: String,
-        replacement: String,
-        all: bool,
-    },
+    Substitution { pattern: String, replacement: String, all: bool },
     Word(String),
     CommandText(String),
     CommandString(String),
@@ -102,10 +98,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
     if source.starts_with("#!") {
         for (_, ch) in chars.by_ref() {
             if ch == '\n' {
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
-                    span: Span::new(0, 1),
-                });
+                tokens.push(Token { kind: TokenKind::Newline, span: Span::new(0, 1) });
                 break;
             }
         }
@@ -126,10 +119,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 }
                 ';' => {
                     command_mode = false;
-                    tokens.push(Token {
-                        kind: TokenKind::Semi,
-                        span: Span::new(start, start + 1),
-                    });
+                    tokens.push(Token { kind: TokenKind::Semi, span: Span::new(start, start + 1) });
                     continue;
                 }
                 '|' => {
@@ -140,26 +130,19 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     } else {
                         (TokenKind::Pipe, start + 1)
                     };
-                    tokens.push(Token {
-                        kind,
-                        span: Span::new(start, end),
-                    });
+                    tokens.push(Token { kind, span: Span::new(start, end) });
                     continue;
                 }
                 '}' => {
                     command_mode = false;
-                    tokens.push(Token {
-                        kind: TokenKind::RBrace,
-                        span: Span::new(start, start + 1),
-                    });
+                    tokens
+                        .push(Token { kind: TokenKind::RBrace, span: Span::new(start, start + 1) });
                     continue;
                 }
                 '{' => {
                     command_mode = false;
-                    tokens.push(Token {
-                        kind: TokenKind::LBrace,
-                        span: Span::new(start, start + 1),
-                    });
+                    tokens
+                        .push(Token { kind: TokenKind::LBrace, span: Span::new(start, start + 1) });
                     continue;
                 }
                 '#' => {
@@ -197,16 +180,12 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     // `${NAME}` or `${NAME:-default}` – balanced brace form.
                     if matches!(chars.peek(), Some((_, '{'))) {
                         chars.next(); // consume '{'
-                        let (name, default, end) =
-                            lex_braced_var(&mut chars, start)?;
+                        let (name, default, end) = lex_braced_var(&mut chars, start)?;
                         let kind = match default {
                             Some(d) => TokenKind::CommandVarDefault(name, d),
                             None => TokenKind::CommandVar(name),
                         };
-                        tokens.push(Token {
-                            kind,
-                            span: Span::new(start, end),
-                        });
+                        tokens.push(Token { kind, span: Span::new(start, end) });
                         continue;
                     }
                     // `$*name` — word-split splat form.
@@ -233,7 +212,11 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                         ));
                     }
                     tokens.push(Token {
-                        kind: if splat { TokenKind::CommandSplat(name) } else { TokenKind::CommandVar(name) },
+                        kind: if splat {
+                            TokenKind::CommandSplat(name)
+                        } else {
+                            TokenKind::CommandVar(name)
+                        },
                         span: Span::new(start, end),
                     });
                     continue;
@@ -256,10 +239,8 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                         text.push(next);
                         end = idx + next.len_utf8();
                     }
-                    tokens.push(Token {
-                        kind: command_text_kind(text),
-                        span: Span::new(start, end),
-                    });
+                    tokens
+                        .push(Token { kind: command_text_kind(text), span: Span::new(start, end) });
                     continue;
                 }
             }
@@ -269,10 +250,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
             ' ' | '\t' | '\r' => {}
             '\n' => {
                 at_line_start = true;
-                tokens.push(Token {
-                    kind: TokenKind::Newline,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind: TokenKind::Newline, span: Span::new(start, start + 1) });
             }
             '#' => {
                 while let Some((_, next)) = chars.peek().copied() {
@@ -284,10 +262,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
             }
             '"' => {
                 let (out, end) = lex_string_body(&mut chars, start)?;
-                tokens.push(Token {
-                    kind: TokenKind::Str(out),
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind: TokenKind::Str(out), span: Span::new(start, end) });
                 at_line_start = false;
             }
             '/' => {
@@ -300,10 +275,8 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     }
                 } else if regex_literal_context(tokens.last().map(|t| &t.kind)) {
                     let (body, end) = lex_slash_body(&mut chars, start)?;
-                    tokens.push(Token {
-                        kind: TokenKind::Regex(body),
-                        span: Span::new(start, end),
-                    });
+                    tokens
+                        .push(Token { kind: TokenKind::Regex(body), span: Span::new(start, end) });
                     at_line_start = false;
                 } else if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
@@ -321,10 +294,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     let decimal_point = next == '.'
                         && !text.contains('.')
                         && text.chars().all(|ch| ch.is_ascii_digit())
-                        && chars
-                            .clone()
-                            .nth(1)
-                            .is_some_and(|(_, ch)| ch.is_ascii_digit());
+                        && chars.clone().nth(1).is_some_and(|(_, ch)| ch.is_ascii_digit());
                     if next.is_ascii_alphanumeric() || decimal_point {
                         chars.next();
                         text.push(next);
@@ -333,10 +303,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                         break;
                     }
                 }
-                tokens.push(Token {
-                    kind: TokenKind::Number(text),
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind: TokenKind::Number(text), span: Span::new(start, end) });
                 at_line_start = false;
             }
             'a'..='z' | 'A'..='Z' | '_' => {
@@ -370,11 +337,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     let (pattern, replacement, all, subst_end) =
                         lex_substitution(&mut chars, start)?;
                     tokens.push(Token {
-                        kind: TokenKind::Substitution {
-                            pattern,
-                            replacement,
-                            all,
-                        },
+                        kind: TokenKind::Substitution { pattern, replacement, all },
                         span: Span::new(start, subst_end),
                     });
                     at_line_start = false;
@@ -413,10 +376,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                         _ => TokenKind::Ident(text),
                     }
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind, span: Span::new(start, end) });
                 if is_run {
                     command_mode = true;
                 }
@@ -432,25 +392,16 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Pipe
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '&' => {
                 if matches!(chars.peek(), Some((_, '&'))) {
                     chars.next();
                 } else {
-                    return Err(RillError::spanned(
-                        "unexpected '&'",
-                        Span::new(start, start + 1),
-                    ));
+                    return Err(RillError::spanned("unexpected '&'", Span::new(start, start + 1)));
                 }
-                tokens.push(Token {
-                    kind: TokenKind::AndAnd,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind: TokenKind::AndAnd, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '=' => {
@@ -466,10 +417,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Eq
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '!' => {
@@ -479,10 +427,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Bang
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '>' => {
@@ -492,10 +437,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Gt
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '<' => {
@@ -505,10 +447,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Lt
                 };
-                tokens.push(Token {
-                    kind,
-                    span: Span::new(start, start + 1),
-                });
+                tokens.push(Token { kind, span: Span::new(start, start + 1) });
                 at_line_start = false;
             }
             '+' => {
@@ -546,10 +485,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
             '.' => {
                 if chars.peek().map(|(_, c)| *c) == Some('.') {
                     let (end, _) = chars.next().unwrap();
-                    tokens.push(Token {
-                        kind: TokenKind::DotDot,
-                        span: Span::new(start, end + 1),
-                    });
+                    tokens.push(Token { kind: TokenKind::DotDot, span: Span::new(start, end + 1) });
                 } else {
                     push(&mut tokens, TokenKind::Dot, start);
                 }
@@ -575,18 +511,12 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
         }
     }
 
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: Span::new(source.len(), source.len()),
-    });
+    tokens.push(Token { kind: TokenKind::Eof, span: Span::new(source.len(), source.len()) });
     Ok(tokens)
 }
 
 fn push(tokens: &mut Vec<Token>, kind: TokenKind, start: usize) {
-    tokens.push(Token {
-        kind,
-        span: Span::new(start, start + 1),
-    });
+    tokens.push(Token { kind, span: Span::new(start, start + 1) });
 }
 
 fn lex_string_body<I>(
@@ -627,10 +557,7 @@ where
         }
     }
     if !closed {
-        return Err(RillError::spanned(
-            "unterminated string",
-            Span::new(start, end),
-        ));
+        return Err(RillError::spanned("unterminated string", Span::new(start, end)));
     }
     Ok((out, end))
 }
@@ -648,12 +575,7 @@ where
     let mut end = start + 2; // past '${'
     loop {
         match chars.next() {
-            None => {
-                return Err(RillError::spanned(
-                    "unclosed '${'",
-                    Span::new(start, end),
-                ))
-            }
+            None => return Err(RillError::spanned("unclosed '${'", Span::new(start, end))),
             Some((idx, '}')) => {
                 end = idx + 1;
                 return Ok((name, None, end));
@@ -688,12 +610,7 @@ where
     let mut end = outer_start;
     loop {
         match chars.next() {
-            None => {
-                return Err(RillError::spanned(
-                    "unclosed '${'",
-                    Span::new(outer_start, end),
-                ))
-            }
+            None => return Err(RillError::spanned("unclosed '${'", Span::new(outer_start, end))),
             Some((idx, '{')) => {
                 depth += 1;
                 end = idx + 1;
@@ -746,10 +663,7 @@ where
         }
     }
     if !closed {
-        return Err(RillError::spanned(
-            "unterminated regex literal",
-            Span::new(start, end),
-        ));
+        return Err(RillError::spanned("unterminated regex literal", Span::new(start, end)));
     }
     Ok((body, end))
 }
@@ -813,10 +727,7 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self {
-            tokens: VecDeque::from(tokens),
-            last_end: 0,
-        }
+        Self { tokens: VecDeque::from(tokens), last_end: 0 }
     }
 
     fn parse_program(&mut self) -> Result<Program, RillError> {
@@ -841,9 +752,7 @@ impl Parser {
             TokenKind::With => self.parse_with_env(),
             TokenKind::On => self.parse_on(),
             TokenKind::Fn => self.parse_fn(),
-            TokenKind::For => Ok(Stmt::Expr(
-                self.parse_for_expr(ForMode::Sequential, None)?,
-            )),
+            TokenKind::For => Ok(Stmt::Expr(self.parse_for_expr(ForMode::Sequential, None)?)),
             TokenKind::Emit => {
                 self.next();
                 Ok(Stmt::Emit(self.parse_expr(0)?))
@@ -887,10 +796,7 @@ impl Parser {
         self.expect(TokenKind::Input)?;
         let kind = self.expect_ident()?;
         if kind != "lines" {
-            return Err(RillError::spanned(
-                "expected 'lines' after input",
-                self.peek().span,
-            ));
+            return Err(RillError::spanned("expected 'lines' after input", self.peek().span));
         }
         Ok(Stmt::InputLines)
     }
@@ -940,11 +846,8 @@ impl Parser {
             }
             self.expect(TokenKind::Colon)?;
             let type_name = self.parse_type_name()?;
-            let default = if self.consume(TokenKind::Eq) {
-                Some(self.parse_expr(0)?)
-            } else {
-                None
-            };
+            let default =
+                if self.consume(TokenKind::Eq) { Some(self.parse_expr(0)?) } else { None };
             let short = if self.at_ident("short") {
                 self.next();
                 self.expect(TokenKind::Eq)?;
@@ -959,21 +862,11 @@ impl Parser {
             } else {
                 None
             };
-            fields.push(ArgDecl {
-                name,
-                type_name,
-                default,
-                short,
-                description,
-            });
+            fields.push(ArgDecl { name, type_name, default, short, description });
             self.skip_separators();
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(ArgGroup {
-            name: group_name,
-            fields,
-            subcommands,
-        })
+        Ok(ArgGroup { name: group_name, fields, subcommands })
     }
 
     fn at_ident(&self, expected: &str) -> bool {
@@ -992,18 +885,21 @@ impl Parser {
 
     fn is_env_assignment(&self) -> bool {
         matches!(
-            (
-                self.peek_n_kind(1),
-                self.peek_n_kind(2),
-                self.peek_n_kind(3)
-            ),
+            (self.peek_n_kind(1), self.peek_n_kind(2), self.peek_n_kind(3)),
             (TokenKind::Dot, TokenKind::Ident(_), TokenKind::Eq)
         )
     }
 
     fn is_assignment(&self) -> bool {
         let next = self.peek_n_kind(1);
-        if matches!(next, TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq) {
+        if matches!(
+            next,
+            TokenKind::Eq
+                | TokenKind::PlusEq
+                | TokenKind::MinusEq
+                | TokenKind::StarEq
+                | TokenKind::SlashEq
+        ) {
             return true;
         }
         // index-assignment: ident[...] op= value — scan forward past matching bracket
@@ -1017,7 +913,11 @@ impl Parser {
                         if depth == 0 {
                             return matches!(
                                 self.peek_n_kind(i + 1),
-                                TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq
+                                TokenKind::Eq
+                                    | TokenKind::PlusEq
+                                    | TokenKind::MinusEq
+                                    | TokenKind::StarEq
+                                    | TokenKind::SlashEq
                             );
                         }
                         depth -= 1;
@@ -1039,10 +939,12 @@ impl Parser {
             TokenKind::MinusEq => AssignOp::Sub,
             TokenKind::StarEq => AssignOp::Mul,
             TokenKind::SlashEq => AssignOp::Div,
-            other => return Err(RillError::spanned(
-                format!("expected assignment operator, got {other:?}"),
-                token.span,
-            )),
+            other => {
+                return Err(RillError::spanned(
+                    format!("expected assignment operator, got {other:?}"),
+                    token.span,
+                ))
+            }
         })
     }
 
@@ -1055,7 +957,12 @@ impl Parser {
             let op = self.parse_assign_op()?;
             self.skip_newlines();
             let expr = self.parse_expr(0)?;
-            return Ok(Stmt::IndexAssign { name, index: Box::new(index), op, expr: Box::new(expr) });
+            return Ok(Stmt::IndexAssign {
+                name,
+                index: Box::new(index),
+                op,
+                expr: Box::new(expr),
+            });
         }
         let op = self.parse_assign_op()?;
         self.skip_newlines();
@@ -1069,20 +976,14 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(TokenKind::Eq)?;
         self.skip_newlines();
-        Ok(Stmt::AssignEnv {
-            name,
-            expr: self.parse_expr(0)?,
-        })
+        Ok(Stmt::AssignEnv { name, expr: self.parse_expr(0)? })
     }
 
     fn parse_with_env(&mut self) -> Result<Stmt, RillError> {
         self.expect(TokenKind::With)?;
         let target = self.expect_ident()?;
         if target != "env" {
-            return Err(RillError::spanned(
-                "with currently supports only env",
-                self.peek().span,
-            ));
+            return Err(RillError::spanned("with currently supports only env", self.peek().span));
         }
         self.expect(TokenKind::LBrace)?;
         self.skip_separators();
@@ -1102,20 +1003,12 @@ impl Parser {
     fn parse_let(&mut self, mutable: bool) -> Result<Stmt, RillError> {
         self.next(); // consume let or var
         let pattern = self.parse_binding_pattern()?;
-        let type_name = if self.consume(TokenKind::Colon) {
-            Some(self.parse_type_name()?)
-        } else {
-            None
-        };
+        let type_name =
+            if self.consume(TokenKind::Colon) { Some(self.parse_type_name()?) } else { None };
         self.expect(TokenKind::Eq)?;
         self.skip_newlines();
         let expr = self.parse_expr(0)?;
-        Ok(Stmt::Let {
-            pattern,
-            type_name,
-            expr,
-            mutable,
-        })
+        Ok(Stmt::Let { pattern, type_name, expr, mutable })
     }
 
     fn parse_binding_pattern(&mut self) -> Result<LetPattern, RillError> {
@@ -1211,14 +1104,7 @@ impl Parser {
             None
         };
         let body = self.parse_block()?;
-        Ok(Stmt::Fn {
-            name,
-            function: Function {
-                params,
-                return_type,
-                body,
-            },
-        })
+        Ok(Stmt::Fn { name, function: Function { params, return_type, body } })
     }
 
     fn parse_for_expr(
@@ -1243,13 +1129,7 @@ impl Parser {
             ));
         };
         let body = self.parse_block()?;
-        Ok(Expr::For {
-            mode,
-            workers,
-            pattern,
-            iter: Box::new(iter),
-            body,
-        })
+        Ok(Expr::For { mode, workers, pattern, iter: Box::new(iter), body })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, RillError> {
@@ -1271,12 +1151,7 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(Stmt::If {
-            cond,
-            pattern,
-            then_body,
-            else_body,
-        })
+        Ok(Stmt::If { cond, pattern, then_body, else_body })
     }
 
     fn parse_on(&mut self) -> Result<Stmt, RillError> {
@@ -1303,7 +1178,10 @@ impl Parser {
         let mut left = self.parse_prefix()?;
         loop {
             if self.at(TokenKind::Newline)
-                && matches!(self.peek_n_kind(1), TokenKind::Pipe | TokenKind::ValuePipe | TokenKind::Dot)
+                && matches!(
+                    self.peek_n_kind(1),
+                    TokenKind::Pipe | TokenKind::ValuePipe | TokenKind::Dot
+                )
             {
                 self.next();
             }
@@ -1319,10 +1197,7 @@ impl Parser {
 
             if self.consume(TokenKind::Dot) {
                 let name = self.expect_ident()?;
-                left = Expr::Field {
-                    base: Box::new(left),
-                    name,
-                };
+                left = Expr::Field { base: Box::new(left), name };
                 continue;
             }
 
@@ -1341,10 +1216,7 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen)?;
-                left = Expr::Call {
-                    callee: Box::new(left),
-                    args,
-                };
+                left = Expr::Call { callee: Box::new(left), args };
                 continue;
             }
 
@@ -1365,16 +1237,9 @@ impl Parser {
                 let next = self.next();
                 match next.kind {
                     TokenKind::Regex(pattern) => {
-                        left = Expr::RegexMatch {
-                            value: Box::new(left),
-                            pattern,
-                        };
+                        left = Expr::RegexMatch { value: Box::new(left), pattern };
                     }
-                    TokenKind::Substitution {
-                        pattern,
-                        replacement,
-                        all,
-                    } => {
+                    TokenKind::Substitution { pattern, replacement, all } => {
                         left = Expr::RegexSubstitution {
                             value: Box::new(left),
                             pattern,
@@ -1397,31 +1262,21 @@ impl Parser {
             if op == ParsedOp::Index {
                 let index = self.parse_expr(0)?;
                 self.expect(TokenKind::RBracket)?;
-                left = Expr::Index {
-                    base: Box::new(left),
-                    index: Box::new(index),
-                };
+                left = Expr::Index { base: Box::new(left), index: Box::new(index) };
                 continue;
             }
             let right = self.parse_expr(rbp)?;
             left = match op {
-                ParsedOp::Pipe(kind) => Expr::Pipe {
-                    kind,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                ParsedOp::Binary(op) => Expr::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
+                ParsedOp::Pipe(kind) => {
+                    Expr::Pipe { kind, left: Box::new(left), right: Box::new(right) }
+                }
+                ParsedOp::Binary(op) => {
+                    Expr::Binary { op, left: Box::new(left), right: Box::new(right) }
+                }
                 ParsedOp::Match | ParsedOp::Index => unreachable!(),
             };
         }
-        Ok(Expr::Located {
-            expr: Box::new(left),
-            span: Span::new(start, self.last_end),
-        })
+        Ok(Expr::Located { expr: Box::new(left), span: Span::new(start, self.last_end) })
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, RillError> {
@@ -1437,10 +1292,7 @@ impl Parser {
             TokenKind::Null => Ok(Expr::Literal(Literal::Null)),
             TokenKind::Bang => {
                 let operand = self.parse_expr(13)?;
-                Ok(Expr::Unary {
-                    op: UnaryOp::Not,
-                    operand: Box::new(operand),
-                })
+                Ok(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand) })
             }
             TokenKind::Minus => {
                 let operand = self.parse_expr(13)?;
@@ -1452,17 +1304,10 @@ impl Parser {
             }
             TokenKind::Ident(ref name) if name == "not" => {
                 let operand = self.parse_expr(13)?;
-                Ok(Expr::Unary {
-                    op: UnaryOp::Not,
-                    operand: Box::new(operand),
-                })
+                Ok(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand) })
             }
             TokenKind::Ident(ref name) if name == "parallel" || name == "race" => {
-                let mode = if name == "parallel" {
-                    ForMode::Parallel
-                } else {
-                    ForMode::Race
-                };
+                let mode = if name == "parallel" { ForMode::Parallel } else { ForMode::Race };
                 let workers = if self.consume(TokenKind::LParen) {
                     let workers = self.parse_expr(0)?;
                     self.expect(TokenKind::RParen)?;
@@ -1474,19 +1319,13 @@ impl Parser {
                     self.parse_for_expr(mode, workers)
                 } else {
                     let arg = self.parse_expr(6)?;
-                    Ok(Expr::Call {
-                        callee: Box::new(Expr::Ident(name.clone())),
-                        args: vec![arg],
-                    })
+                    Ok(Expr::Call { callee: Box::new(Expr::Ident(name.clone())), args: vec![arg] })
                 }
             }
             TokenKind::Ident(name) => {
                 if self.starts_bare_call() {
                     let arg = self.parse_expr(6)?;
-                    Ok(Expr::Call {
-                        callee: Box::new(Expr::Ident(name)),
-                        args: vec![arg],
-                    })
+                    Ok(Expr::Call { callee: Box::new(Expr::Ident(name)), args: vec![arg] })
                 } else {
                     Ok(Expr::Ident(name))
                 }
@@ -1549,10 +1388,7 @@ impl Parser {
             TokenKind::LParen => {
                 self.skip_newlines();
                 if self.at(TokenKind::RParen) {
-                    return Err(RillError::spanned(
-                        "empty tuples are not supported",
-                        token.span,
-                    ));
+                    return Err(RillError::spanned("empty tuples are not supported", token.span));
                 }
                 let first = self.parse_expr(0)?;
                 self.skip_newlines();
@@ -1623,10 +1459,9 @@ impl Parser {
                 self.expect(TokenKind::RBrace)?;
                 Ok(Expr::Map(pairs))
             }
-            other => Err(RillError::spanned(
-                format!("expected expression, found {other:?}"),
-                token.span,
-            )),
+            other => {
+                Err(RillError::spanned(format!("expected expression, found {other:?}"), token.span))
+            }
         }
     }
 
@@ -1636,10 +1471,7 @@ impl Parser {
                 self.next();
                 self.next();
                 let value = self.parse_expr(0)?;
-                return Ok(Expr::NamedArg {
-                    name,
-                    value: Box::new(value),
-                });
+                return Ok(Expr::NamedArg { name, value: Box::new(value) });
             }
         }
         self.parse_expr(0)
@@ -1653,14 +1485,18 @@ impl Parser {
         let mut arms = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             let token = self.next();
-            let pattern = match token.kind {
-                TokenKind::Regex(pattern) => MatchPattern::Regex(pattern),
-                TokenKind::Ident(name) if name == "_" => MatchPattern::Wildcard,
-                TokenKind::Ident(name) if matches!(name.as_str(), "ok" | "err" | "some" | "none") => {
-                    let binding = if name != "none" && self.peek_kind() == TokenKind::LParen {
-                        self.next(); // consume (
-                        let tok = self.next();
-                        let b = match tok.kind {
+            let pattern =
+                match token.kind {
+                    TokenKind::Regex(pattern) => MatchPattern::Regex(pattern),
+                    TokenKind::Ident(name) if name == "_" => MatchPattern::Wildcard,
+                    TokenKind::Ident(name)
+                        if matches!(name.as_str(), "ok" | "err" | "some" | "none") =>
+                    {
+                        let binding =
+                            if name != "none" && self.peek_kind() == TokenKind::LParen {
+                                self.next(); // consume (
+                                let tok = self.next();
+                                let b = match tok.kind {
                             TokenKind::Ident(n) if n == "_" => None,
                             TokenKind::Ident(n) => Some(n),
                             other => return Err(RillError::spanned(
@@ -1668,26 +1504,26 @@ impl Parser {
                                 tok.span,
                             )),
                         };
-                        self.expect(TokenKind::RParen)?;
-                        b
-                    } else {
-                        None
-                    };
-                    match name.as_str() {
-                        "ok"   => MatchPattern::Ok(binding),
-                        "err"  => MatchPattern::Err(binding),
-                        "some" => MatchPattern::Some(binding),
-                        "none" => MatchPattern::None,
-                        _      => unreachable!(),
+                                self.expect(TokenKind::RParen)?;
+                                b
+                            } else {
+                                None
+                            };
+                        match name.as_str() {
+                            "ok" => MatchPattern::Ok(binding),
+                            "err" => MatchPattern::Err(binding),
+                            "some" => MatchPattern::Some(binding),
+                            "none" => MatchPattern::None,
+                            _ => unreachable!(),
+                        }
                     }
-                }
-                other => {
-                    return Err(RillError::spanned(
-                        format!("expected regex pattern or _ in match arm, found {other:?}"),
-                        token.span,
-                    ))
-                }
-            };
+                    other => {
+                        return Err(RillError::spanned(
+                            format!("expected regex pattern or _ in match arm, found {other:?}"),
+                            token.span,
+                        ))
+                    }
+                };
             self.expect(TokenKind::FatArrow)?;
             let expr = self.parse_expr(0)?;
             arms.push(MatchArm { pattern, expr });
@@ -1695,10 +1531,7 @@ impl Parser {
             self.skip_separators();
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Expr::Match {
-            value: Box::new(value),
-            arms,
-        })
+        Ok(Expr::Match { value: Box::new(value), arms })
     }
 
     fn parse_command(&mut self, span: Span) -> Result<Expr, RillError> {
@@ -1777,13 +1610,7 @@ impl Parser {
         } else {
             Vec::new()
         };
-        Ok(Expr::Command(CommandExpr {
-            argv,
-            redirects,
-            config,
-            check_exit,
-            span,
-        }))
+        Ok(Expr::Command(CommandExpr { argv, redirects, config, check_exit, span }))
     }
 
     fn parse_command_redirect_target(
@@ -1897,10 +1724,9 @@ impl Parser {
         let token = self.next();
         match token.kind {
             TokenKind::Ident(name) => Ok(name),
-            other => Err(RillError::spanned(
-                format!("expected identifier, found {other:?}"),
-                token.span,
-            )),
+            other => {
+                Err(RillError::spanned(format!("expected identifier, found {other:?}"), token.span))
+            }
         }
     }
 
@@ -1999,12 +1825,7 @@ impl Parser {
                 self.expect(TokenKind::RBracket)?;
                 TypeName::Result(Box::new(inner), error)
             }
-            other => {
-                return Err(RillError::spanned(
-                    format!("unknown type '{other}'"),
-                    token.span,
-                ))
-            }
+            other => return Err(RillError::spanned(format!("unknown type '{other}'"), token.span)),
         };
         if self.consume(TokenKind::LBracket) {
             return Err(RillError::spanned(
@@ -2024,10 +1845,7 @@ impl Parser {
     }
 
     fn peek_n_kind(&self, n: usize) -> TokenKind {
-        self.tokens
-            .get(n)
-            .map(|token| token.kind.clone())
-            .unwrap_or(TokenKind::Eof)
+        self.tokens.get(n).map(|token| token.kind.clone()).unwrap_or(TokenKind::Eof)
     }
 
     fn peek(&self) -> &Token {
@@ -2035,10 +1853,7 @@ impl Parser {
     }
 
     fn next(&mut self) -> Token {
-        let token = self
-            .tokens
-            .pop_front()
-            .expect("parser always has EOF token");
+        let token = self.tokens.pop_front().expect("parser always has EOF token");
         self.last_end = token.span.end;
         token
     }
@@ -2069,9 +1884,7 @@ fn parse_number(text: &str) -> Result<Literal, RillError> {
             if !nanos.is_finite() || nanos < 0.0 || nanos > u64::MAX as f64 {
                 return Err(RillError::new(format!("invalid duration literal '{text}'")));
             }
-            return Ok(Literal::Duration(std::time::Duration::from_nanos(
-                nanos as u64,
-            )));
+            return Ok(Literal::Duration(std::time::Duration::from_nanos(nanos as u64)));
         }
     }
     for (suffix, multiplier) in [
@@ -2094,13 +1907,15 @@ fn parse_number(text: &str) -> Result<Literal, RillError> {
         }
     }
     if text.contains('.') {
-        Ok(Literal::Float(text.parse::<f64>().map_err(|_| {
-            RillError::new(format!("invalid float literal '{text}'"))
-        })?))
+        Ok(Literal::Float(
+            text.parse::<f64>()
+                .map_err(|_| RillError::new(format!("invalid float literal '{text}'")))?,
+        ))
     } else {
-        Ok(Literal::Int(text.parse::<i64>().map_err(|_| {
-            RillError::new(format!("invalid int literal '{text}'"))
-        })?))
+        Ok(Literal::Int(
+            text.parse::<i64>()
+                .map_err(|_| RillError::new(format!("invalid int literal '{text}'")))?,
+        ))
     }
 }
 

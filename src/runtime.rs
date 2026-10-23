@@ -84,11 +84,7 @@ struct ProcessState {
 impl Drop for ProcessState {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        let task = self
-            .result
-            .get_mut()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let task = self.result.get_mut().unwrap_or_else(|error| error.into_inner()).take();
         if let Some(task) = task {
             let _ = task.join();
         }
@@ -97,9 +93,7 @@ impl Drop for ProcessState {
 
 impl std::fmt::Debug for ProcessHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProcessHandle")
-            .finish_non_exhaustive()
+        formatter.debug_struct("ProcessHandle").finish_non_exhaustive()
     }
 }
 
@@ -140,10 +134,7 @@ impl ProcessRuntime for TokioProcessRuntime {
                     .with_kind(ErrorKind::Runtime)
             })?;
         Ok(ProcessHandle {
-            state: Arc::new(ProcessState {
-                result: Mutex::new(Some(result)),
-                cancellation,
-            }),
+            state: Arc::new(ProcessState { result: Mutex::new(Some(result)), cancellation }),
         })
     }
 
@@ -165,14 +156,9 @@ impl ProcessRuntime for TokioProcessRuntime {
     }
 
     fn parallel(&self, specs: Vec<ProcessSpec>) -> Result<Vec<ProcessResult>, RillError> {
-        let handles = specs
-            .into_iter()
-            .map(|spec| self.spawn(spec))
-            .collect::<Result<Vec<_>, _>>()?;
-        handles
-            .into_iter()
-            .map(|handle| self.await_process(handle))
-            .collect()
+        let handles =
+            specs.into_iter().map(|spec| self.spawn(spec)).collect::<Result<Vec<_>, _>>()?;
+        handles.into_iter().map(|handle| self.await_process(handle)).collect()
     }
 }
 
@@ -232,11 +218,7 @@ async fn run_command_async(
         }
     };
     if let Some(writer) = writer {
-        check_write(
-            writer
-                .await
-                .map_err(|err| RillError::new(err.to_string()))?,
-        )?;
+        check_write(writer.await.map_err(|err| RillError::new(err.to_string()))?)?;
     }
     let out = join_async_reader(stdout, "stdout").await?;
     let err = join_async_reader(stderr, "stderr").await?;
@@ -251,10 +233,9 @@ async fn join_async_reader(
     name: &str,
 ) -> Result<Vec<u8>, RillError> {
     match reader {
-        Some(reader) => reader
-            .await
-            .map_err(|_| io_error(format!("{name} reader panicked")))?
-            .map_err(io_error),
+        Some(reader) => {
+            reader.await.map_err(|_| io_error(format!("{name} reader panicked")))?.map_err(io_error)
+        }
         None => Ok(Vec::new()),
     }
 }
@@ -291,13 +272,7 @@ pub fn run_command(
     input: Option<Vec<u8>>,
     io: &CommandIo,
 ) -> Result<ProcessResult, RillError> {
-    run_graph(
-        &[argv.to_vec()],
-        std::slice::from_ref(io),
-        input,
-        &CancellationToken::new(),
-        false,
-    )
+    run_graph(&[argv.to_vec()], std::slice::from_ref(io), input, &CancellationToken::new(), false)
 }
 
 pub(crate) fn run_command_cancellable(
@@ -306,26 +281,14 @@ pub(crate) fn run_command_cancellable(
     io: &CommandIo,
     cancellation: &CancellationToken,
 ) -> Result<ProcessResult, RillError> {
-    run_graph(
-        &[argv.to_vec()],
-        std::slice::from_ref(io),
-        input,
-        cancellation,
-        true,
-    )
+    run_graph(&[argv.to_vec()], std::slice::from_ref(io), input, cancellation, true)
 }
 
 pub fn run_pipeline(
     argv: &[Vec<String>],
     io_configs: &[CommandIo],
 ) -> Result<ProcessResult, RillError> {
-    run_graph(
-        argv,
-        io_configs,
-        None,
-        &CancellationToken::new(),
-        false,
-    )
+    run_graph(argv, io_configs, None, &CancellationToken::new(), false)
 }
 
 pub(crate) fn run_pipeline_cancellable(
@@ -380,21 +343,13 @@ fn run_graph(
         .zip(configs)
         .enumerate()
         .map(|(i, (args, config))| {
-            prepare_command(
-                args,
-                config,
-                i > 0 || input.is_some(),
-                isolate_process_group,
-            )
+            prepare_command(args, config, i > 0 || input.is_some(), isolate_process_group)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut children = Children::default();
     for (index, command) in commands.iter_mut().enumerate() {
         if index > 0 {
-            let stdout = children.0[index - 1]
-                .stdout
-                .take()
-                .expect("pipeline stdout");
+            let stdout = children.0[index - 1].stdout.take().expect("pipeline stdout");
             command.stdin(Stdio::from(stdout));
         }
         children.0.push(command.spawn().map_err(process_error)?);
@@ -409,12 +364,7 @@ fn run_graph(
             let stderr = child.stderr.take();
             readers.push(scope.spawn(move || read_stream(stderr)));
         }
-        let stdout = children
-            .0
-            .last_mut()
-            .expect("nonempty pipeline")
-            .stdout
-            .take();
+        let stdout = children.0.last_mut().expect("nonempty pipeline").stdout.take();
         let output = scope.spawn(move || read_stream(stdout));
         let mut status = None;
         let mut wait_error = None;
@@ -456,31 +406,17 @@ fn run_graph(
             }
         }
         if let Some(writer) = writer {
-            check_write(
-                writer
-                    .join()
-                    .map_err(|_| io_error("stdin writer panicked"))?,
-            )?;
+            check_write(writer.join().map_err(|_| io_error("stdin writer panicked"))?)?;
         }
-        let out = output
-            .join()
-            .map_err(|_| io_error("stdout reader panicked"))??;
+        let out = output.join().map_err(|_| io_error("stdout reader panicked"))??;
         let mut err = Vec::new();
         for reader in readers {
-            err.extend(
-                reader
-                    .join()
-                    .map_err(|_| io_error("stderr reader panicked"))??,
-            );
+            err.extend(reader.join().map_err(|_| io_error("stderr reader panicked"))??);
         }
         if let Some(error) = wait_error {
             return Err(error);
         }
-        Ok(process_result(
-            status.expect("terminal process waited"),
-            out,
-            err,
-        ))
+        Ok(process_result(status.expect("terminal process waited"), out, err))
     })
 }
 
@@ -493,11 +429,7 @@ fn read_stream(stream: Option<impl Read>) -> Result<Vec<u8>, RillError> {
 }
 
 fn process_result(status: std::process::ExitStatus, out: Vec<u8>, err: Vec<u8>) -> ProcessResult {
-    ProcessResult {
-        status: status.code().unwrap_or(128),
-        out,
-        err,
-    }
+    ProcessResult { status: status.code().unwrap_or(128), out, err }
 }
 
 fn check_write(result: io::Result<()>) -> Result<(), RillError> {
@@ -531,9 +463,7 @@ fn validate_io(io: &CommandIo, piped: bool) -> Result<(), RillError> {
             || io.stdout_mode != StreamMode::Capture
             || io.stderr_mode != StreamMode::Capture)
     {
-        return Err(io_error(
-            "combined output conflicts with stdout/stderr settings",
-        ));
+        return Err(io_error("combined output conflicts with stdout/stderr settings"));
     }
     if (io.stdout_file.is_some() && io.stdout_mode != StreamMode::Capture)
         || (io.stderr_file.is_some() && io.stderr_mode != StreamMode::Capture)

@@ -25,11 +25,7 @@ enum Type {
     ProcessResult,
     ProcessHandle,
     Stream,
-    Function {
-        arity: Option<usize>,
-        params: Option<Vec<Type>>,
-        return_type: Box<Type>,
-    },
+    Function { arity: Option<usize>, params: Option<Vec<Type>>, return_type: Box<Type> },
 }
 
 impl Type {
@@ -107,11 +103,11 @@ impl Env {
         insert(&mut root, "env", Type::Map);
         insert(&mut root, "input", Type::Map);
         for builtin in crate::methods::BUILTINS {
-            insert(&mut root, builtin.name, Type::Function {
-                arity: None,
-                params: None,
-                return_type: Box::new(Type::Unknown),
-            });
+            insert(
+                &mut root,
+                builtin.name,
+                Type::Function { arity: None, params: None, return_type: Box::new(Type::Unknown) },
+            );
         }
         Self { scopes: vec![root] }
     }
@@ -139,17 +135,11 @@ impl Env {
     }
 
     fn get(&self, name: &str) -> Option<Type> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).map(|b| b.ty.clone()))
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.ty.clone()))
     }
 
     fn is_mutable(&self, name: &str) -> Option<bool> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).map(|b| b.mutable))
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.mutable))
     }
 }
 
@@ -172,13 +162,8 @@ pub(crate) fn check_module(
             env.set(name.clone(), ty.clone());
         }
     }
-    let mut checker = Checker {
-        env,
-        return_expected: None,
-        loop_depth: 0,
-        for_body_depth: 0,
-        function_depth: 0,
-    };
+    let mut checker =
+        Checker { env, return_expected: None, loop_depth: 0, for_body_depth: 0, function_depth: 0 };
     checker.check_program(program)
 }
 
@@ -191,7 +176,12 @@ struct Checker {
 }
 
 impl Checker {
-    fn bind_pattern(&mut self, pattern: &LetPattern, ty: Type, mutable: bool) -> Result<(), RillError> {
+    fn bind_pattern(
+        &mut self,
+        pattern: &LetPattern,
+        ty: Type,
+        mutable: bool,
+    ) -> Result<(), RillError> {
         match pattern {
             LetPattern::Ident(name) => self.env.bind(name.clone(), ty, mutable),
             LetPattern::List(names) => {
@@ -205,14 +195,17 @@ impl Checker {
                 let elements = match ty {
                     Type::Tuple(elements) => elements,
                     Type::Unknown => vec![Type::Unknown; names.len()],
-                    other => return Err(RillError::new(format!(
-                        "tuple destructuring requires a Tuple, got {other}"
-                    ))),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "tuple destructuring requires a Tuple, got {other}"
+                        )))
+                    }
                 };
                 if elements.len() != names.len() {
                     return Err(RillError::new(format!(
                         "tuple destructuring needs {} bindings, got {}",
-                        elements.len(), names.len()
+                        elements.len(),
+                        names.len()
                     )));
                 }
                 for (name, element) in names.iter().zip(elements) {
@@ -297,18 +290,15 @@ impl Checker {
                 }
                 Ok(Type::Null)
             }
-            Stmt::Let {
-                pattern,
-                type_name,
-                expr,
-                mutable,
-            } => {
+            Stmt::Let { pattern, type_name, expr, mutable } => {
                 let inferred = self.check_expr(expr)?;
                 let ty = if let Some(type_name) = type_name {
                     let annotated = type_from_name(type_name);
                     let span = expr.span();
-                    ensure_assignable(&annotated, &inferred)
-                        .map_err(|e| match span { Some(s) => e.with_span(s), None => e })?;
+                    ensure_assignable(&annotated, &inferred).map_err(|e| match span {
+                        Some(s) => e.with_span(s),
+                        None => e,
+                    })?;
                     annotated
                 } else {
                     inferred
@@ -394,11 +384,7 @@ impl Checker {
                 for param in &function.params {
                     self.env.set(
                         param.name.clone(),
-                        param
-                            .type_name
-                            .as_ref()
-                            .map(type_from_name)
-                            .unwrap_or(Type::Unknown),
+                        param.type_name.as_ref().map(type_from_name).unwrap_or(Type::Unknown),
                     );
                 }
                 let previous_return = self.return_expected.take();
@@ -412,8 +398,12 @@ impl Checker {
                         Stmt::Let { expr, .. } => expr.span(),
                         _ => None,
                     });
-                    ensure_function_return(&type_from_name(return_type), &body_ty)
-                        .map_err(|e| match last_span { Some(s) => e.with_span(s), None => e })?;
+                    ensure_function_return(&type_from_name(return_type), &body_ty).map_err(
+                        |e| match last_span {
+                            Some(s) => e.with_span(s),
+                            None => e,
+                        },
+                    )?;
                 }
                 self.return_expected = previous_return;
                 self.loop_depth = previous_loop;
@@ -436,11 +426,7 @@ impl Checker {
                                 .collect(),
                         ),
                         return_type: Box::new(
-                            function
-                                .return_type
-                                .as_ref()
-                                .map(type_from_name)
-                                .unwrap_or(body_ty),
+                            function.return_type.as_ref().map(type_from_name).unwrap_or(body_ty),
                         ),
                     },
                 );
@@ -455,12 +441,7 @@ impl Checker {
                 self.check_expr(expr)?;
                 Ok(Type::Null)
             }
-            Stmt::If {
-                cond,
-                pattern,
-                then_body,
-                else_body,
-            } => {
+            Stmt::If { cond, pattern, then_body, else_body } => {
                 let cond_ty = self.check_expr(cond)?;
                 if pattern.is_none() && !matches!(cond_ty, Type::Bool | Type::Unknown) {
                     return Err(RillError::new(format!(
@@ -496,9 +477,7 @@ impl Checker {
             Stmt::On { host, body } => {
                 let host_ty = self.check_expr(host)?;
                 if !matches!(host_ty, Type::Str | Type::List(_) | Type::Unknown) {
-                    return Err(RillError::new(format!(
-                        "on needs Str or List, got {host_ty}"
-                    )));
+                    return Err(RillError::new(format!("on needs Str or List, got {host_ty}")));
                 }
                 self.env.push();
                 self.check_stmts(body)?;
@@ -514,8 +493,10 @@ impl Checker {
                     None => (Type::Null, None),
                 };
                 if let Some(expected) = &self.return_expected {
-                    ensure_function_return(expected, &value_ty)
-                        .map_err(|e| match span { Some(s) => e.with_span(s), None => e })?;
+                    ensure_function_return(expected, &value_ty).map_err(|e| match span {
+                        Some(s) => e.with_span(s),
+                        None => e,
+                    })?;
                 }
                 Ok(value_ty)
             }
@@ -539,10 +520,7 @@ impl Checker {
     fn check_arg_group(&mut self, group: &ArgGroup) -> Result<(), RillError> {
         for field in &group.fields {
             if let Some(default) = &field.default {
-                ensure_assignable(
-                    &type_from_name(&field.type_name),
-                    &self.check_expr(default)?,
-                )?;
+                ensure_assignable(&type_from_name(&field.type_name), &self.check_expr(default)?)?;
             }
         }
         for child in &group.subcommands {
@@ -553,9 +531,9 @@ impl Checker {
 
     fn check_expr(&mut self, expr: &Expr) -> Result<Type, RillError> {
         match expr {
-            Expr::Located { expr, span } => self
-                .check_expr(expr)
-                .map_err(|error| error.with_span(*span)),
+            Expr::Located { expr, span } => {
+                self.check_expr(expr).map_err(|error| error.with_span(*span))
+            }
             Expr::Literal(value) => Ok(type_from_literal(value)),
             Expr::Ident(name) => {
                 // none/ok/some/err used bare (no call parens) should resolve to their
@@ -623,9 +601,7 @@ impl Checker {
             Expr::RegexSubstitution { value, pattern, .. } => {
                 let ty = self.check_expr(value)?;
                 if !matches!(ty, Type::Str | Type::Unknown) {
-                    return Err(RillError::new(format!(
-                        "regex substitution needs Str, got {ty}"
-                    )));
+                    return Err(RillError::new(format!("regex substitution needs Str, got {ty}")));
                 }
                 compile_regex(pattern)?;
                 Ok(Type::Str)
@@ -636,9 +612,7 @@ impl Checker {
                 Type::Option(value) => Ok(*value),
                 Type::Result(value, _) => Ok(*value),
                 Type::Unknown => Ok(Type::Unknown),
-                other => Err(RillError::new(format!(
-                    "? needs Option or Result, got {other}"
-                ))),
+                other => Err(RillError::new(format!("? needs Option or Result, got {other}"))),
             },
             Expr::For { mode, workers, pattern, iter, body } => {
                 if let Some(workers) = workers {
@@ -656,7 +630,8 @@ impl Checker {
                     )));
                 }
                 self.env.push();
-                let item_ty = if matches!(iter_ty, Type::Stream) { Type::Map } else { iter_ty.list_item() };
+                let item_ty =
+                    if matches!(iter_ty, Type::Stream) { Type::Map } else { iter_ty.list_item() };
                 self.bind_pattern(pattern, item_ty, true)?;
                 self.loop_depth += 1;
                 self.for_body_depth += 1;
@@ -665,9 +640,7 @@ impl Checker {
                 self.loop_depth -= 1;
                 self.env.pop();
                 Ok(match mode {
-                    ForMode::Sequential | ForMode::Parallel => {
-                        Type::List(Box::new(Type::Unknown))
-                    }
+                    ForMode::Sequential | ForMode::Parallel => Type::List(Box::new(Type::Unknown)),
                     ForMode::Race => Type::Unknown,
                 })
             }
@@ -727,10 +700,7 @@ impl Checker {
         }
         if let Expr::ImplicitField(name) = callee.unspanned() {
             return self.check_call(
-                &Expr::Field {
-                    base: Box::new(Expr::Implicit),
-                    name: name.clone(),
-                },
+                &Expr::Field { base: Box::new(Expr::Implicit), name: name.clone() },
                 args,
             );
         }
@@ -746,7 +716,9 @@ impl Checker {
                 {
                     // Stream.tail handled specially — not in METHODS table
                     if module == "Stream" && name == "tail" {
-                        for arg in args { self.check_expr(arg)?; }
+                        for arg in args {
+                            self.check_expr(arg)?;
+                        }
                         return Ok(Type::Stream);
                     }
                     if let Some(call) = crate::methods::namespace_method(module, name) {
@@ -775,14 +747,16 @@ impl Checker {
             return Err(RillError::new(format!(
                 "{module}.{name} needs {}{} args, got {}",
                 signature.min_args + 1,
-                if signature.min_args == signature.max_args { String::new() } else { format!(" to {}", signature.max_args + 1) },
+                if signature.min_args == signature.max_args {
+                    String::new()
+                } else {
+                    format!(" to {}", signature.max_args + 1)
+                },
                 args.len()
             )));
         }
-        let mut types = args
-            .iter()
-            .map(|arg| self.check_expr(arg))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut types =
+            args.iter().map(|arg| self.check_expr(arg)).collect::<Result<Vec<_>, _>>()?;
         match call.adapter {
             crate::methods::ReceiverAdapter::Direct => {}
             crate::methods::ReceiverAdapter::Path => {
@@ -830,8 +804,10 @@ impl Checker {
         let mut arg_types = Vec::new();
         for (index, arg) in args.iter().enumerate() {
             match (arg.unspanned(), method.argument(index)) {
-                (Expr::NamedArg { name: label, .. }, crate::methods::Argument::NamedBool(expected))
-                    if label == expected => {}
+                (
+                    Expr::NamedArg { name: label, .. },
+                    crate::methods::Argument::NamedBool(expected),
+                ) if label == expected => {}
                 (Expr::NamedArg { name: label, .. }, _) => {
                     return Err(RillError::new(format!("unknown .{name}() argument '{label}'")));
                 }
@@ -855,7 +831,12 @@ impl Checker {
             if !method.accepts_argument(kind, index, method_kind(&ty)) {
                 return Err(arg.span().map_or_else(
                     || RillError::new(format!("invalid .{name}() argument {}: {ty}", index + 1)),
-                    |s| RillError::spanned(format!("invalid .{name}() argument {}: {ty}", index + 1), s),
+                    |s| {
+                        RillError::spanned(
+                            format!("invalid .{name}() argument {}: {ty}", index + 1),
+                            s,
+                        )
+                    },
                 ));
             }
             arg_types.push(ty);
@@ -864,10 +845,7 @@ impl Checker {
             ensure_assignable(&Type::List(Box::new(Type::Str)), &receiver)?;
         }
         if name == "parallel" {
-            ensure_assignable(
-                &Type::List(Box::new(Type::List(Box::new(Type::Str)))),
-                &receiver,
-            )?;
+            ensure_assignable(&Type::List(Box::new(Type::List(Box::new(Type::Str)))), &receiver)?;
         }
         if method.arguments.contains(&crate::methods::Argument::Function) {
             self.check_collection_callback(name, &receiver, &arg_types[0])?;
@@ -886,12 +864,7 @@ impl Checker {
             }
             return Ok(Type::Unknown);
         }
-        let Type::Function {
-            arity,
-            return_type,
-            params,
-        } = callee_ty
-        else {
+        let Type::Function { arity, return_type, params } = callee_ty else {
             return Err(RillError::new(format!("{callee_ty} is not callable")));
         };
         if let Some(arity) = arity {
@@ -912,9 +885,7 @@ impl Checker {
             let mut arg_types = Vec::with_capacity(args.len());
             for (index, arg) in args.iter().enumerate() {
                 let ty = self.check_expr(arg)?;
-                if !builtin
-                    .argument(index)
-                    .accepts(crate::methods::Kind::Unknown, method_kind(&ty))
+                if !builtin.argument(index).accepts(crate::methods::Kind::Unknown, method_kind(&ty))
                 {
                     let expected = builtin.argument(index).expected_name().unwrap_or("value");
                     return Err(RillError::new(format!(
@@ -923,22 +894,13 @@ impl Checker {
                 }
                 arg_types.push(ty);
             }
-            return Ok(resolve_method_return(
-                builtin.returns,
-                &Type::Unknown,
-                &arg_types,
-            ));
+            return Ok(resolve_method_return(builtin.returns, &Type::Unknown, &arg_types));
         }
         let ty = self
             .env
             .get(name)
             .ok_or_else(|| RillError::new(format!("unknown function '{name}'")))?;
-        let Type::Function {
-            arity,
-            params,
-            return_type,
-        } = ty
-        else {
+        let Type::Function { arity, params, return_type } = ty else {
             return Err(RillError::new(format!("{name} is not callable")));
         };
         if let Some(arity) = arity {
@@ -955,9 +917,8 @@ impl Checker {
 
     fn check_match(&mut self, value: &Expr, arms: &[MatchArm]) -> Result<Type, RillError> {
         let value_ty = self.check_expr(value)?;
-        let is_structural = matches!(value_ty,
-            Type::Option(_) | Type::Result(_, _) | Type::Unknown
-        );
+        let is_structural =
+            matches!(value_ty, Type::Option(_) | Type::Result(_, _) | Type::Unknown);
         let is_str = matches!(value_ty, Type::Str | Type::Unknown);
         let mut result_ty = Type::Unknown;
         for arm in arms {
@@ -1005,10 +966,18 @@ impl Checker {
         if let Expr::Ident(module) = base.unspanned() {
             if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
                 if module == "Stream" && name == "tail" {
-                    return Ok(Type::Function { arity: None, params: None, return_type: Box::new(Type::Stream) });
+                    return Ok(Type::Function {
+                        arity: None,
+                        params: None,
+                        return_type: Box::new(Type::Stream),
+                    });
                 }
                 if crate::methods::namespace_method(module, name).is_some() {
-                    return Ok(Type::Function { arity: None, params: None, return_type: Box::new(Type::Unknown) });
+                    return Ok(Type::Function {
+                        arity: None,
+                        params: None,
+                        return_type: Box::new(Type::Unknown),
+                    });
                 }
                 return Err(RillError::new(format!("{module} has no function '{name}'")));
             }
@@ -1019,18 +988,14 @@ impl Checker {
                 "status" => Ok(Type::Int),
                 "out" | "err" => Ok(Type::Str),
                 "ok" => Ok(Type::Bool),
-                _ => Err(RillError::new(format!(
-                    "ProcessResult has no field '{name}'"
-                ))),
+                _ => Err(RillError::new(format!("ProcessResult has no field '{name}'"))),
             },
             Type::Map | Type::Unknown => Ok(Type::Unknown),
             ref ty
                 if crate::methods::lookup(name)
                     .is_some_and(|method| method.accepts(method_kind(ty))) =>
             {
-                Err(RillError::new(format!(
-                    ".{name} is a method; call .{name}(...)"
-                )))
+                Err(RillError::new(format!(".{name} is a method; call .{name}(...)")))
             }
             other => Err(RillError::new(format!("{other} has no field '{name}'"))),
         }
@@ -1110,9 +1075,7 @@ impl Checker {
                     expr if crate::methods::is_lines_consumer(expr) => {
                         Ok(Type::List(Box::new(Type::Str)))
                     }
-                    _ => Err(RillError::new(
-                        "right side of | must be a command or byte consumer",
-                    )),
+                    _ => Err(RillError::new("right side of | must be a command or byte consumer")),
                 }
             }
             PipeKind::Value => {
@@ -1125,11 +1088,7 @@ impl Checker {
     fn check_byte_pipe_left(&mut self, expr: &Expr) -> Result<(), RillError> {
         match expr.unspanned() {
             Expr::Command(command) => self.check_command(command),
-            Expr::Pipe {
-                kind: PipeKind::Byte,
-                left,
-                right,
-            } => {
+            Expr::Pipe { kind: PipeKind::Byte, left, right } => {
                 self.check_byte_pipe_left(left)?;
                 match right.unspanned() {
                     Expr::Command(command) => self.check_command(command),
@@ -1175,7 +1134,9 @@ impl Checker {
             Type::Map if matches!(name, "map" | "parallel_map") => 2,
             Type::List(_) => 1,
             Type::Unknown => {
-                if matches!(callback, Type::Function { arity: Some(2), .. }) && matches!(name, "map" | "parallel_map") {
+                if matches!(callback, Type::Function { arity: Some(2), .. })
+                    && matches!(name, "map" | "parallel_map")
+                {
                     return Ok(());
                 }
                 if matches!(name, "flat_map" | "find") {
@@ -1183,17 +1144,9 @@ impl Checker {
                 }
                 1
             }
-            _ => {
-                return Err(RillError::new(format!(
-                    "{name} cannot iterate {collection}"
-                )))
-            }
+            _ => return Err(RillError::new(format!("{name} cannot iterate {collection}"))),
         };
-        if let Type::Function {
-            arity: Some(actual),
-            ..
-        } = callback
-        {
+        if let Type::Function { arity: Some(actual), .. } = callback {
             if *actual != arity {
                 return Err(RillError::new(format!(
                     "{name} callback needs {arity} arg, got {actual}"
@@ -1207,26 +1160,18 @@ impl Checker {
     fn check_callback(&self, name: &str, callback_ty: Type) -> Result<(), RillError> {
         match callback_ty {
             Type::Function { arity: Some(1), .. } | Type::Unknown => Ok(()),
-            Type::Function {
-                arity: Some(arity), ..
-            } => Err(RillError::new(format!(
-                "{name} callback needs 1 arg, got {arity}"
-            ))),
+            Type::Function { arity: Some(arity), .. } => {
+                Err(RillError::new(format!("{name} callback needs 1 arg, got {arity}")))
+            }
             Type::Function { arity: None, .. } => Ok(()),
-            other => Err(RillError::new(format!(
-                "{name} callback must be callable, got {other}"
-            ))),
+            other => Err(RillError::new(format!("{name} callback must be callable, got {other}"))),
         }
     }
 
     fn check_callback_expr(&mut self, expr: &Expr) -> Result<Type, RillError> {
         let result_type = self.check_expr(expr)?;
         if contains_implicit(expr) {
-            Ok(Type::Function {
-                arity: Some(1),
-                params: None,
-                return_type: Box::new(result_type),
-            })
+            Ok(Type::Function { arity: Some(1), params: None, return_type: Box::new(result_type) })
         } else {
             Ok(result_type)
         }
@@ -1360,12 +1305,7 @@ impl Checker {
 }
 
 fn check_typed_call(ty: &Type, args: &[Type]) -> Result<Type, RillError> {
-    if let Type::Function {
-        arity,
-        params,
-        return_type,
-    } = ty
-    {
+    if let Type::Function { arity, params, return_type } = ty {
         if let Some(arity) = arity {
             ensure_arity("function", *arity, args.len())?;
         }
@@ -1394,9 +1334,9 @@ fn top_level_names(stmts: &[Stmt]) -> Vec<String> {
             LetPattern::List(items) | LetPattern::Tuple(items) => {
                 names.extend(items.iter().filter(|name| name.as_str() != "_").cloned());
             }
-            LetPattern::Map(items) => names.extend(items.iter().map(|(key, alias)| {
-                alias.clone().unwrap_or_else(|| key.clone())
-            })),
+            LetPattern::Map(items) => names.extend(
+                items.iter().map(|(key, alias)| alias.clone().unwrap_or_else(|| key.clone())),
+            ),
             _ => {}
         }
     }
@@ -1432,11 +1372,9 @@ fn type_from_value(value: &Value) -> Type {
         Value::Float(_) => Type::Float,
         Value::Str(_) => Type::Str,
         Value::Bytes(_) => Type::Bytes,
-        Value::List(items) => {
-            Type::List(Box::new(items.iter().fold(Type::Unknown, |acc, item| {
-                common_type(acc, type_from_value(item))
-            })))
-        }
+        Value::List(items) => Type::List(Box::new(
+            items.iter().fold(Type::Unknown, |acc, item| common_type(acc, type_from_value(item))),
+        )),
         Value::Tuple(items) => Type::Tuple(items.iter().map(type_from_value).collect()),
         Value::Map(_) => Type::Map,
         Value::Duration(_) => Type::Duration,
@@ -1490,11 +1428,7 @@ fn method_kind(ty: &Type) -> crate::methods::Kind {
     }
 }
 
-fn resolve_method_return(
-    resolver: crate::methods::Return,
-    receiver: &Type,
-    args: &[Type],
-) -> Type {
+fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args: &[Type]) -> Type {
     use crate::methods::Return;
     match resolver {
         Return::Unknown => Type::Unknown,
@@ -1514,20 +1448,17 @@ fn resolve_method_return(
             Type::List(_) | Type::Unknown => Type::Str,
             _ => Type::Path,
         },
-        Return::CallbackList => Type::List(Box::new(
-            args.first().map(function_return).unwrap_or(Type::Unknown),
-        )),
+        Return::CallbackList => {
+            Type::List(Box::new(args.first().map(function_return).unwrap_or(Type::Unknown)))
+        }
         Return::ListUnknown => Type::List(Box::new(Type::Unknown)),
-        Return::ListTupleUnknown => Type::List(Box::new(Type::Tuple(vec![
-            Type::Int,
-            Type::Unknown,
-        ]))),
+        Return::ListTupleUnknown => {
+            Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Unknown])))
+        }
         Return::ListStr => Type::List(Box::new(Type::Str)),
         Return::ListPath => Type::List(Box::new(Type::Path)),
         Return::ListProcessResult => Type::List(Box::new(Type::ProcessResult)),
-        Return::ListListStr => {
-            Type::List(Box::new(Type::List(Box::new(Type::Str))))
-        }
+        Return::ListListStr => Type::List(Box::new(Type::List(Box::new(Type::Str)))),
         Return::ReadText => Type::Result(Box::new(Type::Str), Box::new(Type::Error)),
         Return::ReadYaml => Type::Result(Box::new(Type::Unknown), Box::new(Type::Error)),
         Return::ResultOkOption => match receiver {
@@ -1542,9 +1473,9 @@ fn resolve_method_return(
             Type::Result(value, _) | Type::Option(value) => *value.clone(),
             _ => Type::Unknown,
         },
-        Return::OptionArgument => Type::Option(Box::new(
-            args.first().cloned().unwrap_or(Type::Unknown),
-        )),
+        Return::OptionArgument => {
+            Type::Option(Box::new(args.first().cloned().unwrap_or(Type::Unknown)))
+        }
         Return::OkResultArgument => Type::Result(
             Box::new(args.first().cloned().unwrap_or(Type::Unknown)),
             Box::new(Type::Unknown),
@@ -1575,25 +1506,15 @@ fn type_from_name(name: &TypeName) -> Type {
         TypeName::Option(inner) => Type::Option(Box::new(type_from_name(inner))),
         TypeName::Result(inner, error) => Type::Result(
             Box::new(type_from_name(inner)),
-            Box::new(
-                error
-                    .as_ref()
-                    .map(|ty| type_from_name(ty))
-                    .unwrap_or(Type::Unknown),
-            ),
+            Box::new(error.as_ref().map(|ty| type_from_name(ty)).unwrap_or(Type::Unknown)),
         ),
         TypeName::ProcessResult => Type::ProcessResult,
         TypeName::ProcessHandle => Type::ProcessHandle,
         TypeName::Function { params, return_type } => Type::Function {
             arity: params.as_ref().map(|p| p.len()),
-            params: params
-                .as_ref()
-                .map(|p| p.iter().map(type_from_name).collect()),
+            params: params.as_ref().map(|p| p.iter().map(type_from_name).collect()),
             return_type: Box::new(
-                return_type
-                    .as_ref()
-                    .map(|rt| type_from_name(rt))
-                    .unwrap_or(Type::Unknown),
+                return_type.as_ref().map(|rt| type_from_name(rt)).unwrap_or(Type::Unknown),
             ),
         },
     }
@@ -1619,7 +1540,11 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
             ensure_assignable(expected_error, actual_error)
         }
         (
-            Type::Function { arity: expected_arity, params: expected_params, return_type: expected_rt },
+            Type::Function {
+                arity: expected_arity,
+                params: expected_params,
+                return_type: expected_rt,
+            },
             Type::Function { arity: actual_arity, params: actual_params, return_type: actual_rt },
         ) => {
             if let (Some(ea), Some(aa)) = (expected_arity, actual_arity) {
@@ -1636,9 +1561,7 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
             }
             ensure_assignable(expected_rt, actual_rt)
         }
-        _ => Err(RillError::new(format!(
-            "type mismatch: expected {expected}, got {actual}"
-        ))),
+        _ => Err(RillError::new(format!("type mismatch: expected {expected}, got {actual}"))),
     }
 }
 
@@ -1646,9 +1569,7 @@ fn ensure_arity(name: &str, expected: usize, actual: usize) -> Result<(), RillEr
     if expected == actual {
         Ok(())
     } else {
-        Err(RillError::new(format!(
-            "{name} needs {expected} args, got {actual}"
-        )))
+        Err(RillError::new(format!("{name} needs {expected} args, got {actual}")))
     }
 }
 
@@ -1692,11 +1613,11 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::Try(value) => contains_implicit(value),
         Expr::For { iter, .. } => contains_implicit(iter),
         Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt {
-            Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => {
-                contains_implicit(expr)
-            }
+            Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
             Stmt::Assign { expr, .. } => contains_implicit(expr),
-            Stmt::IndexAssign { index, expr, .. } => contains_implicit(index) || contains_implicit(expr),
+            Stmt::IndexAssign { index, expr, .. } => {
+                contains_implicit(index) || contains_implicit(expr)
+            }
             Stmt::While { cond, .. } => contains_implicit(cond),
             Stmt::If { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),
@@ -1723,10 +1644,7 @@ fn common_type(left: Type, right: Type) -> Type {
         (Type::Int, Type::Float) | (Type::Float, Type::Int) => Type::Float,
         (Type::List(left), Type::List(right)) => Type::List(Box::new(common_type(*left, *right))),
         (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => Type::Tuple(
-            left.into_iter()
-                .zip(right)
-                .map(|(left, right)| common_type(left, right))
-                .collect(),
+            left.into_iter().zip(right).map(|(left, right)| common_type(left, right)).collect(),
         ),
         _ => Type::Unknown,
     }
@@ -1735,11 +1653,9 @@ fn common_type(left: Type, right: Type) -> Type {
 fn constant_int(expr: &Expr) -> Option<i64> {
     match expr.unspanned() {
         Expr::Literal(Literal::Int(value)) => Some(*value),
-        Expr::Binary {
-            op: BinaryOp::Sub,
-            left,
-            right,
-        } if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) => {
+        Expr::Binary { op: BinaryOp::Sub, left, right }
+            if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) =>
+        {
             match right.unspanned() {
                 Expr::Literal(Literal::Int(value)) => value.checked_neg(),
                 _ => None,
@@ -1753,9 +1669,7 @@ fn normalize_tuple_index(index: i64, len: usize) -> Result<usize, RillError> {
     let len_i64 = len as i64;
     let normalized = if index < 0 { len_i64 + index } else { index };
     if normalized < 0 || normalized >= len_i64 {
-        Err(RillError::new(format!(
-            "tuple index {index} out of bounds (len {len})"
-        )))
+        Err(RillError::new(format!("tuple index {index} out of bounds (len {len})")))
     } else {
         Ok(normalized as usize)
     }
@@ -1788,9 +1702,5 @@ fn compile_regex(pattern: &str) -> Result<regex::Regex, RillError> {
 
 fn regex_capture_names(pattern: &str) -> Result<Vec<String>, RillError> {
     let regex = compile_regex(pattern)?;
-    Ok(regex
-        .capture_names()
-        .flatten()
-        .map(ToString::to_string)
-        .collect())
+    Ok(regex.capture_names().flatten().map(ToString::to_string).collect())
 }

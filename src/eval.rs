@@ -1,11 +1,11 @@
 use crate::ast::*;
 use crate::diagnostic::RillError;
+use crate::eval_data::{json_to_value, value_to_json};
 use crate::runtime::{
-    run_command, run_command_cancellable, run_pipeline, run_pipeline_cancellable, CommandIo,
-    ssh_control_options, ProcessRuntime, ProcessSpec, StreamMode, TokioProcessRuntime,
+    run_command, run_command_cancellable, run_pipeline, run_pipeline_cancellable,
+    ssh_control_options, CommandIo, ProcessRuntime, ProcessSpec, StreamMode, TokioProcessRuntime,
 };
 use crate::types::{Binding, Closure, ErrorKind, ErrorValue, Value};
-use crate::eval_data::{json_to_value, value_to_json};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
@@ -36,8 +36,7 @@ impl ParallelExecutor {
         static EXECUTOR: OnceLock<ParallelExecutor> = OnceLock::new();
         EXECUTOR
             .get_or_init(|| {
-                let parallelism = std::thread::available_parallelism()
-                    .unwrap_or(NonZeroUsize::MIN);
+                let parallelism = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
                 Self::new(parallelism).expect("failed to create shared parallel executor")
             })
             .clone()
@@ -60,16 +59,15 @@ impl Env {
             root.insert(name.to_string(), Binding { value, mutable: true });
         };
         insert(&mut root, "args", Value::List(args.into_iter().map(Value::Str).collect()));
-        let environment = std::env::vars()
-            .map(|(name, value)| (name, Value::Str(value)))
-            .collect();
+        let environment = std::env::vars().map(|(name, value)| (name, Value::Str(value))).collect();
         insert(&mut root, "env", Value::Map(environment));
-        let lines = input
-            .unwrap_or_default()
-            .lines()
-            .map(|line| Value::Str(line.to_string()))
-            .collect();
-        insert(&mut root, "input", Value::Map(BTreeMap::from([("lines".to_string(), Value::List(lines))])));
+        let lines =
+            input.unwrap_or_default().lines().map(|line| Value::Str(line.to_string())).collect();
+        insert(
+            &mut root,
+            "input",
+            Value::Map(BTreeMap::from([("lines".to_string(), Value::List(lines))])),
+        );
         Self { scopes: vec![Arc::new(root)] }
     }
 
@@ -82,28 +80,17 @@ impl Env {
     }
 
     fn set(&mut self, name: String, value: Value) {
-        Arc::make_mut(
-            self.scopes
-                .last_mut()
-                .expect("env always has root scope"),
-        )
-        .insert(name, Binding { value, mutable: true });
+        Arc::make_mut(self.scopes.last_mut().expect("env always has root scope"))
+            .insert(name, Binding { value, mutable: true });
     }
 
     fn bind(&mut self, name: String, value: Value, mutable: bool) {
-        Arc::make_mut(
-            self.scopes
-                .last_mut()
-                .expect("env always has root scope"),
-        )
-        .insert(name, Binding { value, mutable });
+        Arc::make_mut(self.scopes.last_mut().expect("env always has root scope"))
+            .insert(name, Binding { value, mutable });
     }
 
     fn get(&self, name: &str) -> Option<Value> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).map(|b| b.value.clone()))
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.value.clone()))
     }
 
     fn rebind(&mut self, name: &str, value: Value) -> Result<bool, RillError> {
@@ -175,11 +162,7 @@ fn is_truthy(value: &Value) -> Result<bool, EvalError> {
     match value {
         Value::Bool(b) => Ok(*b),
         Value::Null => Ok(false),
-        other => Err(RillError::new(format!(
-            "expected Bool, got {}",
-            other.type_name()
-        ))
-        .into()),
+        other => Err(RillError::new(format!("expected Bool, got {}", other.type_name())).into()),
     }
 }
 
@@ -194,9 +177,7 @@ impl EvalError {
         match self {
             Self::Runtime(error) => error,
             Self::Control(_) => RillError::new("control flow escaped its evaluation boundary"),
-            Self::Cancelled => {
-                RillError::new("evaluation cancelled").with_kind(ErrorKind::Runtime)
-            }
+            Self::Cancelled => RillError::new("evaluation cancelled").with_kind(ErrorKind::Runtime),
         }
     }
 }
@@ -217,9 +198,13 @@ impl Evaluator {
             LetPattern::List(names) => {
                 let items = match value {
                     Value::List(v) => v,
-                    other => return Err(RillError::new(format!(
-                        "list destructuring requires a list, got {}", other.type_name()
-                    )).into()),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "list destructuring requires a list, got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
                 };
                 for (i, name) in names.iter().enumerate() {
                     if name != "_" {
@@ -230,14 +215,21 @@ impl Evaluator {
             LetPattern::Tuple(names) => {
                 let items = match value {
                     Value::Tuple(items) => items,
-                    other => return Err(RillError::new(format!(
-                        "tuple destructuring requires a Tuple, got {}", other.type_name()
-                    )).into()),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "tuple destructuring requires a Tuple, got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
                 };
                 if items.len() != names.len() {
                     return Err(RillError::new(format!(
-                        "tuple destructuring needs {} bindings, got {}", items.len(), names.len()
-                    )).into());
+                        "tuple destructuring needs {} bindings, got {}",
+                        items.len(),
+                        names.len()
+                    ))
+                    .into());
                 }
                 for (name, item) in names.iter().zip(items) {
                     if name != "_" {
@@ -248,9 +240,13 @@ impl Evaluator {
             LetPattern::Map(pairs) => {
                 let map = match value {
                     Value::Map(m) => m,
-                    other => return Err(RillError::new(format!(
-                        "map destructuring requires a map, got {}", other.type_name()
-                    )).into()),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "map destructuring requires a map, got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
                 };
                 for (key, alias) in pairs {
                     let binding = alias.as_deref().unwrap_or(key.as_str());
@@ -278,16 +274,21 @@ impl Evaluator {
             }
             LetPattern::Tuple(names) => {
                 let Value::Tuple(items) = value else { return Ok(None) };
-                if items.len() != names.len() { return Ok(None); }
+                if items.len() != names.len() {
+                    return Ok(None);
+                }
                 for (name, item) in names.iter().zip(items) {
-                    if name != "_" { bindings.push((name.clone(), item)); }
+                    if name != "_" {
+                        bindings.push((name.clone(), item));
+                    }
                 }
             }
             LetPattern::Map(pairs) => {
                 let Value::Map(map) = value else { return Ok(None) };
                 for (key, alias) in pairs {
                     let binding = alias.as_deref().unwrap_or(key.as_str());
-                    bindings.push((binding.to_string(), map.get(key).cloned().unwrap_or(Value::Null)));
+                    bindings
+                        .push((binding.to_string(), map.get(key).cloned().unwrap_or(Value::Null)));
                 }
             }
         }
@@ -387,17 +388,12 @@ impl Evaluator {
     }
 
     fn command_environment(&self) -> Result<BTreeMap<String, String>, RillError> {
-        let environment = self
-            .env
-            .get("env")
-            .ok_or_else(|| RillError::new("environment is unavailable"))?;
+        let environment =
+            self.env.get("env").ok_or_else(|| RillError::new("environment is unavailable"))?;
         let Value::Map(environment) = environment else {
             return Err(RillError::new("environment is unavailable").into());
         };
-        Ok(environment
-            .into_iter()
-            .map(|(name, value)| (name, value.as_string_lossy()))
-            .collect())
+        Ok(environment.into_iter().map(|(name, value)| (name, value.as_string_lossy())).collect())
     }
 
     fn lookup_environment_value(&self, name: &str) -> Option<Value> {
@@ -428,8 +424,7 @@ impl Evaluator {
     /// Resolve a path template using Rill bindings first, then process env.
     fn eval_resolve_path(&self, template: &str) -> Result<PathBuf, RillError> {
         crate::pathresolver::resolve_path(template, &|name| {
-            self.lookup_environment_value(name)
-                .map(|v| v.as_string_lossy())
+            self.lookup_environment_value(name).map(|v| v.as_string_lossy())
         })
     }
 
@@ -440,10 +435,7 @@ impl Evaluator {
         }) {
             self.configure_args(group).map_err(EvalError::diagnostic)?;
         }
-        match self
-            .eval_stmts(&program.stmts)
-            .map_err(EvalError::diagnostic)?
-        {
+        match self.eval_stmts(&program.stmts).map_err(EvalError::diagnostic)? {
             Flow::Value(value) | Flow::Return(value) => Ok(value),
             Flow::Propagate(value) => Err(RillError::new(format!(
                 "cannot propagate {} outside a function",
@@ -456,10 +448,7 @@ impl Evaluator {
     }
 
     pub(crate) fn eval_module_program(&mut self, program: &Program) -> Result<(), RillError> {
-        match self
-            .eval_stmts(&program.stmts)
-            .map_err(EvalError::diagnostic)?
-        {
+        match self.eval_stmts(&program.stmts).map_err(EvalError::diagnostic)? {
             Flow::Value(_) | Flow::Return(_) => Ok(()),
             Flow::Propagate(value) => Err(RillError::new(format!(
                 "cannot propagate {} outside a function",
@@ -601,10 +590,8 @@ impl Evaluator {
         body: &[Stmt],
     ) -> Result<Value, EvalError> {
         let cancellation = self.cancellation.child_token();
-        let state = Arc::new(RaceState {
-            outcome: Mutex::new(None),
-            cancellation: cancellation.clone(),
-        });
+        let state =
+            Arc::new(RaceState { outcome: Mutex::new(None), cancellation: cancellation.clone() });
         let base_env = self.env.clone();
         let function_depth = self.function_depth;
         let remote_prefix = self.remote_prefix.clone();
@@ -643,11 +630,7 @@ impl Evaluator {
                 }
             });
         });
-        let outcome = state
-            .outcome
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let outcome = state.outcome.lock().unwrap_or_else(|error| error.into_inner()).take();
         match outcome {
             Some(RaceOutcome::Value(value)) => Ok(value),
             Some(RaceOutcome::Terminal(outcome)) => Err(parallel_terminal_error(outcome)),
@@ -780,9 +763,7 @@ impl Evaluator {
                     rhs
                 } else {
                     let cur = self.env.get(name).ok_or_else(|| {
-                        EvalError::Runtime(RillError::new(format!(
-                            "unbound variable '{name}'"
-                        )))
+                        EvalError::Runtime(RillError::new(format!("unbound variable '{name}'")))
                     })?;
                     let bin_op = match op {
                         AssignOp::Add => BinaryOp::Add,
@@ -795,9 +776,11 @@ impl Evaluator {
                 };
                 match self.env.rebind(name, value) {
                     Ok(true) => {}
-                    Ok(false) => return Err(EvalError::Runtime(RillError::new(format!(
-                        "assignment to undeclared variable '{name}'"
-                    )))),
+                    Ok(false) => {
+                        return Err(EvalError::Runtime(RillError::new(format!(
+                            "assignment to undeclared variable '{name}'"
+                        ))))
+                    }
                     Err(e) => return Err(EvalError::Runtime(e)),
                 }
                 Ok(Flow::Value(Value::Null))
@@ -813,9 +796,12 @@ impl Evaluator {
                         let key = match &idx_val {
                             Value::Str(s) => s.clone(),
                             Value::Int(i) => i.to_string(),
-                            other => return Err(EvalError::Runtime(RillError::new(format!(
-                                "map key must be Str or Int, got {}", other.type_name()
-                            )))),
+                            other => {
+                                return Err(EvalError::Runtime(RillError::new(format!(
+                                    "map key must be Str or Int, got {}",
+                                    other.type_name()
+                                ))))
+                            }
                         };
                         let new_val = if matches!(op, AssignOp::Assign) {
                             rhs
@@ -836,9 +822,12 @@ impl Evaluator {
                     Value::List(mut items) => {
                         let idx = match idx_val {
                             Value::Int(i) => i,
-                            other => return Err(EvalError::Runtime(RillError::new(format!(
-                                "list index must be Int, got {}", other.type_name()
-                            )))),
+                            other => {
+                                return Err(EvalError::Runtime(RillError::new(format!(
+                                    "list index must be Int, got {}",
+                                    other.type_name()
+                                ))))
+                            }
                         };
                         let len = items.len() as i64;
                         let i = if idx < 0 { len + idx } else { idx } as usize;
@@ -892,35 +881,34 @@ impl Evaluator {
                         items[position] = new_val;
                         Value::Tuple(items)
                     }
-                    other => return Err(EvalError::Runtime(RillError::new(format!(
-                        "cannot index-assign into {}", other.type_name()
-                    )))),
+                    other => {
+                        return Err(EvalError::Runtime(RillError::new(format!(
+                            "cannot index-assign into {}",
+                            other.type_name()
+                        ))))
+                    }
                 };
                 match self.env.rebind(name, updated) {
                     Ok(true) => {}
-                    Ok(false) => return Err(EvalError::Runtime(RillError::new(format!(
-                        "assignment to undeclared variable '{name}'"
-                    )))),
+                    Ok(false) => {
+                        return Err(EvalError::Runtime(RillError::new(format!(
+                            "assignment to undeclared variable '{name}'"
+                        ))))
+                    }
                     Err(e) => return Err(EvalError::Runtime(e)),
                 }
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::Args(_) | Stmt::InputLines => Ok(Flow::Value(Value::Null)),
             Stmt::Fn { name, function } => {
-                self.env
-                    .set(name.clone(), Value::Function(function.clone()));
+                self.env.set(name.clone(), Value::Function(function.clone()));
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::Emit(expr) => {
                 let value = self.eval_expr(expr)?;
                 Ok(Flow::Emit(value))
             }
-            Stmt::If {
-                cond,
-                pattern,
-                then_body,
-                else_body,
-            } => {
+            Stmt::If { cond, pattern, then_body, else_body } => {
                 if let Some(pattern) = pattern {
                     let value = self.eval_expr(cond)?;
                     let bindings = Self::matching_bindings(pattern, value)?;
@@ -993,9 +981,13 @@ impl Evaluator {
                         prefix
                     }
                     Value::List(items) => items.into_iter().map(|v| v.as_string_lossy()).collect(),
-                    other => return Err(RillError::new(format!(
-                        "on needs Str or List[Str], got {}", other.type_name()
-                    )).into()),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "on needs Str or List[Str], got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
                 };
                 self.remote_prefix.push(prefix);
                 let result = self.eval_stmts(body);
@@ -1070,9 +1062,13 @@ impl Evaluator {
                     Value::List(items) => {
                         let idx = match idx_val {
                             Value::Int(i) => i,
-                            other => return Err(RillError::new(format!(
-                                "list index must be Int, got {}", other.type_name()
-                            )).into()),
+                            other => {
+                                return Err(RillError::new(format!(
+                                    "list index must be Int, got {}",
+                                    other.type_name()
+                                ))
+                                .into())
+                            }
                         };
                         let len = items.len() as i64;
                         let i = if idx < 0 { len + idx } else { idx };
@@ -1097,34 +1093,41 @@ impl Evaluator {
                     Value::Str(s) => {
                         let idx = match idx_val {
                             Value::Int(i) => i,
-                            other => return Err(RillError::new(format!(
-                                "string index must be Int, got {}", other.type_name()
-                            )).into()),
+                            other => {
+                                return Err(RillError::new(format!(
+                                    "string index must be Int, got {}",
+                                    other.type_name()
+                                ))
+                                .into())
+                            }
                         };
                         let chars: Vec<char> = s.chars().collect();
                         let len = chars.len() as i64;
                         let i = if idx < 0 { len + idx } else { idx };
-                        chars.get(i as usize)
-                            .map(|c| Value::Str(c.to_string()))
-                            .ok_or_else(|| {
-                                RillError::new(format!("index {idx} out of bounds (len {len})")).into()
-                            })
+                        chars.get(i as usize).map(|c| Value::Str(c.to_string())).ok_or_else(|| {
+                            RillError::new(format!("index {idx} out of bounds (len {len})")).into()
+                        })
                     }
                     Value::Map(map) => {
                         let key = match idx_val {
                             Value::Str(s) => s,
                             Value::Int(i) => i.to_string(),
-                            other => return Err(RillError::new(format!(
-                                "map key must be Str or Int, got {}", other.type_name()
-                            )).into()),
+                            other => {
+                                return Err(RillError::new(format!(
+                                    "map key must be Str or Int, got {}",
+                                    other.type_name()
+                                ))
+                                .into())
+                            }
                         };
-                        map.get(&key).cloned().ok_or_else(|| {
-                            RillError::new(format!("key '{key}' not in map")).into()
-                        })
+                        map.get(&key)
+                            .cloned()
+                            .ok_or_else(|| RillError::new(format!("key '{key}' not in map")).into())
                     }
-                    other => Err(RillError::new(format!(
-                        "cannot index into {}", other.type_name()
-                    )).into()),
+                    other => {
+                        Err(RillError::new(format!("cannot index into {}", other.type_name()))
+                            .into())
+                    }
                 }
             }
             Expr::Field { base, name } => {
@@ -1150,30 +1153,21 @@ impl Evaluator {
                                 captured: self.env.scopes.clone(),
                             }));
                         }
-                        return Err(RillError::new(format!(
-                            "{module} has no function '{name}'"
-                        ))
-                        .into());
+                        return Err(
+                            RillError::new(format!("{module} has no function '{name}'")).into()
+                        );
                     }
                 }
                 self.eval_field(base, name)
             }
-            Expr::Binary {
-                op: BinaryOp::Or,
-                left,
-                right,
-            } => {
+            Expr::Binary { op: BinaryOp::Or, left, right } => {
                 let lv = self.eval_expr(left)?;
                 if is_truthy(&lv)? {
                     return Ok(Value::Bool(true));
                 }
                 Ok(Value::Bool(is_truthy(&self.eval_expr(right)?)?))
             }
-            Expr::Binary {
-                op: BinaryOp::And,
-                left,
-                right,
-            } => {
+            Expr::Binary { op: BinaryOp::And, left, right } => {
                 let lv = self.eval_expr(left)?;
                 if !is_truthy(&lv)? {
                     return Ok(Value::Bool(false));
@@ -1181,10 +1175,7 @@ impl Evaluator {
                 Ok(Value::Bool(is_truthy(&self.eval_expr(right)?)?))
             }
             Expr::Binary { op, left, right } => self.eval_binary(*op, left, right),
-            Expr::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } => {
+            Expr::Unary { op: UnaryOp::Not, operand } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::Bool(!is_truthy(&v)?))
             }
@@ -1194,12 +1185,7 @@ impl Evaluator {
                 let value = self.eval_expr(value)?.as_string_lossy();
                 Ok(Value::Bool(regex_is_match(&value, pattern)?))
             }
-            Expr::RegexSubstitution {
-                value,
-                pattern,
-                replacement,
-                all,
-            } => {
+            Expr::RegexSubstitution { value, pattern, replacement, all } => {
                 let value = self.eval_expr(value)?.as_string_lossy();
                 Ok(regex_replace(&value, pattern, replacement, *all).map(Value::Str)?)
             }
@@ -1209,9 +1195,9 @@ impl Evaluator {
                 let iter_val = self.eval_expr(iter)?;
                 if let Value::Stream(handle) = iter_val {
                     if !matches!(mode, ForMode::Sequential) {
-                        return Err(RillError::new(
-                            "parallel/race for not supported on streams"
-                        ).into());
+                        return Err(
+                            RillError::new("parallel/race for not supported on streams").into()
+                        );
                     }
                     let mut collected: Vec<Value> = Vec::new();
                     loop {
@@ -1227,8 +1213,12 @@ impl Evaluator {
                                 match flow {
                                     Flow::Value(_) | Flow::Continue => {}
                                     Flow::Break => break,
-                                    Flow::Return(v) => return Err(EvalError::Control(Flow::Return(v))),
-                                    Flow::Propagate(v) => return Err(EvalError::Control(Flow::Propagate(v))),
+                                    Flow::Return(v) => {
+                                        return Err(EvalError::Control(Flow::Return(v)))
+                                    }
+                                    Flow::Propagate(v) => {
+                                        return Err(EvalError::Control(Flow::Propagate(v)))
+                                    }
                                     Flow::Emit(_) => unreachable!(),
                                 }
                             }
@@ -1259,9 +1249,7 @@ impl Evaluator {
                             match flow {
                                 Flow::Value(_) | Flow::Continue => {}
                                 Flow::Break => break,
-                                Flow::Return(v) => {
-                                    return Err(EvalError::Control(Flow::Return(v)))
-                                }
+                                Flow::Return(v) => return Err(EvalError::Control(Flow::Return(v))),
                                 Flow::Propagate(v) => {
                                     return Err(EvalError::Control(Flow::Propagate(v)))
                                 }
@@ -1270,7 +1258,9 @@ impl Evaluator {
                         }
                         Ok(Value::List(collected))
                     }
-                    ForMode::Parallel => self.eval_for_parallel(workers.as_deref(), pattern, list, body),
+                    ForMode::Parallel => {
+                        self.eval_for_parallel(workers.as_deref(), pattern, list, body)
+                    }
                     ForMode::Race => self.eval_for_race(workers.as_deref(), pattern, list, body),
                 }
             }
@@ -1287,10 +1277,7 @@ impl Evaluator {
                 function: Function {
                     params: params
                         .iter()
-                        .map(|name| Param {
-                            name: name.clone(),
-                            type_name: None,
-                        })
+                        .map(|name| Param { name: name.clone(), type_name: None })
                         .collect(),
                     return_type: None,
                     body: body.clone(),
@@ -1336,10 +1323,8 @@ impl Evaluator {
 
     fn set_environment(&mut self, name: &str, value: String) -> Result<(), EvalError> {
         self.check_cancelled()?;
-        let environment = self
-            .env
-            .get("env")
-            .ok_or_else(|| RillError::new("environment is unavailable"))?;
+        let environment =
+            self.env.get("env").ok_or_else(|| RillError::new("environment is unavailable"))?;
         let Value::Map(mut environment) = environment else {
             return Err(RillError::new("environment is unavailable").into());
         };
@@ -1353,10 +1338,9 @@ impl Evaluator {
 
     fn configure_args(&mut self, group: &ArgGroup) -> Result<(), EvalError> {
         let raw = match self.env.get("args") {
-            Some(Value::List(values)) => values
-                .into_iter()
-                .map(|value| value.as_string_lossy())
-                .collect::<Vec<_>>(),
+            Some(Value::List(values)) => {
+                values.into_iter().map(|value| value.as_string_lossy()).collect::<Vec<_>>()
+            }
             _ => Vec::new(),
         };
         let values = self.parse_arg_group(group, &raw)?;
@@ -1401,8 +1385,7 @@ impl Evaluator {
                     values.insert(
                         field.name.clone(),
                         parse_arg_value(value, &field.type_name, &|name| {
-                            self.lookup_environment_value(name)
-                                .map(|value| value.as_string_lossy())
+                            self.lookup_environment_value(name).map(|value| value.as_string_lossy())
                         })?,
                     );
                 }
@@ -1423,24 +1406,16 @@ impl Evaluator {
                     values.insert(
                         field.name.clone(),
                         parse_arg_value(value, &field.type_name, &|name| {
-                            self.lookup_environment_value(name)
-                                .map(|value| value.as_string_lossy())
+                            self.lookup_environment_value(name).map(|value| value.as_string_lossy())
                         })?,
                     );
                 }
             } else if options {
-                let command = group
-                    .subcommands
-                    .iter()
-                    .find(|child| child.name == *arg)
-                    .or_else(|| {
-                        group
-                            .subcommands
-                            .iter()
-                            .find(|wrapper| wrapper.name == "command")
-                            .and_then(|wrapper| {
-                                wrapper.subcommands.iter().find(|child| child.name == *arg)
-                            })
+                let command =
+                    group.subcommands.iter().find(|child| child.name == *arg).or_else(|| {
+                        group.subcommands.iter().find(|wrapper| wrapper.name == "command").and_then(
+                            |wrapper| wrapper.subcommands.iter().find(|child| child.name == *arg),
+                        )
                     });
                 if let Some(command) = command {
                     child = Some((command.clone(), index + 1));
@@ -1463,8 +1438,7 @@ impl Evaluator {
                     values.insert(
                         field.name.clone(),
                         parse_arg_value(value, &field.type_name, &|name| {
-                            self.lookup_environment_value(name)
-                                .map(|value| value.as_string_lossy())
+                            self.lookup_environment_value(name).map(|value| value.as_string_lossy())
                         })?,
                     );
                     position += 1;
@@ -1481,10 +1455,7 @@ impl Evaluator {
             let command_values = self.parse_arg_group(&command, &raw[next_index..])?;
             values.insert(
                 "command".to_string(),
-                Value::Map(BTreeMap::from([(
-                    command.name.clone(),
-                    Value::Map(command_values),
-                )])),
+                Value::Map(BTreeMap::from([(command.name.clone(), Value::Map(command_values))])),
             );
         }
         if position < positional.len() {
@@ -1524,15 +1495,13 @@ impl Evaluator {
                 '$' => {
                     if matches!(chars.peek(), Some((_, '{'))) {
                         chars.next(); // consume '{'
-                        // Collect name and optional `:-default`.
+                                      // Collect name and optional `:-default`.
                         let mut name = String::new();
                         let mut default: Option<String> = None;
                         'braced: loop {
                             match chars.next() {
                                 None | Some((_, '}')) => break 'braced,
-                                Some((_, ':'))
-                                    if matches!(chars.peek(), Some((_, '-'))) =>
-                                {
+                                Some((_, ':')) if matches!(chars.peek(), Some((_, '-'))) => {
                                     chars.next(); // consume '-'
                                     let mut d = String::new();
                                     let mut depth = 1usize;
@@ -1568,8 +1537,7 @@ impl Evaluator {
                             if s.as_deref().is_some_and(|v| !v.is_empty()) {
                                 out.push_str(&s.unwrap());
                             } else {
-                                let expanded =
-                                    self.interpolate_string(&dflt)?.as_string_lossy();
+                                let expanded = self.interpolate_string(&dflt)?.as_string_lossy();
                                 out.push_str(&expanded);
                             }
                         } else {
@@ -1670,16 +1638,25 @@ impl Evaluator {
         for arm in arms {
             // Try to match structurally; returns Some(Option<(name, bound_value)>) on match.
             let structural = match (&arm.pattern, &val) {
-                (MatchPattern::Ok(binding), Value::Result(Ok(inner))) =>
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone()))),
-                (MatchPattern::Err(binding), Value::Result(Err(inner))) =>
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone()))),
-                (MatchPattern::Some(binding), Value::Option(Some(inner))) =>
-                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone()))),
+                (MatchPattern::Ok(binding), Value::Result(Ok(inner))) => {
+                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
+                }
+                (MatchPattern::Err(binding), Value::Result(Err(inner))) => {
+                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
+                }
+                (MatchPattern::Some(binding), Value::Option(Some(inner))) => {
+                    Some(binding.as_deref().map(|n| (n.to_string(), *inner.clone())))
+                }
                 (MatchPattern::None, Value::Option(None)) => Some(None),
                 (MatchPattern::Wildcard, _) => Some(None),
-                (MatchPattern::Regex(_) | MatchPattern::Ok(_) | MatchPattern::Err(_)
-                 | MatchPattern::Some(_) | MatchPattern::None, _) => None,
+                (
+                    MatchPattern::Regex(_)
+                    | MatchPattern::Ok(_)
+                    | MatchPattern::Err(_)
+                    | MatchPattern::Some(_)
+                    | MatchPattern::None,
+                    _,
+                ) => None,
             };
             if let Some(binding) = structural {
                 self.env.push();
@@ -1726,10 +1703,7 @@ impl Evaluator {
         }
         if let Expr::ImplicitField(name) = callee.unspanned() {
             return self.eval_call(
-                &Expr::Field {
-                    base: Box::new(Expr::Implicit),
-                    name: name.clone(),
-                },
+                &Expr::Field { base: Box::new(Expr::Implicit), name: name.clone() },
                 args,
             );
         }
@@ -1757,10 +1731,7 @@ impl Evaluator {
         }
 
         let value = self.eval_expr(callee)?;
-        let values = args
-            .iter()
-            .map(|arg| self.eval_expr(arg))
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = args.iter().map(|arg| self.eval_expr(arg)).collect::<Result<Vec<_>, _>>()?;
         self.call_callable(value, values)
     }
 
@@ -1776,24 +1747,26 @@ impl Evaluator {
             return Err(RillError::new(format!(
                 "{module}.{name} needs {}{} args, got {}",
                 signature.min_args + 1,
-                if signature.min_args == signature.max_args { String::new() } else { format!(" to {}", signature.max_args + 1) },
+                if signature.min_args == signature.max_args {
+                    String::new()
+                } else {
+                    format!(" to {}", signature.max_args + 1)
+                },
                 args.len()
             ))
             .into());
         }
         // Evaluate in namespace argument order, including regex.is_match(pattern, text).
-        let mut values = args
-            .iter()
-            .map(|arg| self.eval_expr(arg))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut values =
+            args.iter().map(|arg| self.eval_expr(arg)).collect::<Result<Vec<_>, _>>()?;
         match call.adapter {
             crate::methods::ReceiverAdapter::Direct => {}
             crate::methods::ReceiverAdapter::Path => {
                 values[0] = match &values[0] {
                     Value::Path(path) => Value::Path(path.clone()),
-                    Value::Str(path) => Value::Path(
-                        self.eval_resolve_path(path).map_err(EvalError::from)?,
-                    ),
+                    Value::Str(path) => {
+                        Value::Path(self.eval_resolve_path(path).map_err(EvalError::from)?)
+                    }
                     other => {
                         return Err(RillError::new(format!(
                             "{module}.{name} needs a Str or Path, got {}",
@@ -1806,9 +1779,10 @@ impl Evaluator {
             crate::methods::ReceiverAdapter::Duration => {
                 values[0] = match &values[0] {
                     Value::Duration(duration) => Value::Duration(*duration),
-                    Value::Int(_) => Value::Duration(std::time::Duration::from_secs(
-                        as_usize(&values[0])? as u64,
-                    )),
+                    Value::Int(_) => Value::Duration(std::time::Duration::from_secs(as_usize(
+                        &values[0],
+                    )?
+                        as u64)),
                     other => {
                         return Err(RillError::new(format!(
                             "{module}.{name} needs Int seconds or Duration, got {}",
@@ -1901,11 +1875,7 @@ impl Evaluator {
                         Value::Closure(closure) => closure.function.params.len(),
                         _ => unreachable!("callback kind was validated"),
                     };
-                    let expected = if matches!(receiver, Value::Map(_)) {
-                        2
-                    } else {
-                        1
-                    };
+                    let expected = if matches!(receiver, Value::Map(_)) { 2 } else { 1 };
                     if actual != expected {
                         return Err(RillError::new(format!(
                             ".{name}() callback needs {expected} args, got {actual}"
@@ -1917,10 +1887,7 @@ impl Evaluator {
                 self.env.set(key.clone(), value);
                 let expr = Expr::Ident(key);
                 bound.push(match named {
-                    Some(name) => Expr::NamedArg {
-                        name,
-                        value: Box::new(expr),
-                    },
+                    Some(name) => Expr::NamedArg { name, value: Box::new(expr) },
                     None => expr,
                 });
             }
@@ -1942,16 +1909,12 @@ impl Evaluator {
                     Ok(Value::Bool(regex_is_match(&text, &pattern)?))
                 }
                 Target::Sleep => {
-                    let Value::Duration(duration) = receiver else {
-                        unreachable!()
-                    };
+                    let Value::Duration(duration) = receiver else { unreachable!() };
                     self.sleep_cancellable(duration)?;
                     Ok(Value::Null)
                 }
                 Target::Read(yaml) => {
-                    let Value::Path(path) = &receiver else {
-                        unreachable!()
-                    };
+                    let Value::Path(path) = &receiver else { unreachable!() };
                     let result = fs::read_to_string(path)
                         .map_err(|err| ErrorValue {
                             kind: ErrorKind::Io,
@@ -1982,9 +1945,7 @@ impl Evaluator {
                                 })
                         });
                     Ok(Value::Result(
-                        result
-                            .map(Box::new)
-                            .map_err(|err| Box::new(Value::Error(err))),
+                        result.map(Box::new).map_err(|err| Box::new(Value::Error(err))),
                     ))
                 }
                 Target::Structural(_) => unreachable!("structural methods dispatch before binding"),
@@ -2041,16 +2002,16 @@ impl Evaluator {
                     .map(json_to_value)
                     .map_err(|err| RillError::new(format!("json parse failed: {err}")))?)
             }
-            "stringify" => Ok(
-                serde_json::to_string(&value_to_json(&self.eval_expr(&args[0])?))
+            "stringify" => Ok(serde_json::to_string(&value_to_json(&self.eval_expr(&args[0])?))
+                .map(Value::Str)
+                .map_err(|err| RillError::new(format!("json stringify failed: {err}")))?),
+            "pretty" => {
+                Ok(serde_json::to_string_pretty(&value_to_json(&self.eval_expr(&args[0])?))
                     .map(Value::Str)
-                    .map_err(|err| RillError::new(format!("json stringify failed: {err}")))?,
-            ),
-            "pretty" => Ok(serde_json::to_string_pretty(&value_to_json(
-                &self.eval_expr(&args[0])?,
-            ))
-            .map(Value::Str)
-            .map_err(|err| RillError::new(format!("json pretty stringify failed: {err}")))?),
+                    .map_err(|err| {
+                        RillError::new(format!("json pretty stringify failed: {err}"))
+                    })?)
+            }
             _ => Err(RillError::new(format!("json has no function '{name}'")).into()),
         }
     }
@@ -2064,13 +2025,16 @@ impl Evaluator {
                 let hosts = match self.eval_expr(&args[0])? {
                     Value::Str(s) => vec![s],
                     Value::List(items) => items.into_iter().map(|v| v.as_string_lossy()).collect(),
-                    other => return Err(RillError::new(format!(
-                        "Stream.tail hosts must be Str or List, got {}", other.type_name()
-                    )).into()),
+                    other => {
+                        return Err(RillError::new(format!(
+                            "Stream.tail hosts must be Str or List, got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
                 };
                 let path = self.eval_expr(&args[1])?.as_string_lossy();
-                let handle = crate::runtime::spawn_tail(hosts, path)
-                    .map_err(EvalError::Runtime)?;
+                let handle = crate::runtime::spawn_tail(hosts, path).map_err(EvalError::Runtime)?;
                 Ok(Value::Stream(handle))
             }
             ("fs", "write") => {
@@ -2136,20 +2100,18 @@ impl Evaluator {
                 use sha2::{Digest, Sha256};
                 let text = self.eval_one_arg("hashes.sha256", args)?.as_string_lossy();
                 let digest = Sha256::digest(text.as_bytes());
-                Ok(Value::Str(
-                    digest.iter().map(|byte| format!("{byte:02x}")).collect(),
-                ))
+                Ok(Value::Str(digest.iter().map(|byte| format!("{byte:02x}")).collect()))
             }
-            ("toml", "stringify") => Ok(toml::to_string_pretty(&value_to_json(
-                &self.eval_expr(&args[0])?,
-            ))
-            .map(Value::Str)
-            .map_err(|err| RillError::new(format!("toml stringify failed: {err}")))?),
-            ("yaml", "stringify") => Ok(serde_yaml::to_string(&value_to_json(
-                &self.eval_expr(&args[0])?,
-            ))
-            .map(Value::Str)
-            .map_err(|err| RillError::new(format!("yaml stringify failed: {err}")))?),
+            ("toml", "stringify") => {
+                Ok(toml::to_string_pretty(&value_to_json(&self.eval_expr(&args[0])?))
+                    .map(Value::Str)
+                    .map_err(|err| RillError::new(format!("toml stringify failed: {err}")))?)
+            }
+            ("yaml", "stringify") => {
+                Ok(serde_yaml::to_string(&value_to_json(&self.eval_expr(&args[0])?))
+                    .map(Value::Str)
+                    .map_err(|err| RillError::new(format!("yaml stringify failed: {err}")))?)
+            }
             ("archive", "list") => {
                 let path = self.eval_one_arg("archive.list", args)?.as_string_lossy();
                 let file = fs::File::open(&path).map_err(|err| {
@@ -2195,21 +2157,28 @@ impl Evaluator {
             }
             ("path", "basename") => {
                 let p = PathBuf::from(self.eval_one_arg("path.basename", args)?.as_string_lossy());
-                Ok(Value::Str(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                Ok(Value::Str(
+                    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                ))
             }
             ("path", "stem") => {
                 let p = PathBuf::from(self.eval_one_arg("path.stem", args)?.as_string_lossy());
-                Ok(Value::Str(p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                Ok(Value::Str(
+                    p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                ))
             }
             ("path", "extension") => {
                 let p = PathBuf::from(self.eval_one_arg("path.extension", args)?.as_string_lossy());
-                Ok(Value::Str(p.extension().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                Ok(Value::Str(
+                    p.extension().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                ))
             }
             ("path", "canonicalize") => {
                 let s = self.eval_one_arg("path.canonicalize", args)?.as_string_lossy();
                 let p = PathBuf::from(&s);
                 Ok(Value::Path(
-                    p.canonicalize().map_err(|err| RillError::new(format!("canonicalize '{s}': {err}")))?
+                    p.canonicalize()
+                        .map_err(|err| RillError::new(format!("canonicalize '{s}': {err}")))?,
                 ))
             }
             ("fs", "is_file") => {
@@ -2224,9 +2193,7 @@ impl Evaluator {
                 let path_str = self.eval_one_arg("fs.read_lines", args)?.as_string_lossy();
                 let text = fs::read_to_string(&path_str)
                     .map_err(|err| RillError::new(format!("failed to read '{path_str}': {err}")))?;
-                Ok(Value::List(
-                    text.lines().map(|l| Value::Str(l.to_string())).collect()
-                ))
+                Ok(Value::List(text.lines().map(|l| Value::Str(l.to_string())).collect()))
             }
             ("fs", "append") => {
                 if args.len() != 2 {
@@ -2236,17 +2203,21 @@ impl Evaluator {
                 let text = self.eval_expr(&args[1])?.as_string_lossy();
                 self.check_cancelled()?;
                 use std::io::Write;
-                let mut file = fs::OpenOptions::new().create(true).append(true).open(&path_str)
-                    .map_err(|err| RillError::new(format!("failed to open '{path_str}': {err}")))?;
-                file.write_all(text.as_bytes())
-                    .map_err(|err| RillError::new(format!("failed to append to '{path_str}': {err}")))?;
+                let mut file =
+                    fs::OpenOptions::new().create(true).append(true).open(&path_str).map_err(
+                        |err| RillError::new(format!("failed to open '{path_str}': {err}")),
+                    )?;
+                file.write_all(text.as_bytes()).map_err(|err| {
+                    RillError::new(format!("failed to append to '{path_str}': {err}"))
+                })?;
                 Ok(Value::Null)
             }
             ("fs", "mkdir") => {
                 let path_str = self.eval_one_arg("fs.mkdir", args)?.as_string_lossy();
                 self.check_cancelled()?;
-                fs::create_dir_all(&path_str)
-                    .map_err(|err| RillError::new(format!("failed to mkdir '{path_str}': {err}")))?;
+                fs::create_dir_all(&path_str).map_err(|err| {
+                    RillError::new(format!("failed to mkdir '{path_str}': {err}"))
+                })?;
                 Ok(Value::Null)
             }
             ("fs", "rename") => {
@@ -2256,15 +2227,18 @@ impl Evaluator {
                 let from = self.eval_expr(&args[0])?.as_string_lossy();
                 let to = self.eval_expr(&args[1])?.as_string_lossy();
                 self.check_cancelled()?;
-                fs::rename(&from, &to)
-                    .map_err(|err| RillError::new(format!("failed to rename '{from}' → '{to}': {err}")))?;
+                fs::rename(&from, &to).map_err(|err| {
+                    RillError::new(format!("failed to rename '{from}' → '{to}': {err}"))
+                })?;
                 Ok(Value::Null)
             }
             ("fs", "stat") => {
                 let path_str = self.eval_one_arg("fs.stat", args)?.as_string_lossy();
                 let meta = fs::metadata(&path_str)
                     .map_err(|err| RillError::new(format!("stat '{path_str}': {err}")))?;
-                let modified = meta.modified().ok()
+                let modified = meta
+                    .modified()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| Value::Int(d.as_secs() as i64))
                     .unwrap_or(Value::Null);
@@ -2282,8 +2256,8 @@ impl Evaluator {
                 for entry in fs::read_dir(&path_str)
                     .map_err(|err| RillError::new(format!("ls '{path_str}': {err}")))?
                 {
-                    let entry = entry
-                        .map_err(|err| RillError::new(format!("ls entry error: {err}")))?;
+                    let entry =
+                        entry.map_err(|err| RillError::new(format!("ls entry error: {err}")))?;
                     entries.push(Value::Path(entry.path()));
                 }
                 entries.sort_by_cached_key(Value::as_string_lossy);
@@ -2302,9 +2276,7 @@ impl Evaluator {
 
     fn eval_builtin_or_function(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
         if let Some(builtin) = crate::methods::lookup_builtin(name) {
-            builtin
-                .validate(args.len())
-                .map_err(RillError::new)?;
+            builtin.validate(args.len()).map_err(RillError::new)?;
             return self.eval_global_builtin(builtin.implementation, args);
         }
         match name {
@@ -2317,11 +2289,10 @@ impl Evaluator {
                 match map {
                     Value::Map(values) => Ok(values.get(&key).cloned().unwrap_or(Value::Null)),
                     Value::Null => Ok(Value::Null),
-                    other => Err(RillError::new(format!(
-                        "get needs a Map, got {}",
-                        other.type_name()
-                    ))
-                    .into()),
+                    other => {
+                        Err(RillError::new(format!("get needs a Map, got {}", other.type_name()))
+                            .into())
+                    }
                 }
             }
             "spawn" => {
@@ -2340,9 +2311,7 @@ impl Evaluator {
                 let Value::ProcessHandle(handle) = value else {
                     return Err(RillError::new("await needs ProcessHandle").into());
                 };
-                Ok(Value::ProcessResult(
-                    TokioProcessRuntime.await_process(handle)?,
-                ))
+                Ok(Value::ProcessResult(TokioProcessRuntime.await_process(handle)?))
             }
             "parallel" => {
                 let value = self.eval_one_arg("parallel", args)?;
@@ -2409,8 +2378,7 @@ impl Evaluator {
             "glob" => {
                 let pattern = self.eval_one_arg("glob", args)?.as_string_lossy();
                 let paths = simple_glob_with_lookup(&pattern, &|name| {
-                    self.lookup_environment_value(name)
-                        .map(|v| v.as_string_lossy())
+                    self.lookup_environment_value(name).map(|v| v.as_string_lossy())
                 })?;
                 Ok(Value::List(paths.into_iter().map(Value::Path).collect()))
             }
@@ -2421,7 +2389,8 @@ impl Evaluator {
                 match receiver {
                     Value::List(items) => {
                         let sep = arg.as_string_lossy();
-                        let parts: Vec<String> = items.iter().map(|v| v.as_string_lossy()).collect();
+                        let parts: Vec<String> =
+                            items.iter().map(|v| v.as_string_lossy()).collect();
                         Ok(Value::Str(parts.join(&sep)))
                     }
                     Value::Path(base) => {
@@ -2430,8 +2399,10 @@ impl Evaluator {
                         Ok(Value::Path(base.join(child)))
                     }
                     other => Err(RillError::new(format!(
-                        "join needs a List or Path, got {}", other.type_name()
-                    )).into()),
+                        "join needs a List or Path, got {}",
+                        other.type_name()
+                    ))
+                    .into()),
                 }
             }
             // String methods
@@ -2441,17 +2412,16 @@ impl Evaluator {
                     Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                     Value::List(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Map(map) => Ok(Value::Int(map.len() as i64)),
-                    other => Err(RillError::new(format!(
-                        "len not supported on {}", other.type_name()
-                    )).into()),
+                    other => {
+                        Err(RillError::new(format!("len not supported on {}", other.type_name()))
+                            .into())
+                    }
                 }
             }
             "split" => {
                 let s = self.eval_expr(&args[0])?.as_string_lossy();
                 let sep = self.eval_expr(&args[1])?.as_string_lossy();
-                Ok(Value::List(
-                    s.split(sep.as_str()).map(|p| Value::Str(p.to_string())).collect()
-                ))
+                Ok(Value::List(s.split(sep.as_str()).map(|p| Value::Str(p.to_string())).collect()))
             }
             "upper" => Ok(Value::Str(self.eval_expr(&args[0])?.as_string_lossy().to_uppercase())),
             "lower" => Ok(Value::Str(self.eval_expr(&args[0])?.as_string_lossy().to_lowercase())),
@@ -2462,8 +2432,10 @@ impl Evaluator {
                     Value::Str(s) => Ok(Value::Bool(s.contains(needle.as_string_lossy().as_str()))),
                     Value::List(items) => Ok(Value::Bool(items.contains(&needle))),
                     other => Err(RillError::new(format!(
-                        "contains not supported on {}", other.type_name()
-                    )).into()),
+                        "contains not supported on {}",
+                        other.type_name()
+                    ))
+                    .into()),
                 }
             }
             "starts_with" => {
@@ -2547,8 +2519,11 @@ impl Evaluator {
                     return Err(RillError::new("difference needs a List").into());
                 };
                 Ok(Value::List(match crate::eval_collections::difference_membership(&a, &b) {
-                    Some(membership) => a.into_iter().zip(membership)
-                        .filter_map(|(value, keep)| keep.then_some(value)).collect(),
+                    Some(membership) => a
+                        .into_iter()
+                        .zip(membership)
+                        .filter_map(|(value, keep)| keep.then_some(value))
+                        .collect(),
                     None => a.into_iter().filter(|x| !b.contains(x)).collect(),
                 }))
             }
@@ -2559,16 +2534,23 @@ impl Evaluator {
                 let Value::List(b) = self.eval_expr(&args[1])? else {
                     return Err(RillError::new("symmetric_difference needs a List").into());
                 };
-                let (only_a, only_b): (Vec<Value>, Vec<Value>) = match crate::eval_collections::symmetric_membership(&a, &b) {
-                    Some((a_membership, b_membership)) => (
-                        a.into_iter().zip(a_membership).filter_map(|(value, keep)| keep.then_some(value)).collect(),
-                        b.into_iter().zip(b_membership).filter_map(|(value, keep)| keep.then_some(value)).collect(),
-                    ),
-                    None => (
-                        a.iter().filter(|x| !b.contains(x)).cloned().collect(),
-                        b.iter().filter(|x| !a.contains(x)).cloned().collect(),
-                    ),
-                };
+                let (only_a, only_b): (Vec<Value>, Vec<Value>) =
+                    match crate::eval_collections::symmetric_membership(&a, &b) {
+                        Some((a_membership, b_membership)) => (
+                            a.into_iter()
+                                .zip(a_membership)
+                                .filter_map(|(value, keep)| keep.then_some(value))
+                                .collect(),
+                            b.into_iter()
+                                .zip(b_membership)
+                                .filter_map(|(value, keep)| keep.then_some(value))
+                                .collect(),
+                        ),
+                        None => (
+                            a.iter().filter(|x| !b.contains(x)).cloned().collect(),
+                            b.iter().filter(|x| !a.contains(x)).cloned().collect(),
+                        ),
+                    };
                 Ok(Value::List(only_a.into_iter().chain(only_b).collect()))
             }
             // Map methods
@@ -2592,9 +2574,7 @@ impl Evaluator {
                     return Err(RillError::new("entries needs a Map").into());
                 };
                 Ok(Value::List(
-                    map.into_iter()
-                        .map(|(k, v)| Value::List(vec![Value::Str(k), v]))
-                        .collect()
+                    map.into_iter().map(|(k, v)| Value::List(vec![Value::Str(k), v])).collect(),
                 ))
             }
             "contains_key" => {
@@ -2644,14 +2624,15 @@ impl Evaluator {
                 Value::Int(value) => Ok(Value::Int(value)),
                 Value::Float(value) => Ok(Value::Int(value as i64)),
                 Value::Bool(value) => Ok(Value::Int(value as i64)),
-                Value::Str(value) => value.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-                    RillError::new(format!("cannot coerce {value:?} to Int")).into()
-                }),
-                other => Err(RillError::new(format!(
-                    "cannot coerce {} to Int",
-                    other.type_name()
-                ))
-                .into()),
+                Value::Str(value) => {
+                    value.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                        RillError::new(format!("cannot coerce {value:?} to Int")).into()
+                    })
+                }
+                other => {
+                    Err(RillError::new(format!("cannot coerce {} to Int", other.type_name()))
+                        .into())
+                }
             },
             Builtin::Float => match self.eval_expr(&args[0])? {
                 Value::Float(value) => Ok(Value::Float(value)),
@@ -2660,15 +2641,12 @@ impl Evaluator {
                 Value::Str(value) => value.trim().parse::<f64>().map(Value::Float).map_err(|_| {
                     RillError::new(format!("cannot coerce {value:?} to Float")).into()
                 }),
-                other => Err(RillError::new(format!(
-                    "cannot coerce {} to Float",
-                    other.type_name()
-                ))
-                .into()),
+                other => {
+                    Err(RillError::new(format!("cannot coerce {} to Float", other.type_name()))
+                        .into())
+                }
             },
-            Builtin::Type => Ok(Value::Str(
-                self.eval_expr(&args[0])?.type_name().to_string(),
-            )),
+            Builtin::Type => Ok(Value::Str(self.eval_expr(&args[0])?.type_name().to_string())),
             Builtin::PrettyPrint => {
                 let value = self.eval_expr(&args[0])?;
                 println!("{}{}", pretty_value(&value, 0), ANSI_RESET);
@@ -2683,11 +2661,12 @@ impl Evaluator {
                     } else if implementation == Builtin::Prin {
                         use std::io::Write;
                         let mut stdout = std::io::stdout().lock();
-                        write!(stdout, "{value}")
-                            .map_err(|error| RillError::new(format!("failed to write stdout: {error}")))?;
-                        stdout
-                            .flush()
-                            .map_err(|error| RillError::new(format!("failed to flush stdout: {error}")))?;
+                        write!(stdout, "{value}").map_err(|error| {
+                            RillError::new(format!("failed to write stdout: {error}"))
+                        })?;
+                        stdout.flush().map_err(|error| {
+                            RillError::new(format!("failed to flush stdout: {error}"))
+                        })?;
                     } else {
                         eprintln!("{value}");
                     }
@@ -2767,11 +2746,10 @@ impl Evaluator {
                 }
                 Ok(Value::List(out))
             }
-            other => Err(RillError::new(format!(
-                "map needs a List or Map, got {}",
-                other.type_name()
-            ))
-            .into()),
+            other => {
+                Err(RillError::new(format!("map needs a List or Map, got {}", other.type_name()))
+                    .into())
+            }
         }
     }
 
@@ -2785,10 +2763,9 @@ impl Evaluator {
         // (item_args, is_binary) per slot — binary for Map entries (key, value)
         let slots: Vec<(Vec<Value>, bool)> = match list {
             Value::List(items) => items.into_iter().map(|v| (vec![v], false)).collect(),
-            Value::Map(entries) => entries
-                .into_iter()
-                .map(|(k, v)| (vec![Value::Str(k), v], true))
-                .collect(),
+            Value::Map(entries) => {
+                entries.into_iter().map(|(k, v)| (vec![Value::Str(k), v], true)).collect()
+            }
             other => {
                 return Err(RillError::new(format!(
                     "parallel_map needs a List or Map, got {}",
@@ -2829,10 +2806,7 @@ impl Evaluator {
                         } else {
                             child.apply_unary(
                                 &callback,
-                                item_args
-                                    .into_iter()
-                                    .next()
-                                    .expect("list slot has one item"),
+                                item_args.into_iter().next().expect("list slot has one item"),
                             )
                         }
                     });
@@ -3001,16 +2975,13 @@ impl Evaluator {
             return Err(RillError::new("group_by needs a List").into());
         };
         let keyer = &args[1];
-        let mut map: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
+        let mut map: std::collections::BTreeMap<String, Vec<Value>> =
+            std::collections::BTreeMap::new();
         for item in items {
             let key = self.apply_unary(keyer, item.clone())?.as_string_lossy();
             map.entry(key).or_default().push(item);
         }
-        Ok(Value::Map(
-            map.into_iter()
-                .map(|(k, v)| (k, Value::List(v)))
-                .collect(),
-        ))
+        Ok(Value::Map(map.into_iter().map(|(k, v)| (k, Value::List(v))).collect()))
     }
 
     fn eval_flat_map(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3140,12 +3111,7 @@ impl Evaluator {
         match value {
             Value::Function(function) => self.call_function_values(&function, args),
             Value::Closure(closure) => {
-                let current = std::mem::replace(
-                    &mut self.env,
-                    Env {
-                        scopes: closure.captured,
-                    },
-                );
+                let current = std::mem::replace(&mut self.env, Env { scopes: closure.captured });
                 let result = self.call_function_values(&closure.function, args);
                 self.env = current;
                 result
@@ -3210,9 +3176,7 @@ impl Evaluator {
                 })
             }
             BinaryOp::Range => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => {
-                    Value::List((*a..*b).map(Value::Int).collect())
-                }
+                (Value::Int(a), Value::Int(b)) => Value::List((*a..*b).map(Value::Int).collect()),
                 _ => {
                     return Err(RillError::new(format!(
                         "range requires Int..Int, got {}..{}",
@@ -3258,9 +3222,10 @@ impl Evaluator {
                             .map(|line| Value::Str(line.to_string()))
                             .collect(),
                     )),
-                    _ => Err(
-                        RillError::new("right side of | must be a command or byte consumer").into(),
-                    ),
+                    _ => {
+                        Err(RillError::new("right side of | must be a command or byte consumer")
+                            .into())
+                    }
                 }
             }
         }
@@ -3291,17 +3256,10 @@ impl Evaluator {
     fn eval_pipeline_bytes(&mut self, expr: &Expr) -> Result<Vec<u8>, EvalError> {
         let mut commands = Vec::new();
         if collect_byte_pipeline_commands(expr, &mut commands) {
-            return Ok(self
-                .eval_pipeline_commands(commands)?
-                .as_string_lossy()
-                .into_bytes());
+            return Ok(self.eval_pipeline_commands(commands)?.as_string_lossy().into_bytes());
         }
         match expr {
-            Expr::Pipe {
-                kind: PipeKind::Byte,
-                left,
-                right,
-            } => {
+            Expr::Pipe { kind: PipeKind::Byte, left, right } => {
                 let input = self.eval_pipeline_bytes(left)?;
                 match right.unspanned() {
                     Expr::Command(command) => {
@@ -3412,7 +3370,9 @@ impl Evaluator {
                             out.extend(items.into_iter().map(|item| item.as_string_lossy()));
                         }
                         other => {
-                            out.extend(other.as_string_lossy().split_whitespace().map(|w| w.to_string()));
+                            out.extend(
+                                other.as_string_lossy().split_whitespace().map(|w| w.to_string()),
+                            );
                         }
                     }
                 }
@@ -3504,7 +3464,7 @@ impl Evaluator {
                 },
                 _ => {
                     return Err(
-                        RillError::new(format!("unknown command config key '{name}'")).into(),
+                        RillError::new(format!("unknown command config key '{name}'")).into()
                     )
                 }
             }
@@ -3546,9 +3506,10 @@ impl Evaluator {
                 "capture" => Ok(ConfigStream::Mode(StreamMode::Capture)),
                 "inherit" => Ok(ConfigStream::Mode(StreamMode::Inherit)),
                 "null" => Ok(ConfigStream::Mode(StreamMode::Null)),
-                _ => Err(
-                    RillError::new(format!("unknown command {name} stream mode '{value}'")).into(),
-                ),
+                _ => {
+                    Err(RillError::new(format!("unknown command {name} stream mode '{value}'"))
+                        .into())
+                }
             };
         }
         Ok(ConfigStream::File(self.config_path(expr, name)?))
@@ -3621,9 +3582,7 @@ fn record_parallel_terminal(
     }
 }
 
-fn catch_parallel_job<T>(
-    job: impl FnOnce() -> Result<T, EvalError>,
-) -> Result<T, EvalError> {
+fn catch_parallel_job<T>(job: impl FnOnce() -> Result<T, EvalError>) -> Result<T, EvalError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
         Err(EvalError::Runtime(
             RillError::new("parallel iteration panicked").with_kind(ErrorKind::Runtime),
@@ -3655,10 +3614,7 @@ fn pretty_indent(level: usize) -> String {
 }
 
 fn pretty_string(value: &str) -> String {
-    pretty_color(
-        ANSI_GREEN,
-        serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}")),
-    )
+    pretty_color(ANSI_GREEN, serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}")))
 }
 
 fn pretty_value(value: &Value, level: usize) -> String {
@@ -3688,22 +3644,16 @@ fn pretty_value(value: &Value, level: usize) -> String {
                 .collect::<Vec<_>>();
             format!("{{\n{}\n{}}}", entries.join(",\n"), pretty_indent(level))
         }
-        Value::Option(Some(value)) => format!(
-            "{}({})",
-            pretty_color(ANSI_BLUE, "some"),
-            pretty_value(value, level)
-        ),
+        Value::Option(Some(value)) => {
+            format!("{}({})", pretty_color(ANSI_BLUE, "some"), pretty_value(value, level))
+        }
         Value::Option(None) => pretty_color(ANSI_BLUE, "none"),
-        Value::Result(Ok(value)) => format!(
-            "{}({})",
-            pretty_color(ANSI_BLUE, "ok"),
-            pretty_value(value, level)
-        ),
-        Value::Result(Err(value)) => format!(
-            "{}({})",
-            pretty_color(ANSI_RED, "err"),
-            pretty_value(value, level)
-        ),
+        Value::Result(Ok(value)) => {
+            format!("{}({})", pretty_color(ANSI_BLUE, "ok"), pretty_value(value, level))
+        }
+        Value::Result(Err(value)) => {
+            format!("{}({})", pretty_color(ANSI_RED, "err"), pretty_value(value, level))
+        }
         Value::Error(error) => pretty_color(ANSI_RED, error.message.clone()),
         other => pretty_color(ANSI_BLUE, other.to_string()),
     }
@@ -3749,39 +3699,29 @@ fn method_kind(value: &Value) -> crate::methods::Kind {
 
 fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
     match base {
-        Value::Map(map) => map
-            .get(name)
-            .cloned()
-            .ok_or_else(|| RillError::new(format!("unknown field '{name}'"))),
+        Value::Map(map) => {
+            map.get(name).cloned().ok_or_else(|| RillError::new(format!("unknown field '{name}'")))
+        }
         Value::ProcessResult(result) => match name {
             "status" => Ok(Value::Int(result.status as i64)),
             "out" => Ok(Value::Str(result.stdout_text_lossy().into_owned())),
             "err" => Ok(Value::Str(result.stderr_text_lossy().into_owned())),
             "ok" => Ok(Value::Bool(result.ok())),
-            other => Err(RillError::new(format!(
-                "unknown ProcessResult field '{other}'"
-            ))),
+            other => Err(RillError::new(format!("unknown ProcessResult field '{other}'"))),
         },
         ref value
             if crate::methods::lookup(name)
                 .is_some_and(|method| method.accepts(method_kind(value))) =>
         {
-            Err(RillError::new(format!(
-                ".{name} is a method; call .{name}(...)"
-            )))
+            Err(RillError::new(format!(".{name} is a method; call .{name}(...)")))
         }
-        other => Err(RillError::new(format!(
-            "{} has no field '{name}'",
-            other.type_name()
-        ))),
+        other => Err(RillError::new(format!("{} has no field '{name}'", other.type_name()))),
     }
 }
 
 fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, RillError> {
     if op == BinaryOp::Add && matches!((&left, &right), (Value::List(_), Value::List(_))) {
-        let (Value::List(mut left), Value::List(right)) = (left, right) else {
-            unreachable!()
-        };
+        let (Value::List(mut left), Value::List(right)) = (left, right) else { unreachable!() };
         left.extend(right);
         return Ok(Value::List(left));
     }
@@ -3838,7 +3778,8 @@ fn check_numeric_operands(left: &Value, right: &Value, op: BinaryOp) -> Result<(
     };
     Err(RillError::new(format!(
         "operator '{operator}' needs numeric operands, got {} and {}",
-        left.type_name(), right.type_name()
+        left.type_name(),
+        right.type_name()
     )))
 }
 
@@ -3860,11 +3801,9 @@ fn as_usize(value: &Value) -> Result<usize, RillError> {
 fn constant_int_expr(expr: &Expr) -> Option<i64> {
     match expr.unspanned() {
         Expr::Literal(Literal::Int(value)) => Some(*value),
-        Expr::Binary {
-            op: BinaryOp::Sub,
-            left,
-            right,
-        } if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) => {
+        Expr::Binary { op: BinaryOp::Sub, left, right }
+            if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) =>
+        {
             match right.unspanned() {
                 Expr::Literal(Literal::Int(value)) => value.checked_neg(),
                 _ => None,
@@ -3878,9 +3817,7 @@ fn normalize_runtime_index(index: i64, len: usize, kind: &str) -> Result<usize, 
     let len_i64 = len as i64;
     let normalized = if index < 0 { len_i64 + index } else { index };
     if normalized < 0 || normalized >= len_i64 {
-        Err(RillError::new(format!(
-            "{kind} index {index} out of bounds (len {len})"
-        )))
+        Err(RillError::new(format!("{kind} index {index} out of bounds (len {len})")))
     } else {
         Ok(normalized as usize)
     }
@@ -3905,23 +3842,17 @@ fn parse_arg_value(
             .parse::<f64>()
             .map(Value::Float)
             .map_err(|_| RillError::new(format!("expected Float argument, got '{value}'"))),
-        TypeName::Path => Ok(Value::Path(
-            crate::pathresolver::resolve_path(value, lookup)?,
-        )),
+        TypeName::Path => Ok(Value::Path(crate::pathresolver::resolve_path(value, lookup)?)),
         TypeName::Option(inner) => {
-            parse_arg_value(value, inner, lookup)
-                .map(|value| Value::Option(Some(Box::new(value))))
+            parse_arg_value(value, inner, lookup).map(|value| Value::Option(Some(Box::new(value))))
         }
-        other => Err(RillError::new(format!(
-            "unsupported CLI argument type {other:?}"
-        ))),
+        other => Err(RillError::new(format!("unsupported CLI argument type {other:?}"))),
     }
 }
 
 fn parse_url(value: &str) -> Result<BTreeMap<String, Value>, RillError> {
-    let (scheme, rest) = value
-        .split_once("://")
-        .ok_or_else(|| RillError::new("url must include a scheme"))?;
+    let (scheme, rest) =
+        value.split_once("://").ok_or_else(|| RillError::new("url must include a scheme"))?;
     let (authority, path_query) = rest.split_once('/').unwrap_or((rest, ""));
     let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
     let (query, fragment) = query.split_once('#').unwrap_or((query, ""));
@@ -3978,11 +3909,7 @@ fn simple_glob_with_lookup(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<PathBuf>, RillError> {
     let resolved = crate::pathresolver::resolve_path(pattern, lookup)?;
-    if !resolved
-        .to_string_lossy()
-        .chars()
-        .any(|c| matches!(c, '*' | '?' | '['))
-    {
+    if !resolved.to_string_lossy().chars().any(|c| matches!(c, '*' | '?' | '[')) {
         return Ok(vec![resolved]);
     }
     let pattern_text = resolved.to_string_lossy().into_owned();
@@ -4006,14 +3933,12 @@ fn expand_tilde_prefix(s: &str) -> String {
     } else if let Some(rest) = s.strip_prefix('~') {
         let (user, suffix) = rest.split_once('/').unwrap_or((rest, ""));
         if !user.is_empty()
-            && user
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && user.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             if let Some(home) = {
-            use crate::pathresolver::UserLookup as _;
-            crate::pathresolver::OsUserLookup.home_for(user)
-        } {
+                use crate::pathresolver::UserLookup as _;
+                crate::pathresolver::OsUserLookup.home_for(user)
+            } {
                 return if suffix.is_empty() {
                     home.to_string_lossy().into_owned()
                 } else {
@@ -4025,18 +3950,13 @@ fn expand_tilde_prefix(s: &str) -> String {
     s.to_string()
 }
 
-
 fn collect_byte_pipeline_commands<'a>(expr: &'a Expr, commands: &mut Vec<&'a CommandExpr>) -> bool {
     match expr.unspanned() {
         Expr::Command(command) => {
             commands.push(command);
             true
         }
-        Expr::Pipe {
-            kind: PipeKind::Byte,
-            left,
-            right,
-        } => {
+        Expr::Pipe { kind: PipeKind::Byte, left, right } => {
             collect_byte_pipeline_commands(left, commands)
                 && match right.unspanned() {
                     Expr::Command(command) => {
@@ -4070,11 +3990,11 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::Try(value) => contains_implicit(value),
         Expr::For { iter, .. } => contains_implicit(iter),
         Expr::Block(stmts) => stmts.iter().any(|stmt| match stmt {
-            Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => {
-                contains_implicit(expr)
-            }
+            Stmt::Let { expr, .. } | Stmt::Expr(expr) | Stmt::Emit(expr) => contains_implicit(expr),
             Stmt::Assign { expr, .. } => contains_implicit(expr),
-            Stmt::IndexAssign { index, expr, .. } => contains_implicit(index) || contains_implicit(expr),
+            Stmt::IndexAssign { index, expr, .. } => {
+                contains_implicit(index) || contains_implicit(expr)
+            }
             Stmt::While { cond, .. } => contains_implicit(cond),
             Stmt::If { cond, .. } => contains_implicit(cond),
             Stmt::On { host, .. } => contains_implicit(host),
@@ -4125,9 +4045,7 @@ fn argv_from_value(value: Value, operation: &str) -> Result<Vec<String>, RillErr
         return Err(RillError::new(format!("{operation} needs List[Str]")));
     };
     if items.is_empty() {
-        return Err(RillError::new(format!(
-            "{operation} needs a non-empty argv"
-        )));
+        return Err(RillError::new(format!("{operation} needs a non-empty argv")));
     }
     items
         .into_iter()

@@ -18,12 +18,7 @@ fn ordinary_arguments_and_help_do_not_read_stdin() {
     for args in [
         vec!["-e", "print(args)", "not-a-filename"],
         vec!["-e", "args { count: Int = 1 } input lines", "--help"],
-        vec![
-            "-e",
-            "args { count: Int = 1 } print(args.count)",
-            "--count",
-            "3",
-        ],
+        vec!["-e", "args { count: Int = 1 } print(args.count)", "--count", "3"],
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rill"))
             .args(args)
@@ -34,20 +29,14 @@ fn ordinary_arguments_and_help_do_not_read_stdin() {
             .unwrap();
         let _open_stdin = child.stdin.take().unwrap();
         let output = bounded_output(child);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
 }
 
 #[test]
 fn prin_writes_without_a_trailing_newline() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rill"))
-        .args(["-e", "prin \"hello\""])
-        .output()
-        .unwrap();
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_rill")).args(["-e", "prin \"hello\""]).output().unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"hello");
 }
@@ -81,18 +70,9 @@ fn explicit_input_and_child_stdin_have_separate_ownership() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"owned input\n")
-            .unwrap();
+        child.stdin.take().unwrap().write_all(b"owned input\n").unwrap();
         let output = bounded_output(child);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(String::from_utf8_lossy(&output.stdout).contains("owned input"));
     }
 }
@@ -112,21 +92,14 @@ print(args.command.start.port)
         .args(["-e", source, "start", "--port", "42"])
         .output()
         .expect("run rill");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("42"));
 }
 
 #[test]
 fn cli_exit_builtin_sets_process_status() {
     let exe = env!("CARGO_BIN_EXE_rill");
-    let status = Command::new(exe)
-        .args(["-e", "exit(7)"])
-        .status()
-        .expect("run rill");
+    let status = Command::new(exe).args(["-e", "exit(7)"]).status().expect("run rill");
     assert_eq!(status.code(), Some(7));
 }
 
@@ -134,10 +107,7 @@ fn cli_exit_builtin_sets_process_status() {
 fn cli_renders_unhandled_result_errors() {
     let exe = env!("CARGO_BIN_EXE_rill");
     let output = Command::new(exe)
-        .args([
-            "-e",
-            "fn failed() -> Result[Int, Error] { err(\"bad\") } failed()",
-        ])
+        .args(["-e", "fn failed() -> Result[Int, Error] { err(\"bad\") } failed()"])
         .output()
         .expect("run rill");
     assert_eq!(output.status.code(), Some(1));
@@ -149,9 +119,8 @@ fn cli_renders_unhandled_result_errors() {
 #[test]
 fn runtime_numeric_errors_show_source_operator_and_types() {
     for operator in [">", "+", "-", "*", "/"] {
-        let source = format!(
-            "let record = {{value: \"text\"}}\nprint(record.get(\"value\") {operator} 1)"
-        );
+        let source =
+            format!("let record = {{value: \"text\"}}\nprint(record.get(\"value\") {operator} 1)");
         let output = Command::new(env!("CARGO_BIN_EXE_rill"))
             .args(["-e", &source])
             .env("NO_COLOR", "1")

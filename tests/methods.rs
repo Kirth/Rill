@@ -17,10 +17,8 @@ fn eval_without_check(source: &str) -> Result<Value, rill::diagnostic::RillError
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let path =
             std::env::temp_dir().join(format!("rill-methods-{}-{stamp}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
@@ -47,18 +45,33 @@ fn list_searches_return_options_and_short_circuit() {
             "[1, 2].{method}(|x| {{ if x == 2 {{ die(\"must short circuit\") }}; true }})"
         ));
         assert_eq!(found, if method == "find" { run("some(1)") } else { Value::Bool(true) });
-        assert!(rill::run_source(&format!("[1].{method}(|x| {{ die(\"predicate failed\") }})"), vec![])
-            .unwrap_err().message.contains("predicate failed"));
-        for source in [format!("[1].{method}()"), format!("[1].{method}(1)"),
-            format!("[1].{method}(|a, b| true)"), format!("null.{method}(|x| true)")] {
+        assert!(rill::run_source(
+            &format!("[1].{method}(|x| {{ die(\"predicate failed\") }})"),
+            vec![]
+        )
+        .unwrap_err()
+        .message
+        .contains("predicate failed"));
+        for source in [
+            format!("[1].{method}()"),
+            format!("[1].{method}(1)"),
+            format!("[1].{method}(|a, b| true)"),
+            format!("null.{method}(|x| true)"),
+        ] {
             assert!(check(&source).is_err(), "{source}");
         }
     }
     assert_eq!(run(r#"["disk: root"].find(.starts_with("disk:")).is_some()"#), Value::Bool(true));
-    assert_eq!(run("fn positive(n: Int) -> Bool { n > 0 }; [0, 1] |> .any(positive)"), Value::Bool(true));
+    assert_eq!(
+        run("fn positive(n: Int) -> Bool { n > 0 }; [0, 1] |> .any(positive)"),
+        Value::Bool(true)
+    );
     assert_eq!(run("[1] |> .find(. > 0) |> .unwrap_or(0)"), Value::Int(1));
     assert_eq!(run("match [1].find(. > 0) { some(x) => x, none => 0 }"), Value::Int(1));
-    assert_eq!(run("fn search() -> Option[Int] { let x = [1].find(. > 0)?; some(x) }; search()"), run("some(1)"));
+    assert_eq!(
+        run("fn search() -> Option[Int] { let x = [1].find(. > 0)?; some(x) }; search()"),
+        run("some(1)")
+    );
     check("let x: Option[Int] = [1].find(. > 0)").unwrap();
     check("let x: Bool = [1].any(. > 0)").unwrap();
     assert!(check("let x: Option[Str] = [1].find(. > 0)").is_err());
@@ -97,10 +110,7 @@ fn list_difference_preserves_order_duplicates_and_nested_values() {
     let value = run(r#"[
         [1, [2]], [3], [1, [2]], 4
     ].difference([[1, [2]], 9])"#);
-    assert_eq!(
-        value,
-        Value::List(vec![Value::List(vec![Value::Int(3)]), Value::Int(4)])
-    );
+    assert_eq!(value, Value::List(vec![Value::List(vec![Value::Int(3)]), Value::Int(4)]));
 }
 
 #[test]
@@ -120,11 +130,7 @@ fn map_fields_and_method_names_can_coexist() {
 let obj = {get: "data", trim: "field", custom: |x| x + 1}
 [obj.get("get"), obj.trim, obj.custom(2)]
 "#),
-        Value::List(vec![
-            Value::Str("data".into()),
-            Value::Str("field".into()),
-            Value::Int(3)
-        ])
+        Value::List(vec![Value::Str("data".into()), Value::Str("field".into()), Value::Int(3)])
     );
     assert_eq!(
         run(r#"
@@ -132,23 +138,14 @@ let json = {parse: |text| text}
 let path = path("/tmp")
 [json.parse("ok"), path.join("child")]
 "#),
-        Value::List(vec![
-            Value::Str("ok".into()),
-            Value::Path(PathBuf::from("/tmp/child"))
-        ])
+        Value::List(vec![Value::Str("ok".into()), Value::Path(PathBuf::from("/tmp/child"))])
     );
-    assert_eq!(
-        run(r#"({get: |x| x}).get("get")("ok")"#),
-        Value::Str("ok".into())
-    );
+    assert_eq!(run(r#"({get: |x| x}).get("get")("ok")"#), Value::Str("ok".into()));
 }
 
 #[test]
 fn serialization_regex_and_duration_methods_work() {
-    assert_eq!(
-        run(r#"let text = " hi "; "{text.trim()}""#),
-        Value::Str("hi".into())
-    );
+    assert_eq!(run(r#"let text = " hi "; "{text.trim()}""#), Value::Str("hi".into()));
     assert_eq!(run("1.to_json()"), Value::Str("1".into()));
     assert_eq!(run("0s.sleep()"), Value::Null);
     assert_eq!(
@@ -243,9 +240,7 @@ fail()
         rill::parser::parse(r#"let it = "outer"; "x" |> .replace("x", die("stop"))"#).unwrap();
     assert!(evaluator.eval_program(&program).is_err());
     assert_eq!(
-        evaluator
-            .eval_program(&rill::parser::parse("it").unwrap())
-            .unwrap(),
+        evaluator.eval_program(&rill::parser::parse("it").unwrap()).unwrap(),
         Value::Str("outer".into())
     );
 }
@@ -267,27 +262,15 @@ load()
 "#,
         filename.display()
     );
-    assert_eq!(
-        run(&source),
-        Value::Result(Ok(Box::new(Value::Str("name: rill rill".into()))))
-    );
+    assert_eq!(run(&source), Value::Result(Ok(Box::new(Value::Str("name: rill rill".into())))));
     for (namespace, method) in [("yaml.read", "read_yaml"), ("fs.read", "read_text")] {
         let expected = run(&format!(r#"path("{}").{method}()"#, filename.display()));
-        assert_eq!(
-            run(&format!(r#"{namespace}("{}")"#, filename.display())),
-            expected
-        );
-        assert_eq!(
-            run(&format!(r#"{namespace}(path("{}"))"#, filename.display())),
-            expected
-        );
+        assert_eq!(run(&format!(r#"{namespace}("{}")"#, filename.display())), expected);
+        assert_eq!(run(&format!(r#"{namespace}(path("{}"))"#, filename.display())), expected);
     }
     check(r#"let text: Result[Str, Error] = fs.read("file")"#).unwrap();
     check(r#"fn load() -> Result[Map, Error] { yaml.read("file") }"#).unwrap();
-    assert_eq!(
-        run(&format!(r#"path("{}").exists()"#, filename.display())),
-        Value::Bool(true)
-    );
+    assert_eq!(run(&format!(r#"path("{}").exists()"#, filename.display())), Value::Bool(true));
     assert_eq!(
         run(&format!(r#""{}/*.yml".glob()"#, scratch.0.display())),
         Value::List(vec![Value::Path(filename.clone())])
@@ -299,21 +282,10 @@ load()
         (scratch.0.join("missing"), "read_text", ErrorKind::Io),
     ] {
         let source = format!(r#"path("{}").{method}()"#, path.display());
-        let namespace = if method == "read_yaml" {
-            "yaml.read"
-        } else {
-            "fs.read"
-        };
-        assert_eq!(
-            run(&format!(r#"{namespace}("{}")"#, path.display())),
-            run(&source)
-        );
-        let Value::Result(Err(error)) = run(&source) else {
-            panic!("expected Err")
-        };
-        let Value::Error(error) = *error else {
-            panic!("expected structured error")
-        };
+        let namespace = if method == "read_yaml" { "yaml.read" } else { "fs.read" };
+        assert_eq!(run(&format!(r#"{namespace}("{}")"#, path.display())), run(&source));
+        let Value::Result(Err(error)) = run(&source) else { panic!("expected Err") };
+        let Value::Error(error) = *error else { panic!("expected structured error") };
         assert_eq!(error.kind, expected_kind);
         assert_eq!(error.operation.as_deref(), Some(method));
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_rill"))
@@ -342,9 +314,7 @@ fn archive_methods_list_and_extract() {
     header.set_size(5);
     header.set_mode(0o644);
     header.set_cksum();
-    builder
-        .append_data(&mut header, "file.txt", &b"hello"[..])
-        .unwrap();
+    builder.append_data(&mut header, "file.txt", &b"hello"[..]).unwrap();
     builder.finish().unwrap();
     assert_eq!(
         run(&format!(r#"path("{}").archive_list()"#, archive.display())),
@@ -359,10 +329,7 @@ fn archive_methods_list_and_extract() {
         )),
         Value::Null
     );
-    assert_eq!(
-        std::fs::read_to_string(destination.join("file.txt")).unwrap(),
-        "hello"
-    );
+    assert_eq!(std::fs::read_to_string(destination.join("file.txt")).unwrap(), "hello");
 }
 
 #[test]
@@ -371,31 +338,16 @@ fn method_pipelines_preserve_process_and_function_behavior() {
         run(r#"run printf " a\nb\n" | run cat | .lines() |> .map(.trim()).reverse()"#),
         Value::List(vec![Value::Str("b".into()), Value::Str("a".into())])
     );
-    assert_eq!(
-        run(r#"["printf", "ok"].spawn().await().out"#),
-        Value::Str("ok".into())
-    );
-    assert_eq!(
-        run(r#"["sh", "-c", "exit 3"].run().ok"#),
-        Value::Bool(false)
-    );
+    assert_eq!(run(r#"["printf", "ok"].spawn().await().out"#), Value::Str("ok".into()));
+    assert_eq!(run(r#"["sh", "-c", "exit 3"].run().ok"#), Value::Bool(false));
     assert_eq!(
         run(r#"[["printf", "a"], ["printf", "b"]].parallel().map(.out)"#),
         Value::List(vec![Value::Str("a".into()), Value::Str("b".into())])
     );
-    assert_eq!(
-        run(r#"fn double(x: Int) -> Int { x * 2 }; 3 |> double"#),
-        Value::Int(6)
-    );
+    assert_eq!(run(r#"fn double(x: Int) -> Int { x * 2 }; 3 |> double"#), Value::Int(6));
     assert_eq!(run(r#"let double = |x| x * 2; 3 |> double"#), Value::Int(6));
-    assert_eq!(
-        run(r#"fn map(x: Int, n: Int) -> Int { x + n }; 3 |> map(2)"#),
-        Value::Int(5)
-    );
-    assert_eq!(
-        run(r#"fn trim(x: Int) -> Int { x + 1 }; trim(2)"#),
-        Value::Int(3)
-    );
+    assert_eq!(run(r#"fn map(x: Int, n: Int) -> Int { x + n }; 3 |> map(2)"#), Value::Int(5));
+    assert_eq!(run(r#"fn trim(x: Int) -> Int { x + 1 }; trim(2)"#), Value::Int(3));
 }
 
 #[test]
@@ -531,11 +483,7 @@ fn registry_arities_conform_between_checker_and_evaluator() {
 
         let mut too_many_args = arguments.clone();
         too_many_args.push("null");
-        let too_many = format!(
-            "({receiver}).{}({})",
-            method.name,
-            too_many_args.join(", ")
-        );
+        let too_many = format!("({receiver}).{}({})", method.name, too_many_args.join(", "));
         assert!(check(&too_many).is_err(), "checker accepted too many args: {too_many}");
         assert!(
             eval_without_check(&too_many).is_err(),
@@ -580,12 +528,18 @@ fn registry_arities_conform_between_checker_and_evaluator() {
         if builtin.min_args > 0 {
             let too_few = source(builtin.min_args - 1);
             assert!(check(&too_few).is_err(), "checker accepted too few args: {too_few}");
-            assert!(eval_without_check(&too_few).is_err(), "evaluator accepted too few args: {too_few}");
+            assert!(
+                eval_without_check(&too_few).is_err(),
+                "evaluator accepted too few args: {too_few}"
+            );
         }
         if builtin.max_args != usize::MAX {
             let too_many = source(builtin.max_args + 1);
             assert!(check(&too_many).is_err(), "checker accepted too many args: {too_many}");
-            assert!(eval_without_check(&too_many).is_err(), "evaluator accepted too many args: {too_many}");
+            assert!(
+                eval_without_check(&too_many).is_err(),
+                "evaluator accepted too many args: {too_many}"
+            );
         }
     }
     std::env::remove_var("RILL_REGISTRY_CONFORMANCE");
@@ -607,17 +561,9 @@ fn removed_forms_have_migration_diagnostics() {
         ("[] |> map(|x| x)", "map"),
     ] {
         let error = check(source).expect_err(source).to_string();
-        assert!(
-            error.contains("removed") && error.contains(replacement),
-            "{source}: {error}"
-        );
+        assert!(error.contains("removed") && error.contains(replacement), "{source}: {error}");
         let program = rill::parser::parse(source).unwrap();
-        assert!(
-            rill::eval::Evaluator::new(vec![])
-                .eval_program(&program)
-                .is_err(),
-            "{source}"
-        );
+        assert!(rill::eval::Evaluator::new(vec![]).eval_program(&program).is_err(), "{source}");
     }
     assert!(check(r#"run printf "x" | lines"#).is_err());
     assert!(check(r#"run printf "x" | lines()"#).is_err());
@@ -630,51 +576,27 @@ fn namespace_apis_share_method_behavior() {
         (r#"yaml.parse("[1, 2]")"#, r#""[1, 2]".parse_yaml()"#),
         (r#"toml.parse("x = 1")"#, r#""x = 1".parse_toml()"#),
         (r#"csv.parse("a,b")"#, r#""a,b".parse_csv()"#),
-        (
-            r#"url.parse("https://example.com/a")"#,
-            r#""https://example.com/a".parse_url()"#,
-        ),
+        (r#"url.parse("https://example.com/a")"#, r#""https://example.com/a".parse_url()"#),
         (r#"json.stringify({a: 1})"#, r#"({a: 1}).to_json()"#),
         (r#"json.pretty({a: 1})"#, r#"({a: 1}).to_json_pretty()"#),
         (r#"yaml.stringify({a: 1})"#, r#"({a: 1}).to_yaml()"#),
         (r#"toml.stringify({a: 1})"#, r#"({a: 1}).to_toml()"#),
-        (
-            r#"path.join("/tmp", "child")"#,
-            r#"path("/tmp").join("child")"#,
-        ),
+        (r#"path.join("/tmp", "child")"#, r#"path("/tmp").join("child")"#),
         (r#"fs.exists("/tmp")"#, r#"path("/tmp").exists()"#),
         (r#"hashes.sha256("abc")"#, r#""abc".sha256()"#),
-        (
-            r#"regex.is_match("a.*", "abc")"#,
-            r#""abc".is_match("a.*")"#,
-        ),
-        (
-            r#"regex.is_match(/a.*/, "abc")"#,
-            r#"/a.*/.is_match("abc")"#,
-        ),
-        (
-            r#"process.run(["printf", "ok"])"#,
-            r#"["printf", "ok"].run()"#,
-        ),
-        (
-            r#"process.exec(["printf", "ok"])"#,
-            r#"["printf", "ok"].run()"#,
-        ),
+        (r#"regex.is_match("a.*", "abc")"#, r#""abc".is_match("a.*")"#),
+        (r#"regex.is_match(/a.*/, "abc")"#, r#"/a.*/.is_match("abc")"#),
+        (r#"process.run(["printf", "ok"])"#, r#"["printf", "ok"].run()"#),
+        (r#"process.exec(["printf", "ok"])"#, r#"["printf", "ok"].run()"#),
         ("time.sleep(0)", "0s.sleep()"),
         ("time.sleep(0s)", "0s.sleep()"),
     ] {
         assert_eq!(run(namespace), run(method), "{namespace}");
     }
-    assert_eq!(
-        run(r#""[1]" |> json.parse() |> .take(1)"#),
-        Value::List(vec![Value::Int(1)])
-    );
+    assert_eq!(run(r#""[1]" |> json.parse() |> .take(1)"#), Value::List(vec![Value::Int(1)]));
     let scratch = Scratch::new();
     let file = scratch.0.join("file");
-    assert_eq!(
-        run(&format!(r#"fs.write("{}", "hello")"#, file.display())),
-        Value::Null
-    );
+    assert_eq!(run(&format!(r#"fs.write("{}", "hello")"#, file.display())), Value::Null);
     assert_eq!(std::fs::read_to_string(file).unwrap(), "hello");
     for source in [
         "yaml.read()",

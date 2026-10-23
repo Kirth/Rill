@@ -139,9 +139,7 @@ fn expand_template(
                     } else if let Some(value) = lookup(&name) {
                         result.push_str(&value); // literal
                     } else {
-                        return Err(RillError::new(format!(
-                            "unset variable '${name}' in path"
-                        )));
+                        return Err(RillError::new(format!("unset variable '${name}' in path")));
                     }
                 }
             }
@@ -205,19 +203,12 @@ mod tests {
     struct FakeUsers(Vec<(&'static str, &'static str)>);
     impl UserLookup for FakeUsers {
         fn home_for(&self, username: &str) -> Option<PathBuf> {
-            self.0
-                .iter()
-                .find(|(u, _)| *u == username)
-                .map(|(_, h)| PathBuf::from(h))
+            self.0.iter().find(|(u, _)| *u == username).map(|(_, h)| PathBuf::from(h))
         }
     }
 
     fn env_lookup<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |name: &str| {
-            vars.iter()
-                .find(|(k, _)| *k == name)
-                .map(|(_, v)| v.to_string())
-        }
+        move |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
     }
 
     fn resolve(template: &str, vars: &[(&str, &str)]) -> Result<PathBuf, RillError> {

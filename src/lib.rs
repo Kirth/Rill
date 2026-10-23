@@ -1,8 +1,8 @@
 pub mod ast;
 pub mod diagnostic;
+pub mod eval;
 mod eval_collections;
 mod eval_data;
-pub mod eval;
 pub mod methods;
 pub mod parser;
 pub mod pathresolver;
@@ -76,8 +76,7 @@ impl CompilationSession {
                 .map_err(|err| attach_source(err, &unit))?;
             let import_refs = imports.iter().collect::<Vec<_>>();
             typeck::check_module(&program, &import_refs).map_err(|err| {
-                err.with_kind(ErrorKind::Type)
-                    .with_source(unit.name.clone(), unit.source.clone())
+                err.with_kind(ErrorKind::Type).with_source(unit.name.clone(), unit.source.clone())
             })?;
             Ok(program)
         })();
@@ -161,11 +160,8 @@ impl CompilationSession {
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>();
             chain.push(path.display().to_string());
-            return Err(RillError::new(format!(
-                "cyclic module import: {}",
-                chain.join(" -> ")
-            ))
-            .with_kind(ErrorKind::Type));
+            return Err(RillError::new(format!("cyclic module import: {}", chain.join(" -> ")))
+                .with_kind(ErrorKind::Type));
         }
         self.loading.push(path.to_path_buf());
         Ok(())
@@ -174,8 +170,7 @@ impl CompilationSession {
 
 fn parse_source(unit: &SourceUnit) -> Result<ast::Program, RillError> {
     parser::parse(&unit.source).map_err(|err| {
-        err.with_kind(ErrorKind::Parse)
-            .with_source(unit.name.clone(), unit.source.clone())
+        err.with_kind(ErrorKind::Parse).with_source(unit.name.clone(), unit.source.clone())
     })
 }
 
@@ -253,14 +248,20 @@ fn collect_arg_group_imports(group: &ast::ArgGroup, imports: &mut Vec<String>) {
 fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
     match expr.unspanned() {
         ast::Expr::List(items) | ast::Expr::Tuple(items) => {
-            for item in items { collect_expr_imports(item, imports); }
+            for item in items {
+                collect_expr_imports(item, imports);
+            }
         }
         ast::Expr::Map(items) => {
-            for (_, value) in items { collect_expr_imports(value, imports); }
+            for (_, value) in items {
+                collect_expr_imports(value, imports);
+            }
         }
         ast::Expr::Call { callee, args } => {
             collect_expr_imports(callee, imports);
-            for arg in args { collect_expr_imports(arg, imports); }
+            for arg in args {
+                collect_expr_imports(arg, imports);
+            }
         }
         ast::Expr::Field { base, .. } => collect_expr_imports(base, imports),
         ast::Expr::Binary { left, right, .. } | ast::Expr::Pipe { left, right, .. } => {
@@ -268,9 +269,15 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_expr_imports(right, imports);
         }
         ast::Expr::Command(command) => {
-            for arg in &command.argv { collect_command_arg_imports(arg, imports); }
-            for redirect in &command.redirects { collect_command_arg_imports(&redirect.target, imports); }
-            for (_, value) in &command.config { collect_expr_imports(value, imports); }
+            for arg in &command.argv {
+                collect_command_arg_imports(arg, imports);
+            }
+            for redirect in &command.redirects {
+                collect_command_arg_imports(&redirect.target, imports);
+            }
+            for (_, value) in &command.config {
+                collect_expr_imports(value, imports);
+            }
         }
         ast::Expr::RegexMatch { value, .. }
         | ast::Expr::RegexSubstitution { value, .. }
@@ -283,7 +290,9 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
         }
         ast::Expr::Match { value, arms } => {
             collect_expr_imports(value, imports);
-            for arm in arms { collect_expr_imports(&arm.expr, imports); }
+            for arm in arms {
+                collect_expr_imports(&arm.expr, imports);
+            }
         }
         ast::Expr::For { iter, body, .. } => {
             collect_expr_imports(iter, imports);
@@ -325,11 +334,7 @@ pub fn cli_help(group: &ast::ArgGroup) -> String {
 fn cli_help_named(group: &ast::ArgGroup, usage: &str) -> String {
     let mut help = format!("Usage: {usage} [options] [arguments]\n\nOptions:\n");
     for field in &group.fields {
-        let short = field
-            .short
-            .as_ref()
-            .map(|value| format!("-{}, ", value))
-            .unwrap_or_default();
+        let short = field.short.as_ref().map(|value| format!("-{}, ", value)).unwrap_or_default();
         let default = field.default.as_ref().map(|_| " [default]").unwrap_or("");
         help.push_str(&format!(
             "  {}--{}{} {}\n",
@@ -390,9 +395,7 @@ pub fn run_compiled(
             .eval_module_program(&module.program)
             .map_err(|error| attach_source(error, &module.source))?;
     }
-    evaluator.eval_program(&program.program).map_err(|error| {
-        attach_source(error, &program.source)
-    })
+    evaluator.eval_program(&program.program).map_err(|error| attach_source(error, &program.source))
 }
 
 fn attach_source(error: RillError, source: &SourceUnit) -> RillError {
@@ -419,7 +422,9 @@ fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
             expr_needs_input(index) || expr_needs_input(expr)
         }
         ast::Stmt::If { cond, then_body, else_body, .. } => {
-            expr_needs_input(cond) || program_needs_input(then_body) || program_needs_input(else_body)
+            expr_needs_input(cond)
+                || program_needs_input(then_body)
+                || program_needs_input(else_body)
         }
         ast::Stmt::While { cond, body } => expr_needs_input(cond) || program_needs_input(body),
         ast::Stmt::WithEnv { bindings, body } => {
@@ -447,7 +452,10 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Command(command) => {
             command.argv.iter().any(command_arg_needs_input)
-                || command.redirects.iter().any(|redirect| command_arg_needs_input(&redirect.target))
+                || command
+                    .redirects
+                    .iter()
+                    .any(|redirect| command_arg_needs_input(&redirect.target))
                 || command.config.iter().any(|(_, value)| expr_needs_input(value))
         }
         ast::Expr::RegexMatch { value, .. } | ast::Expr::RegexSubstitution { value, .. } => {
@@ -456,9 +464,9 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         ast::Expr::Match { value, arms } => {
             expr_needs_input(value) || arms.iter().any(|arm| expr_needs_input(&arm.expr))
         }
-        ast::Expr::NamedArg { value, .. } | ast::Expr::Try(value) | ast::Expr::Unary { operand: value, .. } => {
-            expr_needs_input(value)
-        }
+        ast::Expr::NamedArg { value, .. }
+        | ast::Expr::Try(value)
+        | ast::Expr::Unary { operand: value, .. } => expr_needs_input(value),
         ast::Expr::For { iter, body, .. } => expr_needs_input(iter) || program_needs_input(body),
         ast::Expr::Index { base, index } => expr_needs_input(base) || expr_needs_input(index),
         ast::Expr::Block(body) | ast::Expr::Closure { body, .. } => program_needs_input(body),

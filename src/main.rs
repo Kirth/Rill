@@ -38,10 +38,8 @@ fn run_cli() -> Result<ExitCode, RillError> {
     let mode = argv.remove(0);
     match mode.as_str() {
         "-e" => {
-            let source = argv
-                .first()
-                .ok_or_else(|| RillError::new("missing source after -e"))?
-                .clone();
+            let source =
+                argv.first().ok_or_else(|| RillError::new("missing source after -e"))?.clone();
             let script_args = argv.into_iter().skip(1).collect::<Vec<_>>();
             let mut session = rill::CompilationSession::new();
             let program = session.compile(rill::SourceUnit {
@@ -58,9 +56,8 @@ fn run_cli() -> Result<ExitCode, RillError> {
             Ok(ExitCode::SUCCESS)
         }
         "check" => {
-            let path = argv
-                .first()
-                .ok_or_else(|| RillError::new("missing script path after check"))?;
+            let path =
+                argv.first().ok_or_else(|| RillError::new("missing script path after check"))?;
             let source = fs::read_to_string(path)
                 .map_err(|err| RillError::new(format!("failed to read '{path}': {err}")))?;
             let mut session = rill::CompilationSession::new();
@@ -115,7 +112,10 @@ fn input_for_args(args: &[String]) -> Result<Option<String>, RillError> {
     }
 }
 
-fn script_input(program: &rill::CompiledProgram, args: &[String]) -> Result<Option<String>, RillError> {
+fn script_input(
+    program: &rill::CompiledProgram,
+    args: &[String],
+) -> Result<Option<String>, RillError> {
     if program.args.is_some() {
         if args.iter().any(|arg| arg == "--help" || arg == "-h") {
             return Ok(None);

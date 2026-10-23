@@ -35,11 +35,48 @@ pub enum Target {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinMethod {
-    Get, Map, ParallelMap, Filter, ParallelFilter, Flatten, Zip, Enumerate, GroupBy,
-    Take, Reverse, Sort, FlatMap, Find, Any, First, Last, Slice, Skip, Difference,
-    SymmetricDifference, Contains, Len, Trim, Lines, Split, Upper, Lower, StartsWith,
-    EndsWith, Repeat, IndexOf, Keys, Values, Entries, ContainsKey, Merge, Glob, Join,
-    Spawn, Parallel, Await,
+    Get,
+    Map,
+    ParallelMap,
+    Filter,
+    ParallelFilter,
+    Flatten,
+    Zip,
+    Enumerate,
+    GroupBy,
+    Take,
+    Reverse,
+    Sort,
+    FlatMap,
+    Find,
+    Any,
+    First,
+    Last,
+    Slice,
+    Skip,
+    Difference,
+    SymmetricDifference,
+    Contains,
+    Len,
+    Trim,
+    Lines,
+    Split,
+    Upper,
+    Lower,
+    StartsWith,
+    EndsWith,
+    Repeat,
+    IndexOf,
+    Keys,
+    Values,
+    Entries,
+    ContainsKey,
+    Merge,
+    Glob,
+    Join,
+    Spawn,
+    Parallel,
+    Await,
 }
 
 impl BuiltinMethod {
@@ -344,42 +381,203 @@ macro_rules! method {
 }
 
 pub static METHODS: &[Method] = &[
-    method!("get", [Map, Null], 1, [Argument::Str], Return::Unknown, Target::Builtin(BuiltinMethod::Get)),
-    method!("map", [Map, List], 1, [Argument::Function], Return::CallbackList, Target::Builtin(BuiltinMethod::Map)),
-    method!("parallel_map", [Map, List], 1, [Argument::Function], Return::CallbackList, Target::Builtin(BuiltinMethod::ParallelMap)),
-    method!("filter", [List], 1, [Argument::Function], Return::Receiver, Target::Builtin(BuiltinMethod::Filter)),
-    method!("parallel_filter", [List], 1, [Argument::Function], Return::Receiver, Target::Builtin(BuiltinMethod::ParallelFilter)),
+    method!(
+        "get",
+        [Map, Null],
+        1,
+        [Argument::Str],
+        Return::Unknown,
+        Target::Builtin(BuiltinMethod::Get)
+    ),
+    method!(
+        "map",
+        [Map, List],
+        1,
+        [Argument::Function],
+        Return::CallbackList,
+        Target::Builtin(BuiltinMethod::Map)
+    ),
+    method!(
+        "parallel_map",
+        [Map, List],
+        1,
+        [Argument::Function],
+        Return::CallbackList,
+        Target::Builtin(BuiltinMethod::ParallelMap)
+    ),
+    method!(
+        "filter",
+        [List],
+        1,
+        [Argument::Function],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::Filter)
+    ),
+    method!(
+        "parallel_filter",
+        [List],
+        1,
+        [Argument::Function],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::ParallelFilter)
+    ),
     method!("flatten", [List], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Flatten)),
-    method!("zip", [List], 1, [Argument::List], Return::ListUnknown, Target::Builtin(BuiltinMethod::Zip)),
-    method!("enumerate", [List], 0, [], Return::ListTupleUnknown, Target::Builtin(BuiltinMethod::Enumerate)),
-    method!("group_by", [List], 1, [Argument::Function], Return::Map, Target::Builtin(BuiltinMethod::GroupBy)),
-    method!("take", [List], 1, [Argument::Int], Return::Receiver, Target::Builtin(BuiltinMethod::Take)),
+    method!(
+        "zip",
+        [List],
+        1,
+        [Argument::List],
+        Return::ListUnknown,
+        Target::Builtin(BuiltinMethod::Zip)
+    ),
+    method!(
+        "enumerate",
+        [List],
+        0,
+        [],
+        Return::ListTupleUnknown,
+        Target::Builtin(BuiltinMethod::Enumerate)
+    ),
+    method!(
+        "group_by",
+        [List],
+        1,
+        [Argument::Function],
+        Return::Map,
+        Target::Builtin(BuiltinMethod::GroupBy)
+    ),
+    method!(
+        "take",
+        [List],
+        1,
+        [Argument::Int],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::Take)
+    ),
     method!("reverse", [List], 0, [], Return::Receiver, Target::Builtin(BuiltinMethod::Reverse)),
     method!("sort", [List], 0, [], Return::Receiver, Target::Builtin(BuiltinMethod::Sort)),
-    method!("flat_map", [List], 1, [Argument::Function], Return::CallbackList, Target::Builtin(BuiltinMethod::FlatMap)),
-    method!("find", [List], 1, [Argument::Function], Return::OptionalReceiverItem, Target::Builtin(BuiltinMethod::Find)),
-    method!("any", [List], 1, [Argument::Function], Return::Bool, Target::Builtin(BuiltinMethod::Any)),
+    method!(
+        "flat_map",
+        [List],
+        1,
+        [Argument::Function],
+        Return::CallbackList,
+        Target::Builtin(BuiltinMethod::FlatMap)
+    ),
+    method!(
+        "find",
+        [List],
+        1,
+        [Argument::Function],
+        Return::OptionalReceiverItem,
+        Target::Builtin(BuiltinMethod::Find)
+    ),
+    method!(
+        "any",
+        [List],
+        1,
+        [Argument::Function],
+        Return::Bool,
+        Target::Builtin(BuiltinMethod::Any)
+    ),
     method!("first", [List], 0, [], Return::ReceiverItem, Target::Builtin(BuiltinMethod::First)),
     method!("last", [List], 0, [], Return::ReceiverItem, Target::Builtin(BuiltinMethod::Last)),
-    method!("slice", [List], 2, [Argument::Int, Argument::Int], Return::ListUnknown, Target::Builtin(BuiltinMethod::Slice)),
-    method!("skip", [List], 1, [Argument::Int], Return::Receiver, Target::Builtin(BuiltinMethod::Skip)),
-    method!("difference", [List], 1, [Argument::List], Return::Receiver, Target::Builtin(BuiltinMethod::Difference)),
-    method!("symmetric_difference", [List], 1, [Argument::List], Return::Receiver, Target::Builtin(BuiltinMethod::SymmetricDifference)),
-    method!("contains", [Str, List], 1, [Argument::Any], Return::Bool, Target::Builtin(BuiltinMethod::Contains)),
+    method!(
+        "slice",
+        [List],
+        2,
+        [Argument::Int, Argument::Int],
+        Return::ListUnknown,
+        Target::Builtin(BuiltinMethod::Slice)
+    ),
+    method!(
+        "skip",
+        [List],
+        1,
+        [Argument::Int],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::Skip)
+    ),
+    method!(
+        "difference",
+        [List],
+        1,
+        [Argument::List],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::Difference)
+    ),
+    method!(
+        "symmetric_difference",
+        [List],
+        1,
+        [Argument::List],
+        Return::Receiver,
+        Target::Builtin(BuiltinMethod::SymmetricDifference)
+    ),
+    method!(
+        "contains",
+        [Str, List],
+        1,
+        [Argument::Any],
+        Return::Bool,
+        Target::Builtin(BuiltinMethod::Contains)
+    ),
     method!("len", [Str, List, Map], 0, [], Return::Int, Target::Builtin(BuiltinMethod::Len)),
     method!("trim", [Str], 0, [], Return::Str, Target::Builtin(BuiltinMethod::Trim)),
     method!("lines", [Str], 0, [], Return::ListStr, Target::Builtin(BuiltinMethod::Lines)),
-    method!("split", [Str], 1, [Argument::Str], Return::ListUnknown, Target::Builtin(BuiltinMethod::Split)),
+    method!(
+        "split",
+        [Str],
+        1,
+        [Argument::Str],
+        Return::ListUnknown,
+        Target::Builtin(BuiltinMethod::Split)
+    ),
     method!("upper", [Str], 0, [], Return::Str, Target::Builtin(BuiltinMethod::Upper)),
     method!("lower", [Str], 0, [], Return::Str, Target::Builtin(BuiltinMethod::Lower)),
-    method!("starts_with", [Str], 1, [Argument::Str], Return::Bool, Target::Builtin(BuiltinMethod::StartsWith)),
-    method!("ends_with", [Str], 1, [Argument::Str], Return::Bool, Target::Builtin(BuiltinMethod::EndsWith)),
-    method!("repeat", [Str], 1, [Argument::Int], Return::Str, Target::Builtin(BuiltinMethod::Repeat)),
-    method!("index_of", [Str], 1, [Argument::Str], Return::Int, Target::Builtin(BuiltinMethod::IndexOf)),
+    method!(
+        "starts_with",
+        [Str],
+        1,
+        [Argument::Str],
+        Return::Bool,
+        Target::Builtin(BuiltinMethod::StartsWith)
+    ),
+    method!(
+        "ends_with",
+        [Str],
+        1,
+        [Argument::Str],
+        Return::Bool,
+        Target::Builtin(BuiltinMethod::EndsWith)
+    ),
+    method!(
+        "repeat",
+        [Str],
+        1,
+        [Argument::Int],
+        Return::Str,
+        Target::Builtin(BuiltinMethod::Repeat)
+    ),
+    method!(
+        "index_of",
+        [Str],
+        1,
+        [Argument::Str],
+        Return::Int,
+        Target::Builtin(BuiltinMethod::IndexOf)
+    ),
     method!("keys", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Keys)),
     method!("values", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Values)),
     method!("entries", [Map], 0, [], Return::ListUnknown, Target::Builtin(BuiltinMethod::Entries)),
-    method!("contains_key", [Map], 1, [Argument::Str], Return::Bool, Target::Builtin(BuiltinMethod::ContainsKey)),
+    method!(
+        "contains_key",
+        [Map],
+        1,
+        [Argument::Str],
+        Return::Bool,
+        Target::Builtin(BuiltinMethod::ContainsKey)
+    ),
     method!("merge", [Map], 1, [Argument::Map], Return::Map, Target::Builtin(BuiltinMethod::Merge)),
     Method {
         name: "replace",
@@ -402,7 +600,14 @@ pub static METHODS: &[Method] = &[
     method!("to_json_pretty", [], 0, [], Return::Str, Target::Module("json", "pretty")),
     method!("to_yaml", [], 0, [], Return::Str, Target::Module("yaml", "stringify")),
     method!("to_toml", [], 0, [], Return::Str, Target::Module("toml", "stringify")),
-    method!("join", [Path, List], 1, [Argument::JoinPart], Return::Join, Target::Builtin(BuiltinMethod::Join)),
+    method!(
+        "join",
+        [Path, List],
+        1,
+        [Argument::JoinPart],
+        Return::Join,
+        Target::Builtin(BuiltinMethod::Join)
+    ),
     method!("exists", [Path], 0, [], Return::Bool, Target::Module("fs", "exists")),
     method!("read_text", [Path], 0, [], Return::ReadText, Target::Read(false)),
     method!("read_yaml", [Path], 0, [], Return::ReadYaml, Target::Read(true)),
@@ -410,7 +615,14 @@ pub static METHODS: &[Method] = &[
     method!("write", [Path], 1, [Argument::Str], Return::Null, Target::Module("fs", "write")),
     method!("append", [Path], 1, [Argument::Str], Return::Null, Target::Module("fs", "append")),
     method!("mkdir", [Path], 0, [], Return::Null, Target::Module("fs", "mkdir")),
-    method!("rename", [Path], 1, [Argument::PathOrStr], Return::Null, Target::Module("fs", "rename")),
+    method!(
+        "rename",
+        [Path],
+        1,
+        [Argument::PathOrStr],
+        Return::Null,
+        Target::Module("fs", "rename")
+    ),
     method!("stat", [Path], 0, [], Return::Map, Target::Module("fs", "stat")),
     method!("ls", [Path], 0, [], Return::ListUnknown, Target::Module("fs", "ls")),
     method!("parent", [Path], 0, [], Return::Path, Target::Module("path", "parent")),
@@ -421,11 +633,32 @@ pub static METHODS: &[Method] = &[
     method!("is_dir", [Path], 0, [], Return::Bool, Target::Module("fs", "is_dir")),
     method!("canonicalize", [Path], 0, [], Return::Path, Target::Module("path", "canonicalize")),
     method!("archive_list", [Path], 0, [], Return::ListStr, Target::Module("archive", "list")),
-    method!("archive_extract", [Path], 1, [Argument::PathOrStr], Return::Null, Target::Module("archive", "extract")),
+    method!(
+        "archive_extract",
+        [Path],
+        1,
+        [Argument::PathOrStr],
+        Return::Null,
+        Target::Module("archive", "extract")
+    ),
     method!("run", [List], 0, [], Return::ProcessResult, Target::Module("process", "run")),
     method!("spawn", [List], 0, [], Return::ProcessHandle, Target::Builtin(BuiltinMethod::Spawn)),
-    method!("parallel", [List], 0, [], Return::ListProcessResult, Target::Builtin(BuiltinMethod::Parallel)),
-    method!("await", [ProcessHandle], 0, [], Return::ProcessResult, Target::Builtin(BuiltinMethod::Await)),
+    method!(
+        "parallel",
+        [List],
+        0,
+        [],
+        Return::ListProcessResult,
+        Target::Builtin(BuiltinMethod::Parallel)
+    ),
+    method!(
+        "await",
+        [ProcessHandle],
+        0,
+        [],
+        Return::ProcessResult,
+        Target::Builtin(BuiltinMethod::Await)
+    ),
     method!("sleep", [Duration], 0, [], Return::Null, Target::Sleep),
     method!("is_ok", [Result], 0, [], Return::Bool, Target::Structural(Structural::IsOk)),
     method!("is_err", [Result], 0, [], Return::Bool, Target::Structural(Structural::IsErr)),
@@ -433,8 +666,22 @@ pub static METHODS: &[Method] = &[
     method!("err", [Result], 0, [], Return::ResultErrOption, Target::Structural(Structural::Err)),
     method!("is_some", [Option], 0, [], Return::Bool, Target::Structural(Structural::IsSome)),
     method!("is_none", [Option], 0, [], Return::Bool, Target::Structural(Structural::IsNone)),
-    method!("unwrap", [Result, Option], 0, [], Return::Unwrapped, Target::Structural(Structural::Unwrap)),
-    method!("unwrap_or", [Result, Option], 1, [Argument::Any], Return::Unwrapped, Target::Structural(Structural::UnwrapOr)),
+    method!(
+        "unwrap",
+        [Result, Option],
+        0,
+        [],
+        Return::Unwrapped,
+        Target::Structural(Structural::Unwrap)
+    ),
+    method!(
+        "unwrap_or",
+        [Result, Option],
+        1,
+        [Argument::Any],
+        Return::Unwrapped,
+        Target::Structural(Structural::UnwrapOr)
+    ),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static Method> {
@@ -452,18 +699,42 @@ pub fn moved_function(name: &str) -> Option<&'static str> {
 }
 
 static NAMESPACE_ALIASES: &[NamespaceAlias] = &[
-    NamespaceAlias { module: "fs", name: "read", method: "read_text", adapter: ReceiverAdapter::Path },
-    NamespaceAlias { module: "yaml", name: "read", method: "read_yaml", adapter: ReceiverAdapter::Path },
-    NamespaceAlias { module: "time", name: "sleep", method: "sleep", adapter: ReceiverAdapter::Duration },
-    NamespaceAlias { module: "regex", name: "is_match", method: "is_match", adapter: ReceiverAdapter::SwapFirstTwo },
-    NamespaceAlias { module: "process", name: "exec", method: "run", adapter: ReceiverAdapter::Direct },
+    NamespaceAlias {
+        module: "fs",
+        name: "read",
+        method: "read_text",
+        adapter: ReceiverAdapter::Path,
+    },
+    NamespaceAlias {
+        module: "yaml",
+        name: "read",
+        method: "read_yaml",
+        adapter: ReceiverAdapter::Path,
+    },
+    NamespaceAlias {
+        module: "time",
+        name: "sleep",
+        method: "sleep",
+        adapter: ReceiverAdapter::Duration,
+    },
+    NamespaceAlias {
+        module: "regex",
+        name: "is_match",
+        method: "is_match",
+        adapter: ReceiverAdapter::SwapFirstTwo,
+    },
+    NamespaceAlias {
+        module: "process",
+        name: "exec",
+        method: "run",
+        adapter: ReceiverAdapter::Direct,
+    },
     NamespaceAlias { module: "path", name: "join", method: "join", adapter: ReceiverAdapter::Path },
 ];
 
 pub fn namespace_method(module: &str, name: &str) -> Option<NamespaceCall> {
-    if let Some(alias) = NAMESPACE_ALIASES
-        .iter()
-        .find(|alias| alias.module == module && alias.name == name)
+    if let Some(alias) =
+        NAMESPACE_ALIASES.iter().find(|alias| alias.module == module && alias.name == name)
     {
         return Some(NamespaceCall {
             method: lookup(alias.method).expect("namespace alias references registered method"),
@@ -490,8 +761,19 @@ pub fn namespace_method(module: &str, name: &str) -> Option<NamespaceCall> {
 pub fn is_namespace(name: &str) -> bool {
     matches!(
         name,
-        "json" | "toml" | "yaml" | "csv" | "url" | "path" | "fs" | "process"
-            | "time" | "regex" | "archive" | "hashes" | "Stream"
+        "json"
+            | "toml"
+            | "yaml"
+            | "csv"
+            | "url"
+            | "path"
+            | "fs"
+            | "process"
+            | "time"
+            | "regex"
+            | "archive"
+            | "hashes"
+            | "Stream"
     )
 }
 

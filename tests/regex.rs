@@ -6,14 +6,8 @@ fn run(source: &str) -> Value {
 
 #[test]
 fn regex_match_uses_real_regex_semantics() {
-    assert_eq!(
-        run(r#""user=bob status=200" =~ /user=\w+ status=\d+/"#),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        run(r#""user=bob status=ok" =~ /user=\w+ status=\d+/"#),
-        Value::Bool(false)
-    );
+    assert_eq!(run(r#""user=bob status=200" =~ /user=\w+ status=\d+/"#), Value::Bool(true));
+    assert_eq!(run(r#""user=bob status=ok" =~ /user=\w+ status=\d+/"#), Value::Bool(false));
 }
 
 #[test]
@@ -41,10 +35,7 @@ if line =~ /^\d+:\s+(?<iface>\S+)\s+.*\s(?<addr>\d+\.\d+\.\d+\.\d+)\/\d+/ {
     }
 }
 "#);
-    assert_eq!(
-        value,
-        Value::Str("VIP 192.0.2.254 is on controller-1:eth0".to_string())
-    );
+    assert_eq!(value, Value::Str("VIP 192.0.2.254 is on controller-1:eth0".to_string()));
 }
 
 #[test]

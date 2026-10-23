@@ -23,10 +23,7 @@ fn cli_args_and_input_lines_are_available_to_scripts() {
                 Value::Str("first.txt".to_string()),
                 Value::Str("second.txt".to_string()),
             ]),
-            Value::List(vec![
-                Value::Str("alpha".to_string()),
-                Value::Str("beta".to_string()),
-            ]),
+            Value::List(vec![Value::Str("alpha".to_string()), Value::Str("beta".to_string()),]),
         ])
     );
 }
@@ -60,10 +57,7 @@ use process
     let Value::List(values) = value else {
         panic!("expected list");
     };
-    assert_eq!(
-        values[0],
-        Value::Path(std::path::PathBuf::from("/tmp/rill"))
-    );
+    assert_eq!(values[0], Value::Path(std::path::PathBuf::from("/tmp/rill")));
     assert_eq!(values[1], Value::Bool(true));
     assert_eq!(values[3], Value::Str("ok".to_string()));
 }
@@ -72,11 +66,8 @@ use process
 fn local_modules_resolve_relative_to_the_importer_and_typecheck_exports() {
     let scratch = Scratch::new();
     std::fs::create_dir(scratch.0.join("nested")).unwrap();
-    std::fs::write(
-        scratch.0.join("shared.ril"),
-        "fn increment(value: Int) -> Int { value + 1 }\n",
-    )
-    .unwrap();
+    std::fs::write(scratch.0.join("shared.ril"), "fn increment(value: Int) -> Int { value + 1 }\n")
+        .unwrap();
     std::fs::write(
         scratch.0.join("nested/helper.ril"),
         "use ../shared.ril\nfn answer(value: Int) -> Int { increment(value) }\n",
@@ -100,11 +91,7 @@ fn local_modules_resolve_relative_to_the_importer_and_typecheck_exports() {
 #[test]
 fn repeated_module_imports_execute_once_and_cycles_fail_during_compilation() {
     let scratch = Scratch::new();
-    std::fs::write(
-        scratch.0.join("once.ril"),
-        "set_env(\"RILL_MODULE_ONCE\", \"x\")\n",
-    )
-    .unwrap();
+    std::fs::write(scratch.0.join("once.ril"), "set_env(\"RILL_MODULE_ONCE\", \"x\")\n").unwrap();
     let root = scratch.0.join("root.ril");
     let source = "use ./once.ril\nuse ./once.ril\nenv.RILL_MODULE_ONCE\n";
     std::fs::write(&root, source).unwrap();
@@ -136,11 +123,7 @@ fn repeated_module_imports_execute_once_and_cycles_fail_during_compilation() {
 #[test]
 fn imported_symbol_type_errors_are_reported_at_compile_time() {
     let scratch = Scratch::new();
-    std::fs::write(
-        scratch.0.join("typed.ril"),
-        "fn takes(value: Int) -> Int { value }\n",
-    )
-    .unwrap();
+    std::fs::write(scratch.0.join("typed.ril"), "fn takes(value: Int) -> Int { value }\n").unwrap();
     let source = "use ./typed.ril\ntakes(\"wrong\")\n";
     let mut session = rill::CompilationSession::new();
     let error = session
@@ -189,11 +172,7 @@ host: Str
     .expect("run");
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::Bool(true),
-            Value::Int(8080),
-            Value::Str("server1".to_string())
-        ])
+        Value::List(vec![Value::Bool(true), Value::Int(8080), Value::Str("server1".to_string())])
     );
 }
 
@@ -257,14 +236,7 @@ env.RILL_TEST_ENV
 fn get_reads_map_values_and_returns_null_for_missing_values() {
     let value = run(r#"let values = {present: "yes"}
 [values.get("present"), values.get("missing"), null.get("missing")]"#);
-    assert_eq!(
-        value,
-        Value::List(vec![
-            Value::Str("yes".to_string()),
-            Value::Null,
-            Value::Null,
-        ])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("yes".to_string()), Value::Null, Value::Null,]));
 }
 
 #[test]
@@ -310,10 +282,7 @@ fn path_reads_absolute_path() {
     let path = std::env::temp_dir().join("rill-path-test.txt");
     std::fs::write(&path, "hello").expect("write test file");
     let value = run(&format!(r#"path("{}").read_text()"#, path.display()));
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("hello".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("hello".to_string())))));
     let _ = std::fs::remove_file(path);
 }
 
@@ -322,12 +291,9 @@ fn path_reads_absolute_path() {
 struct Scratch(std::path::PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir()
-            .join(format!("rill-interp-{}-{stamp}", std::process::id()));
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir().join(format!("rill-interp-{}-{stamp}", std::process::id()));
         std::fs::create_dir(&p).unwrap();
         Self(p)
     }
@@ -354,10 +320,7 @@ fn tilde_prefix_in_path_expands_to_home() {
         None => unsafe { std::env::remove_var("HOME") },
     }
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("tilde".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("tilde".to_string())))));
 }
 
 #[test]
@@ -372,10 +335,7 @@ fn dollar_env_var_in_path_expands() {
 
     unsafe { std::env::remove_var("RILL_TEST_PATHDIR") };
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("env".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("env".to_string())))));
 }
 
 #[test]
@@ -388,10 +348,7 @@ fn braced_dollar_var_in_path_expands() {
 
     unsafe { std::env::remove_var("RILL_TEST_BDIR") };
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("braced".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("braced".to_string())))));
 }
 
 #[test]
@@ -403,13 +360,8 @@ fn braced_dollar_with_default_uses_default_when_unset() {
     // Make sure the var is not set.
     unsafe { std::env::remove_var("RILL_NONEXISTENT_9f3a") };
 
-    let value = run(&format!(
-        r#"path("${{RILL_NONEXISTENT_9f3a:-{dir}}}/dflt.txt").read_text()"#
-    ));
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("default".to_string()))))
-    );
+    let value = run(&format!(r#"path("${{RILL_NONEXISTENT_9f3a:-{dir}}}/dflt.txt").read_text()"#));
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("default".to_string())))));
 }
 
 #[test]
@@ -420,16 +372,11 @@ fn braced_dollar_with_default_uses_var_when_set() {
 
     unsafe { std::env::set_var("RILL_TEST_SET_VAR", &dir) };
 
-    let value = run(&format!(
-        r#"path("${{RILL_TEST_SET_VAR:-/wrong}}/set.txt").read_text()"#
-    ));
+    let value = run(&format!(r#"path("${{RILL_TEST_SET_VAR:-/wrong}}/set.txt").read_text()"#));
 
     unsafe { std::env::remove_var("RILL_TEST_SET_VAR") };
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("set".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("set".to_string())))));
 }
 
 #[test]
@@ -472,10 +419,7 @@ path("/").join("$RILL_TEST_JOINDIR/joined.txt").read_text()"#);
 
     unsafe { std::env::remove_var("RILL_TEST_JOINDIR") };
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("joined".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("joined".to_string())))));
 }
 
 #[test]
@@ -495,10 +439,7 @@ path("$RILL_SHADOW_VAR/binding.txt").read_text()"#
 
     unsafe { std::env::remove_var("RILL_SHADOW_VAR") };
 
-    assert_eq!(
-        value,
-        Value::Result(Ok(Box::new(Value::Str("binding".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Ok(Box::new(Value::Str("binding".to_string())))));
 }
 
 #[test]
@@ -538,7 +479,8 @@ fn command_supports_braced_var_default() {
 #[test]
 fn command_braced_var_uses_rill_binding_when_set() {
     let Value::ProcessResult(result) = run(r#"let MY_MSG = "from-rill"
-run printf "${MY_MSG:-wrong}""#) else {
+run printf "${MY_MSG:-wrong}""#)
+    else {
         panic!("expected ProcessResult");
     };
     assert_eq!(result.stdout_text_lossy(), "from-rill");
@@ -577,7 +519,6 @@ fn run_returns_process_result() {
     assert_eq!(result.stdout_text_lossy(), "hi");
 }
 
-
 #[test]
 fn explicit_shell_escape_runs_shell_syntax() {
     let value = run(r#"sh "printf 'hello' | tr a-z A-Z""#);
@@ -593,15 +534,9 @@ fn duration_and_byte_size_literals_have_distinct_values() {
     let Value::List(values) = value else {
         panic!("expected list");
     };
-    assert_eq!(
-        values[0],
-        Value::Duration(std::time::Duration::from_millis(1500))
-    );
+    assert_eq!(values[0], Value::Duration(std::time::Duration::from_millis(1500)));
     assert_eq!(values[1], Value::Int(20 * 1024 * 1024));
-    assert_eq!(
-        values[2],
-        Value::Duration(std::time::Duration::from_secs(7200))
-    );
+    assert_eq!(values[2], Value::Duration(std::time::Duration::from_secs(7200)));
 }
 
 #[test]
@@ -622,10 +557,7 @@ fn failed() -> Result[Int] {
 }
 failed()
 "#);
-    assert_eq!(
-        value,
-        Value::Result(Err(Box::new(Value::Str("nope".to_string()))))
-    );
+    assert_eq!(value, Value::Result(Err(Box::new(Value::Str("nope".to_string())))));
 
     let value = run(r#"
 fn optional() -> Option[Int] {
@@ -636,7 +568,6 @@ optional()
 "#);
     assert_eq!(value, Value::Option(None));
 }
-
 
 #[test]
 fn declared_error_type_coerces_string_errors() {
@@ -679,49 +610,25 @@ run printf $server:/srv/app
 #[test]
 fn byte_pipe_to_lines() {
     let value = run(r#"run printf "a\nb\n" | .lines()"#);
-    assert_eq!(
-        value,
-        Value::List(vec![
-            Value::Str("a".to_string()),
-            Value::Str("b".to_string())
-        ])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
 }
 
 #[test]
 fn chained_byte_pipeline_connects_processes_directly() {
     let value = run(r#"run printf "a\nb\n" | run tr a-z A-Z | .lines()"#);
-    assert_eq!(
-        value,
-        Value::List(vec![
-            Value::Str("A".to_string()),
-            Value::Str("B".to_string())
-        ])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
 }
 
 #[test]
 fn chained_byte_pipeline_streams_between_processes() {
     let value = run(r#"run printf "a\nb\n" | run tr a-z A-Z | .lines()"#);
-    assert_eq!(
-        value,
-        Value::List(vec![
-            Value::Str("A".to_string()),
-            Value::Str("B".to_string())
-        ])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("A".to_string()), Value::Str("B".to_string())]));
 }
 
 #[test]
 fn value_pipe_into_take() {
     let value = run(r#"["a", "b", "c"] |> .take(2)"#);
-    assert_eq!(
-        value,
-        Value::List(vec![
-            Value::Str("a".to_string()),
-            Value::Str("b".to_string())
-        ])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("a".to_string()), Value::Str("b".to_string())]));
 }
 
 #[test]
@@ -790,10 +697,7 @@ fn for_expr_emits_mapped_values() {
 let x = for i in [1, 2, 3] { emit i * 2 }
 x
 "#);
-    assert_eq!(
-        value,
-        Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
-    );
+    assert_eq!(value, Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
 }
 
 #[test]
@@ -836,10 +740,7 @@ let x = for i in [1, 2, 3, 4, 5] {
 }
 x
 "#);
-    assert_eq!(
-        value,
-        Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
-    );
+    assert_eq!(value, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
 }
 
 #[test]
@@ -865,12 +766,7 @@ x
 "#);
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ])
+        Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
     );
 }
 
@@ -881,10 +777,7 @@ let x = parallel for i in [1, 2, 3] { emit i * 2 }
 x
 "#);
     // Results collected in spawn order (deterministic).
-    assert_eq!(
-        value,
-        Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)])
-    );
+    assert_eq!(value, Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6)]));
 }
 
 #[test]
@@ -905,10 +798,7 @@ let winner = race(1) for i in [7] { emit i }
 
 #[test]
 fn bounded_parallel_for_rejects_non_positive_worker_counts() {
-    for source in [
-        "parallel(0) for i in [1] { emit i }",
-        "parallel(-1) for i in [1] { emit i }",
-    ] {
+    for source in ["parallel(0) for i in [1] { emit i }", "parallel(-1) for i in [1] { emit i }"] {
         assert!(rill::run_source(source, vec![]).is_err(), "{source}");
     }
 }
@@ -927,12 +817,7 @@ x
 "#);
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ])
+        Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),])
     );
 }
 
@@ -1216,10 +1101,7 @@ fn parallel_map_list() {
 fn parallel_map_on_map() {
     // BTreeMap iteration order is alphabetical — keys a, b
     let result = run(r#"{ a: 10, b: 20 }.parallel_map(|k, v| v * 2)"#);
-    assert_eq!(
-        result,
-        Value::List(vec![Value::Int(20), Value::Int(40)])
-    );
+    assert_eq!(result, Value::List(vec![Value::Int(20), Value::Int(40)]));
 }
 
 #[test]
@@ -1301,7 +1183,7 @@ fn group_by_key() {
     let result = run("[1, 2, 3, 4].group_by(|n| { if n > 2 { \"big\" } else { \"small\" } })");
     let Value::Map(map) = result else { panic!("expected Map") };
     assert_eq!(map.get("small"), Some(&Value::List(vec![Value::Int(1), Value::Int(2)])));
-    assert_eq!(map.get("big"),   Some(&Value::List(vec![Value::Int(3), Value::Int(4)])));
+    assert_eq!(map.get("big"), Some(&Value::List(vec![Value::Int(3), Value::Int(4)])));
 }
 
 #[test]
@@ -1316,11 +1198,7 @@ fn parallel_filter_list() {
 fn tuples_are_fixed_heterogeneous_values() {
     assert_eq!(
         run(r#"(1, "two", true)"#),
-        Value::Tuple(vec![
-            Value::Int(1),
-            Value::Str("two".into()),
-            Value::Bool(true),
-        ])
+        Value::Tuple(vec![Value::Int(1), Value::Str("two".into()), Value::Bool(true),])
     );
     assert_eq!(run("(1, 2) == (1, 2)"), Value::Bool(true));
     assert_eq!(run("(1, 2) == [1, 2]"), Value::Bool(false));
@@ -1366,10 +1244,7 @@ values
 
 #[test]
 fn tuple_serialization_uses_arrays_without_changing_parsed_array_types() {
-    assert_eq!(
-        run(r#"(1, "two").to_json()"#),
-        Value::Str(r#"[1,"two"]"#.into())
-    );
+    assert_eq!(run(r#"(1, "two").to_json()"#), Value::Str(r#"[1,"two"]"#.into()));
     assert_eq!(
         run(r#"(1, "two").to_yaml().parse_yaml()"#),
         Value::List(vec![Value::Int(1), Value::Str("two".into())])

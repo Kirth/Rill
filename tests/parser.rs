@@ -38,23 +38,13 @@ fn byte_pipeline_preserves_command_boundaries() {
     let program = rill::parser::parse(r#"run journalctl -u nginx | run grep "timeout" | .lines()"#)
         .expect("parse");
 
-    let Expr::Pipe {
-        kind: PipeKind::Byte,
-        left,
-        right,
-    } = expression(&program.stmts[0])
-    else {
+    let Expr::Pipe { kind: PipeKind::Byte, left, right } = expression(&program.stmts[0]) else {
         panic!("expected outer byte pipe");
     };
 
     assert!(matches!(right.unspanned(), Expr::Call { callee, args }
         if args.is_empty() && matches!(callee.unspanned(), Expr::ImplicitField(name) if name == "lines")));
-    let Expr::Pipe {
-        kind: PipeKind::Byte,
-        left,
-        right,
-    } = left.unspanned()
-    else {
+    let Expr::Pipe { kind: PipeKind::Byte, left, right } = left.unspanned() else {
         panic!("expected inner byte pipe");
     };
 
@@ -100,10 +90,7 @@ run foo < "in.txt"
         assert_eq!(command.argv, vec![CommandArg::Word("foo".to_string())]);
         assert_eq!(command.redirects.len(), 1);
         assert_eq!(command.redirects[0].kind, kind);
-        assert_eq!(
-            command.redirects[0].target,
-            CommandArg::String(target.to_string())
-        );
+        assert_eq!(command.redirects[0].target, CommandArg::String(target.to_string()));
     }
 }
 
@@ -135,13 +122,7 @@ let interfaces =
 
     let program = rill::parser::parse(program).expect("parse");
     assert_eq!(program.stmts.len(), 1);
-    assert!(matches!(
-        expression(&program.stmts[0]),
-        Expr::Pipe {
-            kind: PipeKind::Byte,
-            ..
-        }
-    ));
+    assert!(matches!(expression(&program.stmts[0]), Expr::Pipe { kind: PipeKind::Byte, .. }));
 }
 
 #[test]

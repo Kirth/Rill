@@ -76,12 +76,9 @@ impl RillError {
     }
 
     pub fn from_error_value(error: &ErrorValue) -> Self {
-        let mut diagnostic = Self::new(format!(
-            "{}: {}",
-            error_kind_name(&error.kind),
-            error.message
-        ))
-        .with_kind(error.kind.clone());
+        let mut diagnostic =
+            Self::new(format!("{}: {}", error_kind_name(&error.kind), error.message))
+                .with_kind(error.kind.clone());
         if let Some((start, end)) = error.span {
             diagnostic = Self::spanned(diagnostic.message, Span::new(start, end))
                 .with_kind(error.kind.clone());

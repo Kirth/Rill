@@ -72,55 +72,21 @@ pub enum LetPattern {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Use(String),
-    Let {
-        pattern: LetPattern,
-        type_name: Option<TypeName>,
-        expr: Expr,
-        mutable: bool,
-    },
-    AssignEnv {
-        name: String,
-        expr: Expr,
-    },
+    Let { pattern: LetPattern, type_name: Option<TypeName>, expr: Expr, mutable: bool },
+    AssignEnv { name: String, expr: Expr },
     Args(ArgGroup),
     InputLines,
-    Fn {
-        name: String,
-        function: Function,
-    },
-    If {
-        cond: Expr,
-        pattern: Option<LetPattern>,
-        then_body: Vec<Stmt>,
-        else_body: Vec<Stmt>,
-    },
-    WithEnv {
-        bindings: Vec<(String, Expr)>,
-        body: Vec<Stmt>,
-    },
-    On {
-        host: Box<Expr>,
-        body: Vec<Stmt>,
-    },
+    Fn { name: String, function: Function },
+    If { cond: Expr, pattern: Option<LetPattern>, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    WithEnv { bindings: Vec<(String, Expr)>, body: Vec<Stmt> },
+    On { host: Box<Expr>, body: Vec<Stmt> },
     Emit(Expr),
     Return(Option<Expr>),
     Continue,
     Break,
-    Assign {
-        name: String,
-        op: AssignOp,
-        expr: Expr,
-    },
-    IndexAssign {
-        name: String,
-        index: Box<Expr>,
-        op: AssignOp,
-        expr: Box<Expr>,
-    },
-    While {
-        cond: Box<Expr>,
-        body: Vec<Stmt>,
-    },
+    Assign { name: String, op: AssignOp, expr: Expr },
+    IndexAssign { name: String, index: Box<Expr>, op: AssignOp, expr: Box<Expr> },
+    While { cond: Box<Expr>, body: Vec<Stmt> },
     Expr(Expr),
 }
 

@@ -1,10 +1,7 @@
 fn parses_design_note_sample(name: &str, source: &str) {
     let program = rill::parser::parse(source).unwrap_or_else(|err| panic!("{name}: {err}"));
     rill::typeck::check(&program).unwrap_or_else(|err| panic!("{name}: {err}"));
-    assert!(
-        !program.stmts.is_empty(),
-        "{name}: parser produced no statements"
-    );
+    assert!(!program.stmts.is_empty(), "{name}: parser produced no statements");
 }
 
 #[test]

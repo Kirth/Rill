@@ -25,17 +25,12 @@ fn list_addition_concatenates_without_mutating_or_flattening() {
         run("let a = [1]; let b = [2]; var c = a + b; c += [3]; (a, b, c)"),
         run("([1], [2], [1, 2, 3])")
     );
-    assert_eq!(
-        run(r#"let data = {a: [1], b: [2]}; data.get("a") + data.get("b")"#),
-        run("[1, 2]")
-    );
+    assert_eq!(run(r#"let data = {a: [1], b: [2]}; data.get("a") + data.get("b")"#), run("[1, 2]"));
     assert_eq!(run("var xs = [[1]]; xs[0] += [2]; xs"), run("[[1, 2]]"));
-    assert_eq!(
-        run("let xs: List[Int] = [] + [1, 2]; xs"),
-        run("[1, 2]")
-    );
-    for source in ["[1] + 2", "1 + [2]", "[1] - [2]", "[1] > [2]",
-        "let xs: List[Str] = [1] + [2]; xs"] {
+    assert_eq!(run("let xs: List[Int] = [] + [1, 2]; xs"), run("[1, 2]"));
+    for source in
+        ["[1] + 2", "1 + [2]", "[1] - [2]", "[1] > [2]", "let xs: List[Str] = [1] + [2]; xs"]
+    {
         assert!(rill::compile(source).is_err(), "{source}");
     }
     assert!(rill::run_source(r#"{a: [1]}.get("a") + 2"#, vec![]).is_err());
@@ -47,17 +42,10 @@ fn arithmetic_matches_numeric_types_and_reports_errors() {
     assert_eq!(run("5.0 / 2"), Value::Float(2.5));
     assert_eq!(run("5 / 2"), Value::Int(2));
     assert_eq!(run("3.5 * 2 - 1.0"), Value::Float(6.0));
-    assert_eq!(
-        run("9007199254740993 > 9007199254740992"),
-        Value::Bool(true)
-    );
-    for source in [
-        "1 / 0",
-        "1.0 / 0.0",
-        "9223372036854775807 + 1",
-        "2 * 9223372036854775807",
-        "1 + \"x\"",
-    ] {
+    assert_eq!(run("9007199254740993 > 9007199254740992"), Value::Bool(true));
+    for source in
+        ["1 / 0", "1.0 / 0.0", "9223372036854775807 + 1", "2 * 9223372036854775807", "1 + \"x\""]
+    {
         let error = rill::run_source(source, vec![]).expect_err(source);
         assert!(error.span.is_some(), "{error}");
     }
@@ -89,10 +77,7 @@ fail()
 
 #[test]
 fn callback_signatures_and_yaml_shapes_agree() {
-    assert_eq!(
-        run(r#"({a: 2}).map(|name, value| value + 1)"#),
-        Value::List(vec![Value::Int(3)])
-    );
+    assert_eq!(run(r#"({a: 2}).map(|name, value| value + 1)"#), Value::List(vec![Value::Int(3)]));
     assert_eq!(
         run(r#""[1, 2]".parse_yaml() |> .map(|x| x + 1)"#),
         Value::List(vec![Value::Int(2), Value::Int(3)])
@@ -106,10 +91,7 @@ fn callback_signatures_and_yaml_shapes_agree() {
     ] {
         assert!(rill::run_source(source, vec![]).is_err(), "{source}");
     }
-    assert_eq!(
-        run("let f = |x| { if x { return 7 } 9 }; f(true)"),
-        Value::Int(7)
-    );
+    assert_eq!(run("let f = |x| { if x { return 7 } 9 }; f(true)"), Value::Int(7));
 }
 
 #[test]
@@ -140,12 +122,7 @@ fn bounded_parallel_map_preserves_order() {
     .unwrap();
     assert_eq!(
         value,
-        Value::List(vec![
-            Value::Int(2),
-            Value::Int(4),
-            Value::Int(6),
-            Value::Int(8),
-        ])
+        Value::List(vec![Value::Int(2), Value::Int(4), Value::Int(6), Value::Int(8),])
     );
     assert!(start.elapsed() >= std::time::Duration::from_millis(40));
     assert!(start.elapsed() < std::time::Duration::from_secs(1));
@@ -162,10 +139,7 @@ fn parallel_environment_updates_are_local_to_each_callback() {
         2,
     )
     .unwrap();
-    assert_eq!(
-        value,
-        Value::List(vec![Value::Str("1".into()), Value::Str("2".into())])
-    );
+    assert_eq!(value, Value::List(vec![Value::Str("1".into()), Value::Str("2".into())]));
     assert_eq!(std::env::var_os("RILL_PARALLEL_LOCAL_ENV"), host_value);
 }
 
@@ -204,11 +178,7 @@ fn ordered_parallel_for_and_filter_ignore_completion_order() {
 #[test]
 fn nested_parallel_work_reuses_single_worker_pool() {
     assert_eq!(
-        run_parallel(
-            "[1, 2].parallel_map(|x| [x, x + 1].parallel_map(|y| y * 2))",
-            1,
-        )
-        .unwrap(),
+        run_parallel("[1, 2].parallel_map(|x| [x, x + 1].parallel_map(|y| y * 2))", 1,).unwrap(),
         Value::List(vec![
             Value::List(vec![Value::Int(2), Value::Int(4)]),
             Value::List(vec![Value::Int(4), Value::Int(6)]),
@@ -284,10 +254,7 @@ fn race_propagates_nonlocal_control_flow() {
         .unwrap(),
         Value::Int(9)
     );
-    assert_eq!(
-        run_parallel("race for i in [1] { break; emit i }", 1).unwrap(),
-        Value::Null
-    );
+    assert_eq!(run_parallel("race for i in [1] { break; emit i }", 1).unwrap(), Value::Null);
 }
 
 #[test]
@@ -307,10 +274,7 @@ fn winning_race_can_return_a_live_process_handle() {
 fn race_cancels_a_losing_synchronous_command() {
     let marker = std::env::temp_dir().join(format!(
         "rill-race-command-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let source = format!(
         r#"race for i in [0, 1] {{
@@ -331,10 +295,7 @@ fn race_cancels_a_losing_synchronous_command() {
 fn race_cancels_a_process_handle_owned_by_a_losing_branch() {
     let marker = std::env::temp_dir().join(format!(
         "rill-race-handle-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let source = format!(
         r#"race for i in [0, 1] {{

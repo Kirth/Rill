@@ -1,10 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
-use std::borrow::Cow;
 use std::str::Utf8Error;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -185,11 +185,7 @@ impl Value {
             Value::Float(v) => v.to_string(),
             Value::Str(v) => v.clone(),
             Value::Bytes(v) => String::from_utf8_lossy(v).into_owned(),
-            Value::List(v) => v
-                .iter()
-                .map(Value::as_string_lossy)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            Value::List(v) => v.iter().map(Value::as_string_lossy).collect::<Vec<_>>().join("\n"),
             Value::Tuple(_) => format!("{self}"),
             Value::Map(_) => format!("{self}"),
             Value::Duration(v) => format!("{v:?}"),

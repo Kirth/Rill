@@ -4,10 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_path(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
     std::env::temp_dir().join(format!("rill-{name}-{nanos}"))
 }
 
@@ -20,38 +17,24 @@ fn process_stress_worker() {
         run_command, run_pipeline, CommandIo, ProcessRuntime, ProcessSpec, TokioProcessRuntime,
     };
     let bytes = vec![b'x'; 2 * 1024 * 1024];
-    let argv = vec![
-        "sh".into(),
-        "-c".into(),
-        "head -c 1048576 /dev/zero >&2; cat".into(),
-    ];
+    let argv = vec!["sh".into(), "-c".into(), "head -c 1048576 /dev/zero >&2; cat".into()];
     let result = run_command(&argv, Some(bytes.clone()), &CommandIo::default()).unwrap();
     assert_eq!(result.out, bytes);
     assert_eq!(result.err.len(), 1048576);
     let handle = TokioProcessRuntime
-        .spawn(ProcessSpec {
-            argv,
-            input: Some(bytes.clone()),
-            io: CommandIo::default(),
-        })
+        .spawn(ProcessSpec { argv, input: Some(bytes.clone()), io: CommandIo::default() })
         .unwrap();
     let result = TokioProcessRuntime.await_process(handle).unwrap();
     assert_eq!(result.out, bytes);
     assert_eq!(result.err.len(), 1048576);
     let result = run_pipeline(
-        &[
-            vec!["yes".into()],
-            vec!["head".into(), "-n".into(), "1".into()],
-        ],
+        &[vec!["yes".into()], vec!["head".into(), "-n".into(), "1".into()]],
         &[CommandIo::default(), CommandIo::default()],
     )
     .unwrap();
     assert_eq!(result.out, b"y\n");
     assert!(run_pipeline(
-        &[
-            vec!["sleep".into(), "30".into()],
-            vec!["/rill/nonexistent-command".into()]
-        ],
+        &[vec!["sleep".into(), "30".into()], vec!["/rill/nonexistent-command".into()]],
         &[CommandIo::default(), CommandIo::default()]
     )
     .is_err());
@@ -85,16 +68,9 @@ fn merged_redirection_preserves_bytes_and_order() {
     use rill::runtime::{run_command, CommandIo};
     let output = temp_path("binary-merged");
     let result = run_command(
-        &[
-            "sh".into(),
-            "-c".into(),
-            "printf 'a'; printf 'b' >&2; printf '\\377'".into(),
-        ],
+        &["sh".into(), "-c".into(), "printf 'a'; printf 'b' >&2; printf '\\377'".into()],
         None,
-        &CommandIo {
-            all_file: Some(output.clone()),
-            ..Default::default()
-        },
+        &CommandIo { all_file: Some(output.clone()), ..Default::default() },
     )
     .unwrap();
     assert_eq!(fs::read(&output).unwrap(), b"ab\xff");
@@ -190,10 +166,7 @@ fn stdout_redirection_writes_file_and_clears_captured_stdout() {
 #[test]
 fn stderr_redirection_writes_file_and_clears_captured_stderr() {
     let err = temp_path("stderr");
-    let source = format!(
-        r#"run sh "-c" "printf problem >&2" err> "{}""#,
-        err.display()
-    );
+    let source = format!(r#"run sh "-c" "printf problem >&2" err> "{}""#, err.display());
     let value = run(&source);
     let Value::ProcessResult(result) = value else {
         panic!("expected ProcessResult");
@@ -207,10 +180,7 @@ fn stderr_redirection_writes_file_and_clears_captured_stderr() {
 #[test]
 fn all_redirection_writes_stdout_and_stderr_and_clears_both() {
     let all = temp_path("all");
-    let source = format!(
-        r#"run sh "-c" "printf out; printf err >&2" all> "{}""#,
-        all.display()
-    );
+    let source = format!(r#"run sh "-c" "printf out; printf err >&2" all> "{}""#, all.display());
     let value = run(&source);
     let Value::ProcessResult(result) = value else {
         panic!("expected ProcessResult");
@@ -251,27 +221,18 @@ run sh "-c" "pwd; env" {
     };
     assert_eq!(result.status, 0);
     assert!(result.out.starts_with(b"/tmp\n"));
-    assert!(result
-        .stdout_text_lossy()
-        .lines()
-        .any(|line| line == "RILL_CONFIG=configured"));
+    assert!(result.stdout_text_lossy().lines().any(|line| line == "RILL_CONFIG=configured"));
 }
 
 #[test]
 fn programmatic_command_config_can_write_streams() {
     let out = temp_path("config-out");
-    let source = format!(
-        r#"run printf "configured" {{ stdout: file("{}") }}"#,
-        out.display()
-    );
+    let source = format!(r#"run printf "configured" {{ stdout: file("{}") }}"#, out.display());
     let value = run(&source);
     let Value::ProcessResult(result) = value else {
         panic!("expected ProcessResult");
     };
     assert_eq!(result.out, b"");
-    assert_eq!(
-        fs::read_to_string(&out).expect("read config output"),
-        "configured"
-    );
+    assert_eq!(fs::read_to_string(&out).expect("read config output"), "configured");
     let _ = fs::remove_file(out);
 }
