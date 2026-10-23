@@ -1230,11 +1230,28 @@ impl Evaluator {
                 }
                 Ok(Value::Bool(is_truthy(&self.eval_expr(right)?)?))
             }
+            Expr::Binary { op: BinaryOp::Coalesce, left, right } => match self.eval_expr(left)? {
+                Value::Null | Value::Option(None) => self.eval_expr(right),
+                Value::Option(Some(value)) => Ok(*value),
+                other => Ok(other),
+            },
             Expr::Binary { op, left, right } => self.eval_binary(*op, left, right),
             Expr::Unary { op: UnaryOp::Not, operand } => {
                 let v = self.eval_expr(operand)?;
                 Ok(Value::Bool(!is_truthy(&v)?))
             }
+            Expr::Unary { op: UnaryOp::Neg, operand } => match self.eval_expr(operand)? {
+                Value::Int(value) => value
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| RillError::new("integer overflow").into()),
+                Value::Float(value) => Ok(Value::Float(-value)),
+                other => Err(RillError::new(format!(
+                    "unary minus needs a number, got {}",
+                    other.type_name()
+                ))
+                .into()),
+            },
             Expr::Pipe { kind, left, right } => self.eval_pipe(*kind, left, right),
             Expr::Command(command) => self.eval_command(command, None),
             Expr::RegexMatch { value, pattern } => {
@@ -2407,7 +2424,9 @@ impl Evaluator {
                 let needle = self.eval_expr(&args[1])?;
                 match receiver {
                     Value::Str(s) => Ok(Value::Bool(s.contains(needle.as_string_lossy().as_str()))),
-                    Value::List(items) => Ok(Value::Bool(items.contains(&needle))),
+                    Value::List(items) => {
+                        Ok(Value::Bool(items.iter().any(|item| values_equal(item, &needle))))
+                    }
                     other => Err(RillError::new(format!(
                         "contains not supported on {}",
                         other.type_name()
@@ -3139,31 +3158,30 @@ impl Evaluator {
         let left = self.eval_expr(left)?;
         let right = self.eval_expr(right)?;
         let value = match op {
-            BinaryOp::Eq => Value::Bool(left == right),
-            BinaryOp::Ne => Value::Bool(left != right),
+            BinaryOp::Eq => Value::Bool(values_equal(&left, &right)),
+            BinaryOp::Ne => Value::Bool(!values_equal(&left, &right)),
             BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
-                check_numeric_operands(&left, &right, op)?;
-                let order = match (&left, &right) {
-                    (Value::Int(a), Value::Int(b)) => a.partial_cmp(b),
-                    _ => as_f64(&left)?.partial_cmp(&as_f64(&right)?),
-                };
                 use std::cmp::Ordering::{Equal, Greater, Less};
+                let order = compare_values(&left, &right, op)?;
                 Value::Bool(match op {
-                    BinaryOp::Gt => order == Some(Greater),
-                    BinaryOp::Ge => matches!(order, Some(Greater | Equal)),
-                    BinaryOp::Lt => order == Some(Less),
-                    _ => matches!(order, Some(Less | Equal)),
+                    BinaryOp::Gt => order == Greater,
+                    BinaryOp::Ge => matches!(order, Greater | Equal),
+                    BinaryOp::Lt => order == Less,
+                    _ => matches!(order, Less | Equal),
                 })
             }
-            BinaryOp::Range => match (&left, &right) {
+            BinaryOp::In => Value::Bool(contains_value(&right, &left)?),
+            BinaryOp::NotIn => Value::Bool(!contains_value(&right, &left)?),
+            BinaryOp::Range | BinaryOp::RangeInclusive => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => {
-                    if b.saturating_sub(*a) > MAX_RANGE_LEN {
+                    let end = if op == BinaryOp::RangeInclusive { b.saturating_add(1) } else { *b };
+                    if end.saturating_sub(*a) > MAX_RANGE_LEN {
                         return Err(RillError::new(format!(
                             "range {a}..{b} would produce more than {MAX_RANGE_LEN} elements"
                         ))
                         .into());
                     }
-                    Value::List((*a..*b).map(Value::Int).collect())
+                    Value::List((*a..end).map(Value::Int).collect())
                 }
                 _ => {
                     return Err(RillError::new(format!(
@@ -3174,8 +3192,8 @@ impl Evaluator {
                     .into())
                 }
             },
-            BinaryOp::And | BinaryOp::Or => {
-                unreachable!("And/Or handled before eval_binary in eval_expr")
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Coalesce => {
+                unreachable!("short-circuit operators are handled before eval_binary")
             }
             _ => numeric_binary(left, right, op)?,
         };
@@ -3653,6 +3671,22 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
             BinaryOp::Sub => a.checked_sub(*b),
             BinaryOp::Mul => a.checked_mul(*b),
             BinaryOp::Div => a.checked_div(*b),
+            BinaryOp::Rem => {
+                if *b == 0 {
+                    return Err(RillError::new("remainder by zero"));
+                }
+                a.checked_rem(*b)
+            }
+            BinaryOp::Pow => {
+                let exponent = u32::try_from(*b).map_err(|_| {
+                    RillError::new(if *b < 0 {
+                        "negative exponent on an Int; use a Float base such as 2.0 ** -1"
+                    } else {
+                        "exponent too large"
+                    })
+                })?;
+                a.checked_pow(exponent)
+            }
             _ => unreachable!(),
         };
         return value
@@ -3661,7 +3695,7 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
     }
     let a = as_f64(&left)?;
     let b = as_f64(&right)?;
-    if op == BinaryOp::Div && b == 0.0 {
+    if matches!(op, BinaryOp::Div | BinaryOp::Rem) && b == 0.0 {
         return Err(RillError::new("division by zero"));
     }
     let value = match op {
@@ -3669,6 +3703,8 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
         BinaryOp::Sub => a - b,
         BinaryOp::Mul => a * b,
         BinaryOp::Div => a / b,
+        BinaryOp::Rem => a % b,
+        BinaryOp::Pow => a.powf(b),
         _ => unreachable!(),
     };
     if !value.is_finite() {
@@ -3689,6 +3725,7 @@ fn apply_compound(current: &mut Value, rhs: Value, op: AssignOp) -> Result<(), R
         AssignOp::Sub => BinaryOp::Sub,
         AssignOp::Mul => BinaryOp::Mul,
         AssignOp::Div => BinaryOp::Div,
+        AssignOp::Rem => BinaryOp::Rem,
     };
     if bin_op == BinaryOp::Add {
         match current {
@@ -3770,22 +3807,36 @@ fn check_numeric_operands(left: &Value, right: &Value, op: BinaryOp) -> Result<(
     {
         return Ok(());
     }
-    let operator = match op {
+    Err(RillError::new(format!(
+        "operator '{}' needs numeric operands, got {} and {}",
+        operator_symbol(op),
+        left.type_name(),
+        right.type_name()
+    )))
+}
+
+fn operator_symbol(op: BinaryOp) -> &'static str {
+    match op {
         BinaryOp::Add => "+",
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
+        BinaryOp::Pow => "**",
         BinaryOp::Gt => ">",
         BinaryOp::Ge => ">=",
         BinaryOp::Lt => "<",
         BinaryOp::Le => "<=",
-        _ => unreachable!(),
-    };
-    Err(RillError::new(format!(
-        "operator '{operator}' needs numeric operands, got {} and {}",
-        left.type_name(),
-        right.type_name()
-    )))
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Range => "..",
+        BinaryOp::RangeInclusive => "..=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+        BinaryOp::In => "in",
+        BinaryOp::NotIn => "not in",
+        BinaryOp::Coalesce => "??",
+    }
 }
 
 fn as_f64(value: &Value) -> Result<f64, RillError> {
@@ -3806,15 +3857,79 @@ fn as_usize(value: &Value) -> Result<usize, RillError> {
 fn constant_int_expr(expr: &Expr) -> Option<i64> {
     match expr.unspanned() {
         Expr::Literal(Literal::Int(value)) => Some(*value),
-        Expr::Binary { op: BinaryOp::Sub, left, right }
-            if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) =>
-        {
-            match right.unspanned() {
-                Expr::Literal(Literal::Int(value)) => value.checked_neg(),
-                _ => None,
-            }
-        }
+        Expr::Unary { op: UnaryOp::Neg, operand } => match operand.unspanned() {
+            Expr::Literal(Literal::Int(value)) => value.checked_neg(),
+            _ => None,
+        },
         _ => None,
+    }
+}
+
+/// Equality with numeric cross-type comparison: `1 == 1.0`, recursively
+/// inside collections, options, and results.
+fn values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
+        (Value::List(a), Value::List(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, value)| b.get(key).is_some_and(|other| values_equal(value, other)))
+        }
+        (Value::Option(Some(a)), Value::Option(Some(b))) => values_equal(a, b),
+        (Value::Result(Ok(a)), Value::Result(Ok(b)))
+        | (Value::Result(Err(a)), Value::Result(Err(b))) => values_equal(a, b),
+        _ => left == right,
+    }
+}
+
+/// Ordering for `<`, `<=`, `>`, `>=`: numbers, strings, and durations.
+fn compare_values(
+    left: &Value,
+    right: &Value,
+    op: BinaryOp,
+) -> Result<std::cmp::Ordering, RillError> {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
+        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+            let (a, b) = (as_f64(left)?, as_f64(right)?);
+            Ok(a.partial_cmp(&b).unwrap_or(Ordering::Equal))
+        }
+        (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
+        (Value::Duration(a), Value::Duration(b)) => Ok(a.cmp(b)),
+        _ => Err(RillError::new(format!(
+            "operator '{}' needs two numbers, two strings, or two durations, got {} and {}",
+            operator_symbol(op),
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
+}
+
+/// `needle in container` for lists (by value), maps (by key), and strings.
+fn contains_value(container: &Value, needle: &Value) -> Result<bool, RillError> {
+    match container {
+        Value::List(items) => Ok(items.iter().any(|item| values_equal(item, needle))),
+        Value::Map(map) => match needle {
+            Value::Str(key) => Ok(map.contains_key(key)),
+            other => Err(RillError::new(format!(
+                "`in` on a Map needs a Str key, got {}",
+                other.type_name()
+            ))),
+        },
+        Value::Str(text) => match needle {
+            Value::Str(part) => Ok(text.contains(part.as_str())),
+            other => {
+                Err(RillError::new(format!("`in` on a Str needs a Str, got {}", other.type_name())))
+            }
+        },
+        other => Err(RillError::new(format!(
+            "`in` needs a List, Map, or Str on the right, got {}",
+            other.type_name()
+        ))),
     }
 }
 

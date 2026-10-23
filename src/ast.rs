@@ -192,6 +192,7 @@ pub enum AssignOp {
     Sub,
     Mul,
     Div,
+    Rem,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -438,14 +439,27 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    /// `%`: remainder with the sign of the dividend, like `/` truncates.
+    Rem,
+    /// `**`: exponentiation, right-associative.
+    Pow,
+    /// `a..b`: half-open integer range.
     Range,
+    /// `a..=b`: inclusive integer range.
+    RangeInclusive,
     And,
     Or,
+    /// `x in xs`: membership in a List, Map (keys), or Str (substring).
+    In,
+    NotIn,
+    /// `x ?? y`: `y` when `x` is `null` or `none`; unwraps `some`.
+    Coalesce,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
+    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -823,6 +823,15 @@ impl Checker {
                 }
                 Ok(Type::Bool)
             }
+            Expr::Unary { op: UnaryOp::Neg, operand } => {
+                let ty = self.check_expr(operand)?;
+                match ty {
+                    Type::Int | Type::Float | Type::Unknown => Ok(ty),
+                    other => {
+                        Err(RillError::new(format!("unary minus needs a number, got {other}")))
+                    }
+                }
+            }
             Expr::Implicit => Ok(self.env.get("it").unwrap_or(Type::Unknown)),
             Expr::ImplicitField(_) => Ok(Type::Unknown),
             Expr::Interpolated(parts) => {
@@ -1205,15 +1214,41 @@ impl Checker {
             }
             BinaryOp::Eq | BinaryOp::Ne => Ok(Type::Bool),
             BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le => {
-                if (!left_ty.is_numeric() && !left_ty.is_unknown())
-                    || (!right_ty.is_numeric() && !right_ty.is_unknown())
-                {
+                let orderable = left_ty.is_unknown()
+                    || right_ty.is_unknown()
+                    || (left_ty.is_numeric() && right_ty.is_numeric())
+                    || (left_ty == Type::Str && right_ty == Type::Str)
+                    || (left_ty == Type::Duration && right_ty == Type::Duration);
+                if !orderable {
                     return Err(RillError::new(format!(
-                        "comparison needs numeric operands, got {left_ty} and {right_ty}"
+                        "comparison needs two numbers, two strings, or two durations, got {left_ty} and {right_ty}"
                     )));
                 }
                 Ok(Type::Bool)
             }
+            BinaryOp::In | BinaryOp::NotIn => {
+                match &right_ty {
+                    Type::List(_) | Type::Map | Type::Str | Type::Unknown => {}
+                    other => {
+                        return Err(RillError::new(format!(
+                            "`in` needs a List, Map, or Str on the right, got {other}"
+                        )))
+                    }
+                }
+                if matches!(right_ty, Type::Map | Type::Str)
+                    && !matches!(left_ty, Type::Str | Type::Unknown)
+                {
+                    return Err(RillError::new(format!(
+                        "`in` on a {right_ty} needs a Str on the left, got {left_ty}"
+                    )));
+                }
+                Ok(Type::Bool)
+            }
+            BinaryOp::Coalesce => Ok(match left_ty {
+                Type::Option(inner) => common_type(*inner, right_ty),
+                Type::Null => right_ty,
+                other => common_type(other, right_ty),
+            }),
             BinaryOp::Add if left_ty == Type::Str && right_ty == Type::Str => Ok(Type::Str),
             BinaryOp::Add if matches!((&left_ty, &right_ty), (Type::List(_), Type::List(_))) => {
                 Ok(common_type(left_ty, right_ty))
@@ -1221,7 +1256,12 @@ impl Checker {
             BinaryOp::Add if left_ty == Type::Unknown || right_ty == Type::Unknown => {
                 Ok(Type::Unknown)
             }
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::Pow => {
                 if !left_ty.is_numeric() || !right_ty.is_numeric() {
                     return Err(RillError::new(format!(
                         "numeric operator needs numeric operands, got {left_ty} and {right_ty}"
@@ -1235,7 +1275,7 @@ impl Checker {
                     Type::Int
                 })
             }
-            BinaryOp::Range => {
+            BinaryOp::Range | BinaryOp::RangeInclusive => {
                 if !left_ty.is_numeric() || !right_ty.is_numeric() {
                     return Err(RillError::new(format!(
                         "range requires numeric operands, got {left_ty} and {right_ty}"
@@ -1835,14 +1875,10 @@ fn common_type(left: Type, right: Type) -> Type {
 fn constant_int(expr: &Expr) -> Option<i64> {
     match expr.unspanned() {
         Expr::Literal(Literal::Int(value)) => Some(*value),
-        Expr::Binary { op: BinaryOp::Sub, left, right }
-            if matches!(left.unspanned(), Expr::Literal(Literal::Int(0))) =>
-        {
-            match right.unspanned() {
-                Expr::Literal(Literal::Int(value)) => value.checked_neg(),
-                _ => None,
-            }
-        }
+        Expr::Unary { op: UnaryOp::Neg, operand } => match operand.unspanned() {
+            Expr::Literal(Literal::Int(value)) => value.checked_neg(),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1870,7 +1906,7 @@ fn compound_assignment_type(op: AssignOp, current: &Type, value: &Type) -> Resul
             Ok(Type::List(Box::new(common_type((**current).clone(), (**value).clone()))))
         }
         (
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Rem,
             Type::Int | Type::Float,
             Type::Int | Type::Float,
         ) => Ok(common_type(current.clone(), value.clone())),

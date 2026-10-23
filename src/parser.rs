@@ -53,7 +53,9 @@ enum TokenKind {
     Plus,
     Minus,
     Star,
+    StarStar,
     Slash,
+    Percent,
     Bang,
     AndAnd,
     OrOr,
@@ -61,10 +63,13 @@ enum TokenKind {
     MinusEq,
     StarEq,
     SlashEq,
+    PercentEq,
     Question,
+    QuestionQuestion,
     Dollar,
     Dot,
     DotDot,
+    DotDotEq,
     Comma,
     Colon,
     LParen,
@@ -151,7 +156,9 @@ impl TokenKind {
             TokenKind::Plus => symbol("+"),
             TokenKind::Minus => symbol("-"),
             TokenKind::Star => symbol("*"),
+            TokenKind::StarStar => symbol("**"),
             TokenKind::Slash => symbol("/"),
+            TokenKind::Percent => symbol("%"),
             TokenKind::Bang => symbol("!"),
             TokenKind::AndAnd => symbol("&&"),
             TokenKind::OrOr => symbol("||"),
@@ -159,10 +166,13 @@ impl TokenKind {
             TokenKind::MinusEq => symbol("-="),
             TokenKind::StarEq => symbol("*="),
             TokenKind::SlashEq => symbol("/="),
+            TokenKind::PercentEq => symbol("%="),
             TokenKind::Question => symbol("?"),
+            TokenKind::QuestionQuestion => symbol("??"),
             TokenKind::Dollar => symbol("$"),
             TokenKind::Dot => symbol("."),
             TokenKind::DotDot => symbol(".."),
+            TokenKind::DotDotEq => symbol("..="),
             TokenKind::Comma => symbol(","),
             TokenKind::Colon => symbol(":"),
             TokenKind::LParen => symbol("("),
@@ -647,7 +657,10 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 at_line_start = false;
             }
             '*' => {
-                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                let kind = if matches!(chars.peek(), Some((_, '*'))) {
+                    chars.next();
+                    TokenKind::StarStar
+                } else if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
                     TokenKind::StarEq
                 } else {
@@ -667,16 +680,50 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
-            '?' => push(
-                &mut tokens,
-                TokenKind::Question,
-                start,
-                chars.peek().map_or(source.len(), |(index, _)| *index),
-            ),
+            '?' => {
+                let kind = if matches!(chars.peek(), Some((_, '?'))) {
+                    chars.next();
+                    TokenKind::QuestionQuestion
+                } else {
+                    TokenKind::Question
+                };
+                push(
+                    &mut tokens,
+                    kind,
+                    start,
+                    chars.peek().map_or(source.len(), |(index, _)| *index),
+                );
+            }
+            '%' => {
+                let kind = if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    TokenKind::PercentEq
+                } else {
+                    TokenKind::Percent
+                };
+                push(
+                    &mut tokens,
+                    kind,
+                    start,
+                    chars.peek().map_or(source.len(), |(index, _)| *index),
+                );
+                at_line_start = false;
+            }
             '.' => {
                 if chars.peek().map(|(_, c)| *c) == Some('.') {
                     let (end, _) = chars.next().unwrap();
-                    tokens.push(Token { kind: TokenKind::DotDot, span: Span::new(start, end + 1) });
+                    if chars.peek().map(|(_, c)| *c) == Some('=') {
+                        chars.next();
+                        tokens.push(Token {
+                            kind: TokenKind::DotDotEq,
+                            span: Span::new(start, end + 2),
+                        });
+                    } else {
+                        tokens.push(Token {
+                            kind: TokenKind::DotDot,
+                            span: Span::new(start, end + 1),
+                        });
+                    }
                 } else {
                     push(
                         &mut tokens,
@@ -1342,6 +1389,7 @@ impl Parser {
                 | TokenKind::MinusEq
                 | TokenKind::StarEq
                 | TokenKind::SlashEq
+                | TokenKind::PercentEq
         ) {
             return true;
         }
@@ -1361,6 +1409,7 @@ impl Parser {
                                     | TokenKind::MinusEq
                                     | TokenKind::StarEq
                                     | TokenKind::SlashEq
+                                    | TokenKind::PercentEq
                             );
                         }
                         depth -= 1;
@@ -1382,6 +1431,7 @@ impl Parser {
             TokenKind::MinusEq => AssignOp::Sub,
             TokenKind::StarEq => AssignOp::Mul,
             TokenKind::SlashEq => AssignOp::Div,
+            TokenKind::PercentEq => AssignOp::Rem,
             other => {
                 return Err(RillError::spanned(
                     format!("expected assignment operator, found {}", other.describe()),
@@ -1629,7 +1679,10 @@ impl Parser {
             if self.at(TokenKind::Newline)
                 && matches!(
                     self.peek_n_kind(1),
-                    TokenKind::Pipe | TokenKind::ValuePipe | TokenKind::Dot
+                    TokenKind::Pipe
+                        | TokenKind::ValuePipe
+                        | TokenKind::Dot
+                        | TokenKind::QuestionQuestion
                 )
             {
                 self.next();
@@ -1681,6 +1734,9 @@ impl Parser {
                 break;
             }
             self.next();
+            if op == ParsedOp::Binary(BinaryOp::NotIn) {
+                self.next(); // the `in` after `not`
+            }
 
             if op == ParsedOp::Match {
                 let next = self.next();
@@ -1741,19 +1797,15 @@ impl Parser {
             TokenKind::False => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Null => Ok(Expr::Literal(Literal::Null)),
             TokenKind::Bang => {
-                let operand = self.parse_expr(13)?;
+                let operand = self.parse_expr(17)?;
                 Ok(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand) })
             }
             TokenKind::Minus => {
-                let operand = self.parse_expr(13)?;
-                Ok(Expr::Binary {
-                    op: BinaryOp::Sub,
-                    left: Box::new(Expr::Literal(Literal::Int(0))),
-                    right: Box::new(operand),
-                })
+                let operand = self.parse_expr(17)?;
+                Ok(Expr::Unary { op: UnaryOp::Neg, operand: Box::new(operand) })
             }
             TokenKind::Ident(ref name) if name == "not" => {
-                let operand = self.parse_expr(13)?;
+                let operand = self.parse_expr(17)?;
                 Ok(Expr::Unary { op: UnaryOp::Not, operand: Box::new(operand) })
             }
             TokenKind::Ident(ref name) if name == "parallel" || name == "race" => {
@@ -2122,18 +2174,30 @@ impl Parser {
                 Some((ParsedOp::Binary(BinaryOp::And), 5, 6))
             }
             TokenKind::Match => Some((ParsedOp::Match, 7, 8)),
-            TokenKind::DotDot => Some((ParsedOp::Binary(BinaryOp::Range), 7, 8)),
             TokenKind::EqEq => Some((ParsedOp::Binary(BinaryOp::Eq), 7, 8)),
             TokenKind::Ne => Some((ParsedOp::Binary(BinaryOp::Ne), 7, 8)),
             TokenKind::Gt => Some((ParsedOp::Binary(BinaryOp::Gt), 7, 8)),
             TokenKind::Ge => Some((ParsedOp::Binary(BinaryOp::Ge), 7, 8)),
             TokenKind::Lt => Some((ParsedOp::Binary(BinaryOp::Lt), 7, 8)),
             TokenKind::Le => Some((ParsedOp::Binary(BinaryOp::Le), 7, 8)),
-            TokenKind::Plus => Some((ParsedOp::Binary(BinaryOp::Add), 9, 10)),
-            TokenKind::Minus => Some((ParsedOp::Binary(BinaryOp::Sub), 9, 10)),
-            TokenKind::Star => Some((ParsedOp::Binary(BinaryOp::Mul), 11, 12)),
-            TokenKind::Slash => Some((ParsedOp::Binary(BinaryOp::Div), 11, 12)),
-            TokenKind::LBracket => Some((ParsedOp::Index, 15, 16)),
+            TokenKind::In => Some((ParsedOp::Binary(BinaryOp::In), 7, 8)),
+            TokenKind::Ident(ref name)
+                if name == "not" && matches!(self.peek_n_kind(1), TokenKind::In) =>
+            {
+                Some((ParsedOp::Binary(BinaryOp::NotIn), 7, 8))
+            }
+            // Right-associative: the right side is parsed at the same power.
+            TokenKind::QuestionQuestion => Some((ParsedOp::Binary(BinaryOp::Coalesce), 9, 9)),
+            TokenKind::DotDot => Some((ParsedOp::Binary(BinaryOp::Range), 11, 12)),
+            TokenKind::DotDotEq => Some((ParsedOp::Binary(BinaryOp::RangeInclusive), 11, 12)),
+            TokenKind::Plus => Some((ParsedOp::Binary(BinaryOp::Add), 13, 14)),
+            TokenKind::Minus => Some((ParsedOp::Binary(BinaryOp::Sub), 13, 14)),
+            TokenKind::Star => Some((ParsedOp::Binary(BinaryOp::Mul), 15, 16)),
+            TokenKind::Slash => Some((ParsedOp::Binary(BinaryOp::Div), 15, 16)),
+            TokenKind::Percent => Some((ParsedOp::Binary(BinaryOp::Rem), 15, 16)),
+            // Binds tighter than prefix minus (`-2 ** 2 == -4`), right-associative.
+            TokenKind::StarStar => Some((ParsedOp::Binary(BinaryOp::Pow), 18, 17)),
+            TokenKind::LBracket => Some((ParsedOp::Index, 19, 20)),
             _ => None,
         }
     }
@@ -2187,6 +2251,7 @@ impl Parser {
             | TokenKind::Dollar
             | TokenKind::Pipe
             | TokenKind::OrOr
+            | TokenKind::Bang
             | TokenKind::Run
             | TokenKind::Args
             | TokenKind::Input
