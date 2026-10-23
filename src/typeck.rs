@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::diagnostic::{RillError, Span};
 use crate::types::Value;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -100,6 +101,16 @@ impl fmt::Display for Type {
 struct TypeBinding {
     ty: Type,
     mutable: bool,
+    /// Set once the binding is read; drives the unused-variable warning.
+    used: Cell<bool>,
+    /// Where a `let`/`var` declared it, when an unused binding should warn.
+    declared: Option<Span>,
+}
+
+impl TypeBinding {
+    fn new(ty: Type, mutable: bool) -> Self {
+        Self { ty, mutable, used: Cell::new(false), declared: None }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +122,7 @@ impl Env {
     fn new() -> Self {
         let mut root = BTreeMap::new();
         let insert = |root: &mut BTreeMap<String, TypeBinding>, name: &str, ty: Type| {
-            root.insert(name.to_string(), TypeBinding { ty, mutable: true });
+            root.insert(name.to_string(), TypeBinding::new(ty, true));
         };
         insert(&mut root, "args", Type::List(Box::new(Type::Str)));
         insert(&mut root, "env", Type::Map(Box::new(Type::Str)));
@@ -136,26 +147,44 @@ impl Env {
         self.scopes.push(BTreeMap::new());
     }
 
-    fn pop(&mut self) {
-        self.scopes.pop();
+    fn pop(&mut self) -> Option<BTreeMap<String, TypeBinding>> {
+        self.scopes.pop()
     }
 
     fn set(&mut self, name: String, ty: Type) {
         self.scopes
             .last_mut()
             .expect("type env always has root scope")
-            .insert(name, TypeBinding { ty, mutable: true });
+            .insert(name, TypeBinding::new(ty, true));
     }
 
-    fn bind(&mut self, name: String, ty: Type, mutable: bool) {
-        self.scopes
-            .last_mut()
-            .expect("type env always has root scope")
-            .insert(name, TypeBinding { ty, mutable });
+    /// Bind a name declared by a `let`/`var` statement; warns when never read.
+    fn bind_declared(&mut self, name: String, ty: Type, mutable: bool, declared: Option<Span>) {
+        let mut binding = TypeBinding::new(ty, mutable);
+        binding.declared = declared;
+        self.scopes.last_mut().expect("type env always has root scope").insert(name, binding);
     }
 
+    /// Look a name up and mark it as read.
     fn get(&self, name: &str) -> Option<Type> {
-        self.scopes.iter().rev().find_map(|scope| scope.get(name).map(|b| b.ty.clone()))
+        self.scopes.iter().rev().find_map(|scope| {
+            scope.get(name).map(|binding| {
+                binding.used.set(true);
+                binding.ty.clone()
+            })
+        })
+    }
+
+    /// Whether a name is bound, without marking it as read.
+    fn contains(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.contains_key(name))
+    }
+
+    /// Mark a name as read without needing its type.
+    fn touch(&self, name: &str) {
+        if let Some(binding) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+            binding.used.set(true);
+        }
     }
 
     fn is_mutable(&self, name: &str) -> Option<bool> {
@@ -185,7 +214,22 @@ impl Env {
 }
 
 pub fn check(program: &Program) -> Result<(), RillError> {
-    check_module(program, &[]).map(|_| ())
+    check_module(program, &[], false).map(|_| ())
+}
+
+/// Collect every error and warning in a program; errors are reported through
+/// `check`, warnings are returned for `rill check` to print.
+pub fn check_with_warnings(program: &Program) -> Result<Vec<RillError>, RillError> {
+    check_module(program, &[], false).map(|checked| checked.warnings)
+}
+
+/// Upper bound on the errors reported for one module, to keep cascades short.
+const MAX_ERRORS: usize = 20;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CheckedModule {
+    pub(crate) exports: ModuleExports,
+    pub(crate) warnings: Vec<RillError>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -196,7 +240,8 @@ pub(crate) struct ModuleExports {
 pub(crate) fn check_module(
     program: &Program,
     imports: &[&ModuleExports],
-) -> Result<ModuleExports, RillError> {
+    is_module: bool,
+) -> Result<CheckedModule, RillError> {
     let mut env = Env::new();
     for import in imports {
         for (name, ty) in &import.symbols {
@@ -213,6 +258,10 @@ pub(crate) fn check_module(
         for_body_depth: 0,
         function_depth: 0,
         parallel_floor: None,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        current_span: None,
+        warn_unused_top_level: !is_module,
     };
     checker.check_program(program)
 }
@@ -241,21 +290,108 @@ struct Checker {
     parallel_floor: Option<usize>,
     for_body_depth: usize,
     function_depth: usize,
+    /// Errors collected so far; checking continues past a failed statement.
+    errors: Vec<RillError>,
+    warnings: Vec<RillError>,
+    /// Span of the statement being checked, for warnings without a better anchor.
+    current_span: Option<Span>,
+    /// Unused top-level `let`s warn in scripts but not in modules, whose
+    /// top-level bindings are exports.
+    warn_unused_top_level: bool,
+}
+
+/// Checker state restored after a statement fails, so later statements are
+/// checked from a consistent position.
+struct Snapshot {
+    scopes: usize,
+    loop_stack: usize,
+    loop_depth: usize,
+    for_body_depth: usize,
+    function_depth: usize,
+    parallel_floor: Option<usize>,
+    return_expected: Option<Type>,
+    try_kinds: usize,
 }
 
 impl Checker {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            scopes: self.env.scopes.len(),
+            loop_stack: self.loop_stack.len(),
+            loop_depth: self.loop_depth,
+            for_body_depth: self.for_body_depth,
+            function_depth: self.function_depth,
+            parallel_floor: self.parallel_floor,
+            return_expected: self.return_expected.clone(),
+            try_kinds: self.try_kinds.len(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.env.scopes.truncate(snapshot.scopes);
+        self.loop_stack.truncate(snapshot.loop_stack);
+        self.loop_depth = snapshot.loop_depth;
+        self.for_body_depth = snapshot.for_body_depth;
+        self.function_depth = snapshot.function_depth;
+        self.parallel_floor = snapshot.parallel_floor;
+        self.return_expected = snapshot.return_expected;
+        self.try_kinds.truncate(snapshot.try_kinds);
+        self.closure_param_hints = None;
+    }
+
+    fn record_error(&mut self, error: RillError) {
+        let duplicate = self
+            .errors
+            .iter()
+            .any(|known| known.message == error.message && known.span == error.span);
+        if !duplicate && self.errors.len() < MAX_ERRORS {
+            self.errors.push(error);
+        }
+    }
+
+    fn warn(&mut self, span: Option<Span>, message: String, code: &'static str, help: &str) {
+        let mut warning = RillError::warning(message, code).with_help(help);
+        if let Some(span) = span {
+            warning = warning.with_span(span);
+        }
+        self.warnings.push(warning);
+    }
+
+    fn pop_scope(&mut self) {
+        if let Some(scope) = self.env.pop() {
+            self.report_unused(&scope);
+        }
+    }
+
+    fn report_unused(&mut self, scope: &BTreeMap<String, TypeBinding>) {
+        for (name, binding) in scope {
+            if binding.used.get() || name.starts_with('_') {
+                continue;
+            }
+            if let Some(span) = binding.declared {
+                self.warn(
+                    Some(span),
+                    format!("unused variable '{name}'"),
+                    "rill::warn::unused_let",
+                    "remove it, or name it `_` (or `_name`) to keep it on purpose",
+                );
+            }
+        }
+    }
+
     fn bind_pattern(
         &mut self,
         pattern: &LetPattern,
         ty: Type,
         mutable: bool,
+        declared: Option<Span>,
     ) -> Result<(), RillError> {
         match pattern {
-            LetPattern::Ident(name) => self.env.bind(name.clone(), ty, mutable),
+            LetPattern::Ident(name) => self.env.bind_declared(name.clone(), ty, mutable, declared),
             LetPattern::List(names) => {
                 for name in names {
                     if name != "_" {
-                        self.env.bind(name.clone(), Type::Unknown, mutable);
+                        self.env.bind_declared(name.clone(), Type::Unknown, mutable, declared);
                     }
                 }
             }
@@ -278,21 +414,21 @@ impl Checker {
                 }
                 for (name, element) in names.iter().zip(elements) {
                     if name != "_" {
-                        self.env.bind(name.clone(), element, mutable);
+                        self.env.bind_declared(name.clone(), element, mutable, declared);
                     }
                 }
             }
             LetPattern::Map(pairs) => {
                 for (key, alias) in pairs {
                     let binding = alias.as_deref().unwrap_or(key.as_str());
-                    self.env.bind(binding.to_string(), Type::Unknown, mutable);
+                    self.env.bind_declared(binding.to_string(), Type::Unknown, mutable, declared);
                 }
             }
         }
         Ok(())
     }
 
-    fn check_program(&mut self, program: &Program) -> Result<ModuleExports, RillError> {
+    fn check_program(&mut self, program: &Program) -> Result<CheckedModule, RillError> {
         for stmt in &program.stmts {
             if let Stmt::Fn { name, function } = stmt.unspanned() {
                 self.env.set(
@@ -321,13 +457,27 @@ impl Checker {
             }
         }
         self.check_stmts(&program.stmts)?;
+        if self.warn_unused_top_level {
+            let root = self.env.scopes.first().cloned().unwrap_or_default();
+            self.report_unused(&root);
+        }
         let mut symbols = BTreeMap::new();
         for name in top_level_names(&program.stmts) {
             if let Some(ty) = self.env.get(&name) {
                 symbols.insert(name, ty);
             }
         }
-        Ok(ModuleExports { symbols })
+        if !self.errors.is_empty() {
+            let mut errors: Vec<RillError> = std::mem::take(&mut self.errors)
+                .into_iter()
+                .map(|error| error.with_kind(crate::types::ErrorKind::Type))
+                .collect();
+            let first = errors.remove(0);
+            return Err(if errors.is_empty() { first } else { first.with_related(errors) });
+        }
+        let mut warnings = std::mem::take(&mut self.warnings);
+        warnings.sort_by_key(|warning| warning.span.map(|span| span.start));
+        Ok(CheckedModule { exports: ModuleExports { symbols }, warnings })
     }
 
     /// The type of a field/index chain used as an assignment target.
@@ -425,18 +575,73 @@ impl Checker {
         result
     }
 
+    /// Check a block.  A failing statement is recorded and checking continues
+    /// from a restored state, so one run reports every independent error.
     fn check_stmts(&mut self, stmts: &[Stmt]) -> Result<Type, RillError> {
         let mut last = Type::Null;
-        for stmt in stmts {
-            last = self.check_stmt(stmt)?;
+        let mut terminated_by: Option<&'static str> = None;
+        // The type of the first statement that leaves the block; statements
+        // after it never run and must not decide the block's type.
+        let mut terminal_type: Option<Type> = None;
+        for (index, stmt) in stmts.iter().enumerate() {
+            if let Some(keyword) = terminated_by.take() {
+                self.warn(
+                    stmt.span(),
+                    "unreachable statement".to_string(),
+                    "rill::warn::unreachable",
+                    &format!("the `{keyword}` above leaves this block before it runs"),
+                );
+            }
+            if terminal_type.is_some() {
+                // Still check unreachable code for errors, but ignore its type.
+                let snapshot = self.snapshot();
+                if let Err(error) = self.check_stmt(stmt) {
+                    self.record_error(error);
+                    self.restore(snapshot);
+                }
+                continue;
+            }
+            let snapshot = self.snapshot();
+            match self.check_stmt(stmt) {
+                Ok(ty) => {
+                    let is_last = index + 1 == stmts.len();
+                    if !is_last && matches!(stmt.unspanned(), Stmt::Expr(_)) {
+                        if let Type::Result(..) = ty {
+                            self.warn(
+                                stmt.span(),
+                                "unused Result".to_string(),
+                                "rill::warn::unused_result",
+                                "handle it with `?`, `match`, or `.unwrap_or(...)`; write `let _ = ...` to discard it on purpose",
+                            );
+                        }
+                    }
+                    last = ty;
+                }
+                Err(error) => {
+                    self.record_error(error);
+                    self.restore(snapshot);
+                    if let Stmt::Let { pattern, mutable, .. } = stmt.unspanned() {
+                        // Poison the names so later uses do not cascade.
+                        let _ = self.bind_pattern(pattern, Type::Unknown, *mutable, None);
+                    }
+                    last = Type::Unknown;
+                }
+            }
+            terminated_by = terminator(stmt);
+            if terminated_by.is_some() {
+                terminal_type = Some(last.clone());
+            }
         }
-        Ok(last)
+        Ok(terminal_type.unwrap_or(last))
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<Type, RillError> {
         match stmt {
             Stmt::Located { stmt, span } => {
-                self.check_stmt(stmt).map_err(|error| error.with_span(*span))
+                let previous = self.current_span.replace(*span);
+                let checked = self.check_stmt(stmt).map_err(|error| error.with_span(*span));
+                self.current_span = previous;
+                checked
             }
             Stmt::Use(module) => {
                 if !crate::methods::NAMESPACES.contains(&module.as_str())
@@ -452,6 +657,7 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::Let { pattern, type_name, expr, mutable } => {
+                let declared = self.current_span;
                 if let Expr::If { else_body, .. } = expr.unspanned() {
                     if else_body.is_empty() {
                         return Err(RillError::new("an if used as a value needs an else branch")
@@ -470,7 +676,7 @@ impl Checker {
                 } else {
                     inferred
                 };
-                self.bind_pattern(pattern, ty, *mutable)?;
+                self.bind_pattern(pattern, ty, *mutable, declared)?;
                 Ok(Type::Null)
             }
             Stmt::AssignEnv { name: _, expr } => {
@@ -617,7 +823,7 @@ impl Checker {
                 self.loop_depth = previous_loop;
                 self.loop_stack = previous_loop_stack;
                 self.function_depth -= 1;
-                self.env.pop();
+                self.pop_scope();
                 let body_ty = checked?;
                 let body_ty = infer_propagation(
                     &function.propagation,
@@ -668,7 +874,7 @@ impl Checker {
                 }
                 self.env.push();
                 self.check_stmts(body)?;
-                self.env.pop();
+                self.pop_scope();
                 Ok(Type::Null)
             }
             Stmt::On { host, body } => {
@@ -678,7 +884,7 @@ impl Checker {
                 }
                 self.env.push();
                 self.check_stmts(body)?;
-                self.env.pop();
+                self.pop_scope();
                 Ok(Type::Null)
             }
             Stmt::Return(expr) => {
@@ -739,6 +945,17 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::Expr(expr) => self.check_expr(expr),
+        }
+    }
+
+    fn warn_shadowed_capture(&mut self, name: &str, span: Option<Span>) {
+        if self.env.contains(name) {
+            self.warn(
+                span,
+                format!("regex capture '{name}' shadows an existing binding"),
+                "rill::warn::shadowed_capture",
+                "rename the capture group, or the variable, so the two cannot be confused",
+            );
         }
     }
 
@@ -894,7 +1111,7 @@ impl Checker {
                     Type::Map(value) => Type::Tuple(vec![Type::Str, *value]),
                     other => other.list_item(),
                 };
-                self.bind_pattern(pattern, item_ty, true)?;
+                self.bind_pattern(pattern, item_ty, true, None)?;
                 self.loop_depth += 1;
                 self.loop_stack.push(None);
                 self.for_body_depth += 1;
@@ -902,7 +1119,7 @@ impl Checker {
                 self.for_body_depth -= 1;
                 self.loop_stack.pop();
                 self.loop_depth -= 1;
-                self.env.pop();
+                self.pop_scope();
                 self.parallel_floor = previous_floor;
                 checked?;
                 Ok(match mode {
@@ -919,18 +1136,19 @@ impl Checker {
                 }
                 self.env.push();
                 if let Some(pattern) = pattern {
-                    self.bind_pattern(pattern, cond_ty.clone(), true)?;
+                    self.bind_pattern(pattern, cond_ty.clone(), true, None)?;
                 }
                 if let Expr::RegexMatch { pattern, .. } = cond.unspanned() {
                     for name in regex_capture_names(pattern)? {
+                        self.warn_shadowed_capture(&name, cond.span());
                         self.env.set(name, Type::Str);
                     }
                 }
                 let then_ty = self.check_stmts(then_body)?;
-                self.env.pop();
+                self.pop_scope();
                 self.env.push();
                 let else_ty = self.check_stmts(else_body)?;
-                self.env.pop();
+                self.pop_scope();
                 Ok(common_type(then_ty, else_ty))
             }
             Expr::Loop { body } => {
@@ -938,7 +1156,7 @@ impl Checker {
                 self.loop_stack.push(Some(Type::Unknown));
                 self.env.push();
                 let checked = self.check_stmts(body);
-                self.env.pop();
+                self.pop_scope();
                 let breaks = self.loop_stack.pop().flatten().unwrap_or(Type::Unknown);
                 self.loop_depth -= 1;
                 checked?;
@@ -947,7 +1165,7 @@ impl Checker {
             Expr::Block(stmts) => {
                 self.env.push();
                 let ty = self.check_stmts(stmts)?;
-                self.env.pop();
+                self.pop_scope();
                 Ok(ty)
             }
             Expr::Closure { params, body, propagation } => {
@@ -968,7 +1186,7 @@ impl Checker {
                 self.loop_stack = previous_loop_stack;
                 self.return_expected = previous_return;
                 self.function_depth -= 1;
-                self.env.pop();
+                self.pop_scope();
                 let return_type = infer_propagation(propagation, false, &tries, return_type?);
                 Ok(Type::Function {
                     required: Some(params.len()),
@@ -1006,8 +1224,12 @@ impl Checker {
     fn check_parts(&mut self, parts: &[StrPart]) -> Result<(), RillError> {
         for part in parts {
             match part {
-                StrPart::Text(_) | StrPart::Var(_) => {}
-                StrPart::VarDefault(_, default) => self.check_parts(default)?,
+                StrPart::Text(_) => {}
+                StrPart::Var(name) => self.env.touch(name),
+                StrPart::VarDefault(name, default) => {
+                    self.env.touch(name);
+                    self.check_parts(default)?;
+                }
                 StrPart::Expr(expr) => {
                     let ty = self.check_expr(expr)?;
                     if matches!(ty, Type::Function { .. }) {
@@ -1128,7 +1350,7 @@ impl Checker {
             })
             .collect::<Vec<_>>();
         let result = self.check_method(&bound[0], signature.name, &bound[1..]);
-        self.env.pop();
+        self.pop_scope();
         result
     }
 
@@ -1181,7 +1403,7 @@ impl Checker {
                     self.check_callback_expr(arg)
                 };
                 self.closure_param_hints = None;
-                self.env.pop();
+                self.pop_scope();
                 ty?
             } else {
                 self.check_expr(arg)?
@@ -1339,7 +1561,7 @@ impl Checker {
                 }
                 self.check_expr(&arm.expr)
             });
-            self.env.pop();
+            self.pop_scope();
             result_ty = common_type(result_ty, checked?);
         }
         if !coverage.complete(&value_ty) {
@@ -1392,7 +1614,11 @@ impl Checker {
                         "regex match arm requires Str value, got {value_ty}"
                     )));
                 }
-                Ok(regex_capture_names(regex)?.into_iter().map(|name| (name, Type::Str)).collect())
+                let names = regex_capture_names(regex)?;
+                for name in &names {
+                    self.warn_shadowed_capture(name, self.current_span);
+                }
+                Ok(names.into_iter().map(|name| (name, Type::Str)).collect())
             }
             Pattern::Tuple(items) => {
                 let element_types = match value_ty {
@@ -1698,7 +1924,7 @@ impl Checker {
                 _ => Err(RillError::new("right side of |> must be callable")),
             }
         };
-        self.env.pop();
+        self.pop_scope();
         result
     }
 
@@ -1861,16 +2087,36 @@ impl Checker {
             }
             CommandArg::Parts(parts) => {
                 for part in parts {
-                    if let CommandPart::Var(name) = part {
-                        let ty = self.env.get(name).ok_or_else(|| {
-                            RillError::spanned(format!("unknown command variable '${name}'"), span)
-                        })?;
-                        if matches!(ty, Type::Function { .. }) {
-                            return Err(RillError::spanned(
-                                format!("cannot pass function '${name}' as argv"),
-                                span,
-                            ));
+                    match part {
+                        CommandPart::Var(name) => {
+                            let ty = self.env.get(name).ok_or_else(|| {
+                                RillError::spanned(
+                                    format!("unknown command variable '${name}'"),
+                                    span,
+                                )
+                            })?;
+                            if matches!(ty, Type::Function { .. }) {
+                                return Err(RillError::spanned(
+                                    format!("cannot pass function '${name}' as argv"),
+                                    span,
+                                ));
+                            }
                         }
+                        CommandPart::VarDefault(name, default) => {
+                            self.env.touch(name);
+                            self.check_parts(default)?;
+                        }
+                        CommandPart::Expr(expr) => {
+                            let ty =
+                                self.check_expr(expr).map_err(|error| error.with_span(span))?;
+                            if matches!(ty, Type::Function { .. }) {
+                                return Err(RillError::spanned(
+                                    "cannot pass a function as argv".to_string(),
+                                    span,
+                                ));
+                            }
+                        }
+                        CommandPart::Text(_) => {}
                     }
                 }
             }
@@ -2548,6 +2794,24 @@ fn infer_propagation(
     }
 }
 
+/// The keyword that makes a statement leave its block unconditionally, if any.
+fn terminator(stmt: &Stmt) -> Option<&'static str> {
+    match stmt.unspanned() {
+        Stmt::Return(_) => Some("return"),
+        Stmt::Break(_) => Some("break"),
+        Stmt::Continue => Some("continue"),
+        Stmt::Expr(expr) => match expr.unspanned() {
+            Expr::Call { callee, .. } => match callee.unspanned() {
+                Expr::Ident(name) if name == "die" => Some("die"),
+                Expr::Ident(name) if name == "exit" => Some("exit"),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether every path through `stmts` ends by producing a value: a `return`,
 /// a final expression, an `if`/`else` or `match` whose branches all do, or a
 /// call that never returns.
@@ -2555,6 +2819,10 @@ fn stmts_always_yield(stmts: &[Stmt]) -> bool {
     let Some(last) = stmts.last() else {
         return false;
     };
+    // A `return` (or a call that never returns) anywhere in the block ends it.
+    if stmts.iter().any(|stmt| matches!(terminator(stmt), Some("return" | "die" | "exit"))) {
+        return true;
+    }
     match last.unspanned() {
         Stmt::Return(_) => true,
         Stmt::Expr(expr) => expr_always_yields(expr),

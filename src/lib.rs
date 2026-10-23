@@ -40,6 +40,8 @@ pub struct CompiledProgram {
     pub requirements: ProgramRequirements,
     pub args: Option<ast::ArgGroup>,
     pub source: SourceUnit,
+    /// Checker warnings for the program and its modules, with sources attached.
+    pub warnings: Vec<RillError>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,7 @@ struct CompiledModule {
     program: ast::Program,
     /// Canonical paths of the modules this one imports directly.
     imports: Vec<PathBuf>,
+    warnings: Vec<RillError>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,15 +86,23 @@ impl CompilationSession {
                 .compile_imports(&program, &unit.base_dir)
                 .map_err(|err| attach_source(err, &unit))?;
             let import_refs = imports.iter().collect::<Vec<_>>();
-            typeck::check_module(&program, &import_refs).map_err(|err| {
+            let checked = typeck::check_module(&program, &import_refs, false).map_err(|err| {
                 err.with_kind(ErrorKind::Type).with_source(unit.name.clone(), unit.source.clone())
             })?;
-            Ok((program, import_paths))
+            let warnings = checked
+                .warnings
+                .into_iter()
+                .map(|warning| warning.with_source(unit.name.clone(), unit.source.clone()))
+                .collect::<Vec<_>>();
+            Ok((program, import_paths, warnings))
         })();
         if root_path.is_some() {
             self.loading.pop();
         }
-        let (program, imports) = result?;
+        let (program, imports, own_warnings) = result?;
+        let mut warnings: Vec<RillError> =
+            self.order.iter().flat_map(|module| module.warnings.iter().cloned()).collect();
+        warnings.extend(own_warnings);
         let requirements = ProgramRequirements {
             needs_input: program_needs_input(&program.stmts)
                 || self.order.iter().any(|module| program_needs_input(&module.program.stmts)),
@@ -107,6 +118,7 @@ impl CompilationSession {
             requirements,
             args,
             source: unit,
+            warnings,
         })
     }
 
@@ -153,15 +165,24 @@ impl CompilationSession {
                 .compile_imports(&program, &source_unit.base_dir)
                 .map_err(|err| attach_source(err, &source_unit))?;
             let import_refs = imports.iter().collect::<Vec<_>>();
-            let exports = typeck::check_module(&program, &import_refs).map_err(|err| {
+            let checked = typeck::check_module(&program, &import_refs, true).map_err(|err| {
                 err.with_kind(ErrorKind::Type)
                     .with_source(source_unit.name.clone(), source_unit.source.clone())
             })?;
+            let warnings = checked
+                .warnings
+                .into_iter()
+                .map(|warning| {
+                    warning.with_source(source_unit.name.clone(), source_unit.source.clone())
+                })
+                .collect();
+            let exports = checked.exports;
             let compiled = CompiledModule {
                 path: path.clone(),
                 source: source_unit,
                 program,
                 imports: import_paths,
+                warnings,
             };
             self.order.push(compiled.clone());
             self.cache.insert(path.clone(), CachedModule { exports: exports.clone() });

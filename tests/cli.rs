@@ -196,7 +196,7 @@ fn check_handles_several_files_and_json_output() {
     std::fs::create_dir_all(&dir).unwrap();
     let good = dir.join("good.ril");
     let bad = dir.join("bad.ril");
-    std::fs::write(&good, "let x = 1\n").unwrap();
+    std::fs::write(&good, "print(1)\n").unwrap();
     std::fs::write(&bad, "let x = 1\nprint(y)\n").unwrap();
     let output = rill(&["check", good.to_str().unwrap(), bad.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1));
@@ -281,4 +281,60 @@ fn script_argument_errors_are_usage_errors() {
     let output = rill(&["-e", "args { host: Str }\nprint(args.host)", "a", "--bogus"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown option '--bogus'"));
+}
+
+#[test]
+fn check_prints_warnings_and_denies_them_with_w() {
+    let dir = std::env::temp_dir().join(format!("rill-cli-warn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("warn.ril");
+    std::fs::write(&script, "let unused = 1\nprint(2)\n").unwrap();
+    let path = script.to_str().unwrap();
+
+    let output = rill(&["check", path]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("warn.ril: ok (1 warning)"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("rill::warn::unused_let"), "{stderr}");
+    assert!(stderr.contains("unused variable 'unused'"), "{stderr}");
+
+    let output = rill(&["check", "-W", path]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let output = rill(&["check", "--json", path]);
+    assert!(output.status.success());
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines[0]["severity"], "warning");
+    assert_eq!(lines[0]["code"], "rill::warn::unused_let");
+    assert_eq!(lines[1]["ok"], true);
+    assert_eq!(lines[1]["warnings"], 1);
+
+    // Running the script is silent about warnings.
+    let output = rill(&[path]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn check_reports_every_independent_error() {
+    let dir = std::env::temp_dir().join(format!("rill-cli-multi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("multi.ril");
+    std::fs::write(&script, "let a = 1 + \"s\"\nprint(zzz)\nlet b: Int = \"x\"\nprint(a, b)\n")
+        .unwrap();
+    let output = rill(&["check", "--json", script.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let lines_reported: Vec<u64> =
+        lines.iter().map(|line| line["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines_reported, vec![1, 2, 3]);
+    assert!(lines.iter().all(|line| line["code"] == "rill::type"));
+    let _ = std::fs::remove_dir_all(dir);
 }

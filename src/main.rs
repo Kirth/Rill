@@ -52,6 +52,11 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Die quietly when stdout closes (`rill script | head`), like other Unix tools.
+    // SAFETY: resetting a signal disposition before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (options, command) = match parse_cli(argv) {
         Ok(parsed) => parsed,
@@ -86,7 +91,7 @@ fn install_panic_hook() {
                 "this is a bug in rill; please report it at https://github.com/Kirth/Rill/issues \
                  (run with RUST_BACKTRACE=1 for a backtrace)",
             );
-        eprint!("{}", rill::diagnostic::render(&error, rill::term::color_enabled(), 100));
+        eprint!("{}", render(&error));
     }));
 }
 
@@ -201,7 +206,7 @@ fn report_failure(options: &Options, error: RillError) -> ExitCode {
     if options.json {
         println!("{}", diagnostic_json(&error));
     } else {
-        eprint!("{}", rill::diagnostic::render(&error, rill::term::color_enabled(), 100));
+        eprint!("{}", render(&error));
     }
     if error.code_name() == "rill::usage" {
         ExitCode::from(2)
@@ -260,22 +265,41 @@ fn check(options: &Options, paths: &[String]) -> ExitCode {
         let result = load_source(&ScriptSource::File(path.clone()))
             .and_then(|unit| rill::CompilationSession::new().compile(unit));
         match result {
-            Ok(_) => {
+            Ok(program) => {
+                let warnings = &program.warnings;
+                if options.deny_warnings && !warnings.is_empty() {
+                    failed = true;
+                }
                 if options.json {
-                    println!("{}", serde_json::json!({"file": path, "ok": true}));
-                } else if !options.quiet {
-                    println!("{path}: ok");
+                    for warning in warnings {
+                        println!("{}", diagnostic_json(warning));
+                    }
+                    println!(
+                        "{}",
+                        serde_json::json!({"file": path, "ok": true, "warnings": warnings.len()})
+                    );
+                } else {
+                    for warning in warnings {
+                        eprint!("{}", render(warning));
+                    }
+                    if !options.quiet {
+                        match warnings.len() {
+                            0 => println!("{path}: ok"),
+                            1 => println!("{path}: ok (1 warning)"),
+                            count => println!("{path}: ok ({count} warnings)"),
+                        }
+                    }
                 }
             }
             Err(error) => {
                 failed = true;
                 if options.json {
                     println!("{}", diagnostic_json(&error));
+                    for related in error.related_errors() {
+                        println!("{}", diagnostic_json(related));
+                    }
                 } else {
-                    eprint!(
-                        "{}",
-                        rill::diagnostic::render(&error, rill::term::color_enabled(), 100)
-                    );
+                    eprint!("{}", render(&error));
                 }
             }
         }
@@ -285,6 +309,10 @@ fn check(options: &Options, paths: &[String]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn render(error: &RillError) -> String {
+    rill::diagnostic::render(error, rill::term::color_enabled(), 100)
 }
 
 fn diagnostic_json(error: &RillError) -> serde_json::Value {
