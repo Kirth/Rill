@@ -2,20 +2,37 @@
 name = "rill"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
+description = "A typed Unix scripting language with first-class processes, pipelines, and regexes"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Kirth/Rill"
+readme = "README.md"
+keywords = ["scripting", "shell", "unix", "language", "interpreter"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 miette = { version = "7", features = ["fancy"] }
 regex = "1"
 glob = "0.3"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "rt-multi-thread", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 rayon = "1"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 serde = "1"
-toml = "0.8"
+toml = { version = "0.8", features = ["preserve_order"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
 tar = "0.4"
 libc = "0.2"
+indexmap = "2"
+strsim = "0.11"
 
 [dev-dependencies]
+insta = { version = "1", features = ["glob"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# panic stays "unwind": the evaluator isolates parallel and race workers with
+# catch_unwind, which "abort" would defeat.

@@ -116,10 +116,8 @@ fn script_input(
     program: &rill::CompiledProgram,
     args: &[String],
 ) -> Result<Option<String>, RillError> {
-    if program.args.is_some() {
-        if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-            return Ok(None);
-        }
+    if program.args.is_some() && args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Ok(None);
     }
     if !program.requirements.needs_input {
         return Ok(None);

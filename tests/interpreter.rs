@@ -372,7 +372,7 @@ fn braced_dollar_with_default_uses_var_when_set() {
 
     unsafe { std::env::set_var("RILL_TEST_SET_VAR", &dir) };
 
-    let value = run(&format!(r#"path("${{RILL_TEST_SET_VAR:-/wrong}}/set.txt").read_text()"#));
+    let value = run(r#"path("${RILL_TEST_SET_VAR:-/wrong}/set.txt").read_text()"#);
 
     unsafe { std::env::remove_var("RILL_TEST_SET_VAR") };
 

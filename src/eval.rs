@@ -391,7 +391,7 @@ impl Evaluator {
         let environment =
             self.env.get("env").ok_or_else(|| RillError::new("environment is unavailable"))?;
         let Value::Map(environment) = environment else {
-            return Err(RillError::new("environment is unavailable").into());
+            return Err(RillError::new("environment is unavailable"));
         };
         Ok(environment.into_iter().map(|(name, value)| (name, value.as_string_lossy())).collect())
     }
