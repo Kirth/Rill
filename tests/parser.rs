@@ -200,3 +200,46 @@ if let { name: value } = record {
             if pairs == &[("name".to_string(), Some("value".to_string()))]
     ));
 }
+
+// ── Bare-call disambiguation ────────────────────────────────────────────────
+
+fn parse_one(source: &str) -> Expr {
+    let program = rill::parser::parse(source).expect(source);
+    assert_eq!(program.stmts.len(), 1, "{source}");
+    expression(&program.stmts[0]).clone()
+}
+
+fn is_call_to(expr: &Expr, name: &str) -> bool {
+    matches!(expr.unspanned(), Expr::Call { callee, .. }
+        if matches!(callee.unspanned(), Expr::Ident(callee) if callee == name))
+}
+
+#[test]
+fn bare_print_with_list_or_map_literal_is_a_call() {
+    assert!(is_call_to(&parse_one("print [1, 2]"), "print"));
+    assert!(is_call_to(&parse_one("print {a: 1}"), "print"));
+    assert!(is_call_to(&parse_one("print args"), "print"));
+    assert!(is_call_to(&parse_one("print args.host"), "print"));
+    assert!(is_call_to(&parse_one("print true"), "print"));
+    assert!(is_call_to(&parse_one("print match 1 { _ => 2 }"), "print"));
+}
+
+#[test]
+fn indexing_without_space_is_not_a_call() {
+    assert!(matches!(parse_one("xs[0]").unspanned(), Expr::Index { .. }));
+    assert!(matches!(parse_one("xs [0]").unspanned(), Expr::Call { .. }));
+}
+
+#[test]
+fn bare_call_with_negative_literal_depends_on_spacing() {
+    assert!(is_call_to(&parse_one("print -1"), "print"));
+    assert!(is_call_to(&parse_one("x -1"), "x"));
+    assert!(matches!(parse_one("x - 1").unspanned(), Expr::Binary { .. }));
+    assert!(matches!(parse_one("x-1").unspanned(), Expr::Binary { .. }));
+}
+
+#[test]
+fn try_operator_directly_after_identifier() {
+    assert!(matches!(parse_one("o?").unspanned(), Expr::Try(inner)
+        if matches!(inner.unspanned(), Expr::Ident(name) if name == "o")));
+}

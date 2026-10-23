@@ -24,7 +24,8 @@ id(name)
 
 #[test]
 fn accepts_bare_list_annotations() {
-    check_ok(r#"fn is_vm_haunted?(id: Str) -> Result[Option[Tuple[List, List]]] { none }"#);
+    check_ok(r#"fn is_vm_haunted(id: Str) -> Result[Option[Tuple[List, List]]] { none }"#);
+    check_ok(r#"fn maybe(p: Path?) -> Str? { none }"#);
 }
 
 #[test]

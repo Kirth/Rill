@@ -429,21 +429,12 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 let mut text = String::from(ch);
                 let mut end = start + 1;
                 while let Some((idx, next)) = chars.peek().copied() {
-                    if next.is_ascii_alphanumeric() || next == '_' || next == '-' {
+                    if next.is_ascii_alphanumeric() || next == '_' {
                         chars.next();
                         text.push(next);
                         end = idx + next.len_utf8();
                     } else {
                         break;
-                    }
-                }
-                // Allow a trailing `?` or `!` suffix (Ruby-style predicate/bang names).
-                // Exception: `run` uses `!` as a command exit-check modifier, not an identifier suffix.
-                if text != "run" {
-                    if let Some((idx, next @ ('?' | '!'))) = chars.peek().copied() {
-                        chars.next();
-                        text.push(next);
-                        end = idx + 1;
                     }
                 }
                 let after_dot =
@@ -1560,7 +1551,7 @@ impl Parser {
                 }
             }
             TokenKind::Ident(name) => {
-                if self.starts_bare_call() {
+                if self.starts_bare_call(&name) {
                     let arg = self.parse_expr(6)?;
                     Ok(Expr::Call { callee: Box::new(Expr::Ident(name)), args: vec![arg] })
                 } else {
@@ -1918,17 +1909,40 @@ impl Parser {
         }
     }
 
-    fn starts_bare_call(&self) -> bool {
-        matches!(
-            self.peek_kind(),
+    /// Whether the token after an identifier starts the argument of a bare
+    /// call such as `print "x"`.  Whitespace matters for the ambiguous cases:
+    /// `print [1, 2]` is a call but `xs[0]` is indexing, `print -1` is a call
+    /// but `x - 1` and `x-1` are subtraction.
+    fn starts_bare_call(&self, callee: &str) -> bool {
+        let next = self.peek();
+        let spaced = next.span.start > self.last_end;
+        match &next.kind {
             TokenKind::Str(_)
-                | TokenKind::Number(_)
-                | TokenKind::Ident(_)
-                | TokenKind::TypeIdent(_)
-                | TokenKind::Dollar
-                | TokenKind::Pipe
-                | TokenKind::Run
-        )
+            | TokenKind::Number(_)
+            | TokenKind::Ident(_)
+            | TokenKind::TypeIdent(_)
+            | TokenKind::Dollar
+            | TokenKind::Pipe
+            | TokenKind::OrOr
+            | TokenKind::Run
+            | TokenKind::Args
+            | TokenKind::Input
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::Null
+            | TokenKind::MatchKw => true,
+            TokenKind::LBracket => spaced,
+            TokenKind::Minus => {
+                let operand_adjacent =
+                    self.tokens.get(1).is_some_and(|operand| operand.span.start == next.span.end);
+                spaced && operand_adjacent
+            }
+            // `print {a: 1}`: only for output builtins, so `if ok {` stays a block.
+            TokenKind::LBrace => {
+                spaced && matches!(callee, "print" | "prin" | "warn" | "pretty_print" | "die")
+            }
+            _ => false,
+        }
     }
 
     fn skip_separators(&mut self) {
@@ -2081,6 +2095,10 @@ impl Parser {
                 "generic arguments are only supported on List, Tuple, Option, and Result",
                 token.span,
             ));
+        }
+        // `T?` is shorthand for `Option[T]`.
+        if self.consume(TokenKind::Question) {
+            return Ok(TypeName::Option(Box::new(type_name)));
         }
         Ok(type_name)
     }
