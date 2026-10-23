@@ -11,6 +11,7 @@ Usage: rill [OPTIONS] <script.ril> [ARGS...]
        rill [OPTIONS] - [ARGS...]            read the script from stdin
        rill run <script.ril> [ARGS...]
        rill check [OPTIONS] <script.ril>...   parse and type-check without running
+       rill repl [ARGS...]                    interactive session (also: rill with no arguments on a terminal)
 
 Options:
   -e, --eval <SOURCE>     run SOURCE instead of a file
@@ -47,6 +48,7 @@ enum ScriptSource {
 enum Command {
     Run { source: ScriptSource, args: Vec<String> },
     Check { paths: Vec<String> },
+    Repl { args: Vec<String> },
     Help,
     Version,
 }
@@ -165,10 +167,14 @@ fn parse_cli(argv: Vec<String>) -> Result<(Options, Command), String> {
                     if script == "-" { ScriptSource::Stdin } else { ScriptSource::File(script) };
                 Command::Run { source, args: rest.collect() }
             }
+            "repl" => Command::Repl { args: rest.collect() },
             "-" => Command::Run { source: ScriptSource::Stdin, args: rest.collect() },
             _ => Command::Run { source: ScriptSource::File(arg), args: rest.collect() },
         };
         return Ok((options, command));
+    }
+    if std::io::stdin().is_terminal() {
+        return Ok((options, Command::Repl { args: Vec::new() }));
     }
     Err("no script given".to_string())
 }
@@ -187,6 +193,7 @@ fn dispatch(options: Options, command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Check { paths } => check(&options, &paths),
+        Command::Repl { args } => exit_code(rill::repl::run(args)),
         Command::Run { source, args } => match run(source, args) {
             Ok(code) => code,
             Err(error) => report_failure(&options, error),

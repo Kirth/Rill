@@ -70,6 +70,8 @@ the single-commit prototype that preceded it.
   spans on every statement, "did you mean" suggestions, every independent
   checker error reported in one run, and warnings (`unused_let`,
   `unused_result`, `unreachable`, `shadowed_capture`) from `rill check`.
+- `rill repl` (and bare `rill` on a terminal): an interactive session with
+  persistent bindings, multi-line input, `:type`, `:env`, `:help`, `:quit`.
 - CLI: `rill -` (stdin script), `rill run`, `rill check` over several files
   with `--quiet`, `--json`, `-W`; `--color`, `--no-color`, `--version`;
   exit codes 0/1/2/70; a panic hook that reports internal errors.

@@ -622,6 +622,18 @@ impl Evaluator {
         })
     }
 
+    /// Names bound in the global scope, sorted (for the REPL's `:env`).
+    pub fn binding_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .env
+            .scopes
+            .first()
+            .map(|scope| scope.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, RillError> {
         self.eval_program_with_imports(program, Vec::new())
     }
@@ -3924,7 +3936,8 @@ fn pretty_string(value: &str) -> String {
     pretty_color(ANSI_GREEN, serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}")))
 }
 
-fn pretty_value(value: &Value, level: usize) -> String {
+/// Indented, coloured (when enabled) rendering used by `pretty_print` and the REPL.
+pub fn pretty_value(value: &Value, level: usize) -> String {
     match value {
         Value::Null => pretty_color(ANSI_YELLOW, "null"),
         Value::Bool(value) => pretty_color(ANSI_MAGENTA, value.to_string()),

@@ -7,6 +7,7 @@ Usage: rill [OPTIONS] <script.ril> [ARGS...]
        rill [OPTIONS] - [ARGS...]            read the script from stdin
        rill run <script.ril> [ARGS...]
        rill check [OPTIONS] <script.ril>...   parse and type-check without running
+       rill repl [ARGS...]                    interactive session (also: rill with no arguments on a terminal)
 
 Options:
   -e, --eval <SOURCE>     run SOURCE instead of a file

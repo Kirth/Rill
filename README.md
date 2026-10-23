@@ -67,6 +67,7 @@ rill -e 'print "hi"'             run inline source
 echo 'print 1' | rill -          run a script from stdin
 rill check [-W] [--json] a.ril b.ril
                                  parse and type-check; prints warnings, -W makes them fatal
+rill repl                        interactive session (bare `rill` on a terminal does the same)
 rill --help | --version
 ```
 

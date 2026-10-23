@@ -10,6 +10,7 @@ test suite win.
 ```
 rill script.ril [ARGS...]      rill -e 'print "hello"'      echo 'print 1' | rill -
 rill check [-W] [--json] [--quiet] script.ril...
+rill repl                      # interactive; bindings persist, :type expr, :env, :help, :quit
 ```
 
 Scripts execute top-level statements in order; there is no implicit `main`.

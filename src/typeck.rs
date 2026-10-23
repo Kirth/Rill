@@ -258,23 +258,44 @@ pub(crate) fn check_module(
             env.set(name.clone(), ty.clone());
         }
     }
-    let mut checker = Checker {
-        env,
-        return_expected: None,
-        try_kinds: Vec::new(),
-        loop_depth: 0,
-        loop_stack: Vec::new(),
-        closure_param_hints: None,
-        for_body_depth: 0,
-        function_depth: 0,
-        parallel_floor: None,
-        errors: Vec::new(),
-        warnings: Vec::new(),
-        current_span: None,
-        warn_unused_top_level: !is_module,
-        emit_types: Vec::new(),
-    };
+    let mut checker = Checker::new(env, !is_module);
     checker.check_program(program)
+}
+
+/// A checker whose scope persists across inputs, for the REPL.
+pub struct Session {
+    checker: Checker,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Session {
+    pub fn new() -> Self {
+        Self { checker: Checker::new(Env::new(), false) }
+    }
+
+    /// Check one more input against everything checked before.  Returns the
+    /// warnings, or the first error (with the rest attached as related).
+    pub fn check(&mut self, program: &Program) -> Result<Vec<RillError>, RillError> {
+        self.checker.hoist_top_level(program);
+        let _ = self.checker.check_stmts(&program.stmts);
+        self.checker.take_diagnostics()
+    }
+
+    /// The static type of an expression in the current scope.
+    pub fn type_of(&mut self, expr: &Expr) -> Result<String, RillError> {
+        let ty = self.checker.check_expr(expr)?;
+        Ok(ty.to_string())
+    }
+
+    /// Every name in scope, sorted.
+    pub fn names(&self) -> Vec<String> {
+        self.checker.env.names().into_iter().map(str::to_string).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +350,42 @@ struct Snapshot {
 }
 
 impl Checker {
+    fn new(env: Env, warn_unused_top_level: bool) -> Self {
+        Self {
+            env,
+            return_expected: None,
+            try_kinds: Vec::new(),
+            loop_depth: 0,
+            loop_stack: Vec::new(),
+            closure_param_hints: None,
+            for_body_depth: 0,
+            function_depth: 0,
+            parallel_floor: None,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            current_span: None,
+            warn_unused_top_level,
+            emit_types: Vec::new(),
+        }
+    }
+
+    /// Collected errors as one diagnostic (the rest attached as related), or
+    /// the warnings sorted by position.  Resets both lists.
+    fn take_diagnostics(&mut self) -> Result<Vec<RillError>, RillError> {
+        if !self.errors.is_empty() {
+            let mut errors: Vec<RillError> = std::mem::take(&mut self.errors)
+                .into_iter()
+                .map(|error| error.with_kind(crate::types::ErrorKind::Type))
+                .collect();
+            self.warnings.clear();
+            let first = errors.remove(0);
+            return Err(if errors.is_empty() { first } else { first.with_related(errors) });
+        }
+        let mut warnings = std::mem::take(&mut self.warnings);
+        warnings.sort_by_key(|warning| warning.span.map(|span| span.start));
+        Ok(warnings)
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             scopes: self.env.scopes.len(),
@@ -445,7 +502,8 @@ impl Checker {
         Ok(())
     }
 
-    fn check_program(&mut self, program: &Program) -> Result<CheckedModule, RillError> {
+    /// Pre-bind every top-level `fn` so calls can precede definitions.
+    fn hoist_top_level(&mut self, program: &Program) {
         for stmt in &program.stmts {
             if let Stmt::Fn { name, function } = stmt.unspanned() {
                 self.env.set(
@@ -473,6 +531,10 @@ impl Checker {
                 );
             }
         }
+    }
+
+    fn check_program(&mut self, program: &Program) -> Result<CheckedModule, RillError> {
+        self.hoist_top_level(program);
         self.check_stmts(&program.stmts)?;
         if self.warn_unused_top_level {
             let root = self.env.scopes.first().cloned().unwrap_or_default();
@@ -484,16 +546,7 @@ impl Checker {
                 symbols.insert(name, ty);
             }
         }
-        if !self.errors.is_empty() {
-            let mut errors: Vec<RillError> = std::mem::take(&mut self.errors)
-                .into_iter()
-                .map(|error| error.with_kind(crate::types::ErrorKind::Type))
-                .collect();
-            let first = errors.remove(0);
-            return Err(if errors.is_empty() { first } else { first.with_related(errors) });
-        }
-        let mut warnings = std::mem::take(&mut self.warnings);
-        warnings.sort_by_key(|warning| warning.span.map(|span| span.start));
+        let warnings = self.take_diagnostics()?;
         Ok(CheckedModule { exports: ModuleExports { symbols }, warnings })
     }
 

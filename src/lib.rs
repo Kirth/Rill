@@ -6,6 +6,7 @@ mod eval_data;
 pub mod methods;
 pub mod parser;
 pub mod pathresolver;
+pub mod repl;
 pub mod runtime;
 pub mod suggest;
 pub mod term;
