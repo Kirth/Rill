@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/duration_underflow.ril
+---
+rill::runtime
+
+  × duration underflow: the result would be negative
+   ╭─[runtime/duration_underflow.ril:1:7]
+ 1 │ print(1s - 2s)
+   ·       ───┬───
+   ·          ╰── duration underflow: the result would be negative
+   ╰────

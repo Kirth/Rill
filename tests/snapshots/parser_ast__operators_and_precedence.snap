@@ -1,0 +1,322 @@
+---
+source: tests/parser_ast.rs
+expression: "parsed(r#\"\nlet v = -2 ** 2 + 7 % 3 * 2\nlet w = some(1) ?? 0 .. 10\nlet inside = 2 in [1, 2] and not (3 not in [1])\nprint(v, w, inside)\n\"#)"
+---
+Program {
+    stmts: [
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "v",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Binary {
+                        op: Add,
+                        left: Unary {
+                            op: Neg,
+                            operand: Located {
+                                expr: Binary {
+                                    op: Pow,
+                                    left: Literal(
+                                        Int(
+                                            2,
+                                        ),
+                                    ),
+                                    right: Located {
+                                        expr: Literal(
+                                            Int(
+                                                2,
+                                            ),
+                                        ),
+                                        span: Span {
+                                            start: 15,
+                                            end: 16,
+                                        },
+                                    },
+                                },
+                                span: Span {
+                                    start: 10,
+                                    end: 16,
+                                },
+                            },
+                        },
+                        right: Located {
+                            expr: Binary {
+                                op: Mul,
+                                left: Binary {
+                                    op: Rem,
+                                    left: Literal(
+                                        Int(
+                                            7,
+                                        ),
+                                    ),
+                                    right: Located {
+                                        expr: Literal(
+                                            Int(
+                                                3,
+                                            ),
+                                        ),
+                                        span: Span {
+                                            start: 23,
+                                            end: 24,
+                                        },
+                                    },
+                                },
+                                right: Located {
+                                    expr: Literal(
+                                        Int(
+                                            2,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 27,
+                                        end: 28,
+                                    },
+                                },
+                            },
+                            span: Span {
+                                start: 19,
+                                end: 28,
+                            },
+                        },
+                    },
+                    span: Span {
+                        start: 9,
+                        end: 28,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 1,
+                end: 28,
+            },
+        },
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "w",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Binary {
+                        op: Coalesce,
+                        left: Call {
+                            callee: Ident(
+                                "some",
+                            ),
+                            args: [
+                                Located {
+                                    expr: Literal(
+                                        Int(
+                                            1,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 42,
+                                        end: 43,
+                                    },
+                                },
+                            ],
+                        },
+                        right: Located {
+                            expr: Binary {
+                                op: Range,
+                                left: Literal(
+                                    Int(
+                                        0,
+                                    ),
+                                ),
+                                right: Located {
+                                    expr: Literal(
+                                        Int(
+                                            10,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 53,
+                                        end: 55,
+                                    },
+                                },
+                            },
+                            span: Span {
+                                start: 48,
+                                end: 55,
+                            },
+                        },
+                    },
+                    span: Span {
+                        start: 37,
+                        end: 55,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 29,
+                end: 55,
+            },
+        },
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "inside",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Binary {
+                        op: And,
+                        left: Binary {
+                            op: In,
+                            left: Literal(
+                                Int(
+                                    2,
+                                ),
+                            ),
+                            right: Located {
+                                expr: List(
+                                    [
+                                        Located {
+                                            expr: Literal(
+                                                Int(
+                                                    1,
+                                                ),
+                                            ),
+                                            span: Span {
+                                                start: 75,
+                                                end: 76,
+                                            },
+                                        },
+                                        Located {
+                                            expr: Literal(
+                                                Int(
+                                                    2,
+                                                ),
+                                            ),
+                                            span: Span {
+                                                start: 78,
+                                                end: 79,
+                                            },
+                                        },
+                                    ],
+                                ),
+                                span: Span {
+                                    start: 74,
+                                    end: 80,
+                                },
+                            },
+                        },
+                        right: Located {
+                            expr: Unary {
+                                op: Not,
+                                operand: Located {
+                                    expr: Located {
+                                        expr: Binary {
+                                            op: NotIn,
+                                            left: Literal(
+                                                Int(
+                                                    3,
+                                                ),
+                                            ),
+                                            right: Located {
+                                                expr: List(
+                                                    [
+                                                        Located {
+                                                            expr: Literal(
+                                                                Int(
+                                                                    1,
+                                                                ),
+                                                            ),
+                                                            span: Span {
+                                                                start: 100,
+                                                                end: 101,
+                                                            },
+                                                        },
+                                                    ],
+                                                ),
+                                                span: Span {
+                                                    start: 99,
+                                                    end: 102,
+                                                },
+                                            },
+                                        },
+                                        span: Span {
+                                            start: 90,
+                                            end: 102,
+                                        },
+                                    },
+                                    span: Span {
+                                        start: 89,
+                                        end: 103,
+                                    },
+                                },
+                            },
+                            span: Span {
+                                start: 85,
+                                end: 103,
+                            },
+                        },
+                    },
+                    span: Span {
+                        start: 69,
+                        end: 103,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 56,
+                end: 103,
+            },
+        },
+        Located {
+            stmt: Expr(
+                Located {
+                    expr: Call {
+                        callee: Ident(
+                            "print",
+                        ),
+                        args: [
+                            Located {
+                                expr: Ident(
+                                    "v",
+                                ),
+                                span: Span {
+                                    start: 110,
+                                    end: 111,
+                                },
+                            },
+                            Located {
+                                expr: Ident(
+                                    "w",
+                                ),
+                                span: Span {
+                                    start: 113,
+                                    end: 114,
+                                },
+                            },
+                            Located {
+                                expr: Ident(
+                                    "inside",
+                                ),
+                                span: Span {
+                                    start: 116,
+                                    end: 122,
+                                },
+                            },
+                        ],
+                    },
+                    span: Span {
+                        start: 104,
+                        end: 123,
+                    },
+                },
+            ),
+            span: Span {
+                start: 104,
+                end: 123,
+            },
+        },
+    ],
+}

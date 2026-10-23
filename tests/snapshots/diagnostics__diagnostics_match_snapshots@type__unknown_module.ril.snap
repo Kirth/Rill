@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/unknown_module.ril
+---
+rill::type
+
+  × unknown module 'jsn'
+   ╭─[type/unknown_module.ril:1:1]
+ 1 │ use jsn
+   · ───┬───
+   ·    ╰── unknown module 'jsn'
+   ╰────
+  help: did you mean `json`?

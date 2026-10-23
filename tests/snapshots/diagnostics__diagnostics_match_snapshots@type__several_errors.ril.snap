@@ -1,0 +1,36 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/several_errors.ril
+---
+rill::type
+
+  × numeric operator needs numeric operands, got Int and Str
+   ╭─[type/several_errors.ril:1:9]
+ 1 │ let a = 1 + "s"
+   ·         ───┬───
+   ·            ╰── numeric operator needs numeric operands, got Int and Str
+ 2 │ print(zzz)
+   ╰────
+
+Error: rill::type
+
+  × unknown identifier 'zzz'
+   ╭─[type/several_errors.ril:2:7]
+ 1 │ let a = 1 + "s"
+ 2 │ print(zzz)
+   ·       ─┬─
+   ·        ╰── unknown identifier 'zzz'
+ 3 │ let b: Int = "x"
+   ╰────
+
+Error: rill::type
+
+  × type mismatch: expected Int, got Str
+   ╭─[type/several_errors.ril:3:14]
+ 2 │ print(zzz)
+ 3 │ let b: Int = "x"
+   ·              ─┬─
+   ·               ╰── type mismatch: expected Int, got Str
+ 4 │ print(a, b)
+   ╰────

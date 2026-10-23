@@ -1,0 +1,22 @@
+---
+source: tests/help_snapshot.rs
+expression: "stdout_of(&[\"-e\", source, \"--help\"])"
+---
+Usage: rill <script> [options] <host> <command> [command options]
+
+Arguments:
+  <host>                 host to deploy to
+
+Options:
+  -v, --verbose          print every step [default: false]
+  -p, --port <Int>       port to listen on [default: 8080]
+      --config <Path>    override the config file [optional]
+      --timeout <Duration> [default: 30s]
+      --host <Str>       host to deploy to [required]
+  -h, --help             show this help
+
+Commands:
+  start
+          --workers <Int>  [default: 4]
+  stop
+          --force          [default: false]

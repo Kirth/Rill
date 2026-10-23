@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/die.ril
+---
+rill::runtime
+
+  × disk is full
+   ╭─[runtime/die.ril:2:1]
+ 1 │ print("about to stop")
+ 2 │ die("disk is full")
+   · ─────────┬─────────
+   ·          ╰── disk is full
+   ╰────

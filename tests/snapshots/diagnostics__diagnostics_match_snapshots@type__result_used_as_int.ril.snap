@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/result_used_as_int.ril
+---
+rill::type
+
+  × numeric operator needs numeric operands, got Result[Int, Error] and Int
+   ╭─[type/result_used_as_int.ril:3:7]
+ 2 │ let n = load().map(|x| x + 1)
+ 3 │ print(n + 1)
+   ·       ──┬──
+   ·         ╰── numeric operator needs numeric operands, got Result[Int, Error] and Int
+   ╰────

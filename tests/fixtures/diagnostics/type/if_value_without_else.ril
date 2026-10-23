@@ -1,0 +1,2 @@
+let flag = true
+let x = if flag { 1 }

@@ -1,0 +1,3 @@
+if x {
+    print(1)
+} else

@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/missing_paren.ril
+---
+rill::parse
+
+  × expected `)`, found identifier `print`
+   ╭─[parse/missing_paren.ril:2:1]
+ 1 │ let x = (1 + 2
+ 2 │ print(x)
+   · ──┬──
+   ·   ╰── expected `)`, found identifier `print`
+   ╰────

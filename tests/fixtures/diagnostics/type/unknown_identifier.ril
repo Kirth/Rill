@@ -1,0 +1,4 @@
+let hosts = ["a", "b"]
+for host in hots {
+    print(host)
+}

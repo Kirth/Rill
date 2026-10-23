@@ -1,0 +1,61 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/warnings.ril
+---
+rill::warn::unused_let
+
+  ⚠ unused variable 'unused'
+   ╭─[type/warnings.ril:1:1]
+ 1 │ let unused = 1
+   · ───────┬──────
+   ·        ╰── unused variable 'unused'
+ 2 │ fn f() -> Result[Int, Error] { ok(1) }
+   ╰────
+  help: remove it, or name it `_` (or `_name`) to keep it on purpose
+rill::warn::unused_result
+
+  ⚠ unused Result
+   ╭─[type/warnings.ril:3:1]
+ 2 │ fn f() -> Result[Int, Error] { ok(1) }
+ 3 │ f()
+   · ─┬─
+   ·  ╰── unused Result
+ 4 │ fn g() -> Int {
+   ╰────
+  help: handle it with `?`, `match`, or `.unwrap_or(...)`; write `let _ = ...`
+        to discard it on purpose
+rill::warn::unreachable
+
+  ⚠ unreachable statement
+   ╭─[type/warnings.ril:6:5]
+ 5 │     return 1
+ 6 │     print("never")
+   ·     ───────┬──────
+   ·            ╰── unreachable statement
+ 7 │ }
+   ╰────
+  help: the `return` above leaves this block before it runs
+rill::warn::unused_let
+
+  ⚠ unused variable 'name'
+   ╭─[type/warnings.ril:8:1]
+ 7 │ }
+ 8 │ let name = "x"
+   · ───────┬──────
+   ·        ╰── unused variable 'name'
+ 9 │ if "abc" =~ /(?<name>b)/ { print(name) }
+   ╰────
+  help: remove it, or name it `_` (or `_name`) to keep it on purpose
+rill::warn::shadowed_capture
+
+  ⚠ regex capture 'name' shadows an existing binding
+    ╭─[type/warnings.ril:9:4]
+  8 │ let name = "x"
+  9 │ if "abc" =~ /(?<name>b)/ { print(name) }
+    ·    ──────────┬──────────
+    ·              ╰── regex capture 'name' shadows an existing binding
+ 10 │ print(g())
+    ╰────
+  help: rename the capture group, or the variable, so the two cannot be
+        confused

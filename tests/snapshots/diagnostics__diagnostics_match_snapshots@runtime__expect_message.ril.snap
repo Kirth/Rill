@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/expect_message.ril
+---
+rill::runtime
+
+  × a port number
+   ╭─[runtime/expect_message.ril:2:7]
+ 1 │ let v: Option[Int] = none
+ 2 │ print(v.expect("a port number"))
+   ·       ────────────┬────────────
+   ·                   ╰── a port number
+   ╰────

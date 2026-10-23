@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/unknown_named_argument.ril
+---
+rill::type
+
+  × greet has no parameter 'nmae'
+   ╭─[type/unknown_named_argument.ril:2:7]
+ 1 │ fn greet(name: Str) -> Str { "hi {name}" }
+ 2 │ print(greet(nmae="x"))
+   ·       ───────┬───────
+   ·              ╰── greet has no parameter 'nmae'
+   ╰────
+  help: did you mean `name`?

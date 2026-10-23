@@ -1,0 +1,25 @@
+---
+source: tests/help_snapshot.rs
+expression: "stdout_of(&[\"check\", \"--help\"])"
+---
+Usage: rill [OPTIONS] <script.ril> [ARGS...]
+       rill [OPTIONS] -e <SOURCE> [ARGS...]
+       rill [OPTIONS] - [ARGS...]            read the script from stdin
+       rill run <script.ril> [ARGS...]
+       rill check [OPTIONS] <script.ril>...   parse and type-check without running
+
+Options:
+  -e, --eval <SOURCE>     run SOURCE instead of a file
+      --color <WHEN>      auto, always, or never (default auto; NO_COLOR is honoured)
+      --no-color          same as --color never
+  -q, --quiet             check: only print diagnostics
+      --json              check: print diagnostics as JSON lines
+  -W, --deny-warnings     check: fail when a warning is reported
+  -h, --help              print this help
+  -V, --version           print the version
+
+Everything after the script (or after the -e source) is passed to the script as
+its arguments, including options such as --help.
+
+Exit status: 0 on success, 1 for any script error, 2 for a usage error, 70 for
+an internal error, or the code the script passed to exit().

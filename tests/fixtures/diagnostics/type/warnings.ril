@@ -1,0 +1,10 @@
+let unused = 1
+fn f() -> Result[Int, Error] { ok(1) }
+f()
+fn g() -> Int {
+    return 1
+    print("never")
+}
+let name = "x"
+if "abc" =~ /(?<name>b)/ { print(name) }
+print(g())

@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/unterminated_interpolation.ril
+---
+rill::parse
+
+  × unterminated interpolation; expected `}`
+   ╭─[parse/unterminated_interpolation.ril:2:15]
+ 1 │ let x = 1
+ 2 │ print("value: {x")
+   ·               ──┬──
+   ·                 ╰── unterminated interpolation; expected `}`
+   ╰────
+  help: write `\{` for a literal brace

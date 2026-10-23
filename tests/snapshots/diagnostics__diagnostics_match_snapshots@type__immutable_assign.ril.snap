@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/immutable_assign.ril
+---
+rill::type
+
+  × cannot assign to immutable variable 'count'
+   ╭─[type/immutable_assign.ril:2:1]
+ 1 │ let count = 1
+ 2 │ count = 2
+   · ────┬────
+   ·     ╰── cannot assign to immutable variable 'count'
+   ╰────
+  help: declare it with `var count = ...` to allow reassignment

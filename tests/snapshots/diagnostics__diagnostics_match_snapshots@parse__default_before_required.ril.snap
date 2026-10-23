@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/default_before_required.ril
+---
+rill::parse
+
+  × parameter 'b' without a default follows a parameter with one
+   ╭─[parse/default_before_required.ril:1:13]
+ 1 │ fn f(a = 1, b) { a + b }
+   ·             ┬
+   ·             ╰── parameter 'b' without a default follows a parameter with one
+   ╰────
+  help: move parameters with defaults to the end of the list

@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/divide_by_zero.ril
+---
+rill::runtime
+
+  × integer overflow or division by zero
+   ╭─[runtime/divide_by_zero.ril:1:7]
+ 1 │ print(10 / 0)
+   ·       ───┬──
+   ·          ╰── integer overflow or division by zero
+   ╰────

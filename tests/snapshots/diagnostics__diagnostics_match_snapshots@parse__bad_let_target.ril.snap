@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/bad_let_target.ril
+---
+rill::parse
+
+  × expected identifier, found number `5`
+   ╭─[parse/bad_let_target.ril:1:5]
+ 1 │ let 5 = x
+   ·     ┬
+   ·     ╰── expected identifier, found number `5`
+   ╰────

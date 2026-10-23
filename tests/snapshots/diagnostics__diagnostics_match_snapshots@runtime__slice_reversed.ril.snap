@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/slice_reversed.ril
+---
+rill::runtime
+
+  × slice start 2 is after end 1
+   ╭─[runtime/slice_reversed.ril:2:7]
+ 1 │ let xs = [1, 2, 3]
+ 2 │ print(xs.slice(2, 1))
+   ·       ───────┬──────
+   ·              ╰── slice start 2 is after end 1
+   ╰────

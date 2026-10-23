@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/duration_times_duration.ril
+---
+rill::type
+
+  × operator '*' is not defined for Duration and Duration
+   ╭─[type/duration_times_duration.ril:1:9]
+ 1 │ let d = 1s * 2s
+   ·         ───┬───
+   ·            ╰── operator '*' is not defined for Duration and Duration
+   ╰────

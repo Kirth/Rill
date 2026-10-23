@@ -1,0 +1,16 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/unknown_identifier.ril
+---
+rill::type
+
+  × unknown identifier 'hots'
+   ╭─[type/unknown_identifier.ril:2:13]
+ 1 │ let hosts = ["a", "b"]
+ 2 │ for host in hots {
+   ·             ──┬─
+   ·               ╰── unknown identifier 'hots'
+ 3 │     print(host)
+   ╰────
+  help: did you mean `hosts`?

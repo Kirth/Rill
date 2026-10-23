@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/closure_body_error.ril
+---
+rill::type
+
+  × numeric operator needs numeric operands, got Int and Str
+   ╭─[type/closure_body_error.ril:2:29]
+ 1 │ let names = ["a"]
+ 2 │ let lengths = names.map(|n| n.len() + "x")
+   ·                             ──────┬──────
+   ·                                   ╰── numeric operator needs numeric operands, got Int and Str
+   ╰────

@@ -1,0 +1,17 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/non_exhaustive_match.ril
+---
+rill::type
+
+  × non-exhaustive match on Option[Int]
+   ╭─[type/non_exhaustive_match.ril:2:9]
+ 1 │     let v = some(1)
+ 2 │ ╭─▶ let s = match v {
+ 3 │ │       some(x) => x,
+ 4 │ ├─▶ }
+   · ╰──── non-exhaustive match on Option[Int]
+ 5 │     print(s)
+   ╰────
+  help: add a `none` arm, or `_`

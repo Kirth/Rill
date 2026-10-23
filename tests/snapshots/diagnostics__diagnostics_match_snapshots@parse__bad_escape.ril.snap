@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/bad_escape.ril
+---
+rill::parse
+
+  × unknown string escape `\q`
+   ╭─[parse/bad_escape.ril:1:14]
+ 1 │ let s = "tab:\q"
+   ·              ─┬
+   ·               ╰── unknown string escape `\q`
+   ╰────
+  help: valid escapes: \n \t \r \0 \e \\ \" \{ \} \$ \u{...}

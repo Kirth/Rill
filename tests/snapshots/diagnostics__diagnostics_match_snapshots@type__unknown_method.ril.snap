@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/unknown_method.ril
+---
+rill::type
+
+  × Str has no field 'lnes'
+   ╭─[type/unknown_method.ril:2:7]
+ 1 │ let text = "a\nb"
+ 2 │ print(text.lnes())
+   ·       ─────┬─────
+   ·            ╰── Str has no field 'lnes'
+   ╰────
+  help: did you mean `.lines()`?

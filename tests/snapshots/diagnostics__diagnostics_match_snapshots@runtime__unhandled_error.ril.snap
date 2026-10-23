@@ -1,0 +1,8 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/unhandled_error.ril
+---
+rill::runtime
+
+  × runtime error: config is missing

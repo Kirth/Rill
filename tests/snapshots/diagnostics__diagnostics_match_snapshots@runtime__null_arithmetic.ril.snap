@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/null_arithmetic.ril
+---
+rill::runtime
+
+  × operator '+' needs numeric operands, got Null and Int
+   ╭─[runtime/null_arithmetic.ril:2:7]
+ 1 │ let m = {a: 1}
+ 2 │ print(m.get("missing") + 1)
+   ·       ──────────┬─────────
+   ·                 ╰── operator '+' needs numeric operands, got Null and Int
+   ╰────

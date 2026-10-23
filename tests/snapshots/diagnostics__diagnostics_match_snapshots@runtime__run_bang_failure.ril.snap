@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/run_bang_failure.ril
+---
+rill::runtime
+
+  × command exited with status 1
+   ╭─[runtime/run_bang_failure.ril:1:11]
+ 1 │ let out = run! false
+   ·           ─┬─
+   ·            ╰── command exited with status 1
+ 2 │ print(out)
+   ╰────

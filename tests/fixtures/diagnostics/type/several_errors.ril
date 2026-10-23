@@ -1,0 +1,4 @@
+let a = 1 + "s"
+print(zzz)
+let b: Int = "x"
+print(a, b)

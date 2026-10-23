@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/dangling_operator.ril
+---
+rill::parse
+
+  × expected expression, found end of line
+   ╭─[parse/dangling_operator.ril:1:12]
+ 1 │ let x = 1 +
+   ·            ┬
+   ·            ╰── expected expression, found end of line
+   ╰────

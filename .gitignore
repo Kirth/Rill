@@ -8,3 +8,6 @@ assess.txt
 design0.md
 language_overview.txt
 prop_on_host.txt
+*.snap.new
+.direnv/
+result

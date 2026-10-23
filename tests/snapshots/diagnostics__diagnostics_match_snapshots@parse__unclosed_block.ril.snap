@@ -1,0 +1,16 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/unclosed_block.ril
+---
+rill::parse
+
+  × expected `}`, found end of file
+   ╭─[parse/unclosed_block.ril:4:1]
+ 1 │ fn f() {
+   ·        ┬
+   ·        ╰── this block is never closed
+ 2 │     let x = 1
+ 3 │     print(x)
+   ╰────
+  help: add a closing `}`

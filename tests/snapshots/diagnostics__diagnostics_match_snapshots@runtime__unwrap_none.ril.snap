@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/unwrap_none.ril
+---
+rill::runtime
+
+  × unwrap called on none
+   ╭─[runtime/unwrap_none.ril:2:7]
+ 1 │ let v: Option[Int] = none
+ 2 │ print(v.unwrap())
+   ·       ─────┬────
+   ·            ╰── unwrap called on none
+   ╰────

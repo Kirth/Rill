@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/if_value_without_else.ril
+---
+rill::type
+
+  × an if used as a value needs an else branch
+   ╭─[type/if_value_without_else.ril:2:1]
+ 1 │ let flag = true
+ 2 │ let x = if flag { 1 }
+   · ──────────┬──────────
+   ·           ╰── an if used as a value needs an else branch
+   ╰────
+  help: add `else { ... }`, or use a statement instead

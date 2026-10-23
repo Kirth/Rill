@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/annotation_mismatch.ril
+---
+rill::type
+
+  × type mismatch: expected Int, got Str
+   ╭─[type/annotation_mismatch.ril:1:14]
+ 1 │ let n: Int = "five"
+   ·              ───┬──
+   ·                 ╰── type mismatch: expected Int, got Str
+   ╰────

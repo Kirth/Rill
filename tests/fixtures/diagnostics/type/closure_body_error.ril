@@ -1,0 +1,2 @@
+let names = ["a"]
+let lengths = names.map(|n| n.len() + "x")

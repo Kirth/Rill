@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/index_out_of_bounds.ril
+---
+rill::runtime
+
+  × index 5 out of bounds (len 3)
+   ╭─[runtime/index_out_of_bounds.ril:2:7]
+ 1 │ let xs = [1, 2, 3]
+ 2 │ print(xs[5])
+   ·       ──┬──
+   ·         ╰── index 5 out of bounds (len 3)
+   ╰────

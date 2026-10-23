@@ -1,0 +1,17 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/missing_return.ril
+---
+rill::type
+
+  × function 'pick' is declared to return Int but can finish without a value
+   ╭─[type/missing_return.ril:1:1]
+ 1 │ ╭─▶ fn pick(flag: Bool) -> Int {
+ 2 │ │       if flag {
+ 3 │ │           return 1
+ 4 │ │       }
+ 5 │ ├─▶ }
+   · ╰──── function 'pick' is declared to return Int but can finish without a value
+   ╰────
+  help: add a `return` or a final expression on every path

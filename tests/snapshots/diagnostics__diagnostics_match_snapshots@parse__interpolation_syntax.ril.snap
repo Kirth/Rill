@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/interpolation_syntax.ril
+---
+rill::parse
+
+  × expected expression, found end of file
+   ╭─[parse/interpolation_syntax.ril:1:17]
+ 1 │ print("sum: {1 +}")
+   ·                 ▲
+   ·                 ╰── expected expression, found end of file
+   ╰────

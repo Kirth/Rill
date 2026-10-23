@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/undeclared_assign.ril
+---
+rill::type
+
+  × assignment to undeclared variable 'total'
+   ╭─[type/undeclared_assign.ril:1:1]
+ 1 │ total = 5
+   · ────┬────
+   ·     ╰── assignment to undeclared variable 'total'
+   ╰────
+  help: declare it first with `var total = ...`

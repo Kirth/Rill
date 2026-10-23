@@ -1,0 +1,15 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/assign_through_immutable_map.ril
+---
+rill::type
+
+  × cannot assign to immutable variable 'm'
+   ╭─[type/assign_through_immutable_map.ril:2:1]
+ 1 │ let m = {a: 1}
+ 2 │ m.a = 2
+   · ───┬───
+   ·    ╰── cannot assign to immutable variable 'm'
+   ╰────
+  help: declare it with `var m = ...` to allow reassignment

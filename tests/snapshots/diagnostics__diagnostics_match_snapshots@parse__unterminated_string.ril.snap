@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/unterminated_string.ril
+---
+rill::parse
+
+  × unterminated string
+   ╭─[parse/unterminated_string.ril:1:9]
+ 1 │ ╭─▶ let s = "never closed
+ 2 │ ├─▶ print(s)
+   · ╰──── unterminated string
+   ╰────

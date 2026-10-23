@@ -1,17 +1,7 @@
-use std::process::Command;
+mod common;
 
-fn bounded_output(mut child: std::process::Child) -> std::process::Output {
-    let start = std::time::Instant::now();
-    while child.try_wait().unwrap().is_none() {
-        if start.elapsed() > std::time::Duration::from_secs(5) {
-            child.kill().unwrap();
-            let _ = child.wait();
-            panic!("CLI waited for input or failed to finish");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    child.wait_with_output().unwrap()
-}
+use common::bounded_output;
+use std::process::Command;
 
 #[test]
 fn ordinary_arguments_and_help_do_not_read_stdin() {

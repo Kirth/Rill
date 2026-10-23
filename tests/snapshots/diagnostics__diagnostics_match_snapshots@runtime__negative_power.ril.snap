@@ -1,0 +1,13 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/negative_power.ril
+---
+rill::runtime
+
+  × negative exponent on an Int; use a Float base such as 2.0 ** -1
+   ╭─[runtime/negative_power.ril:1:7]
+ 1 │ print(2 ** -1)
+   ·       ───┬───
+   ·          ╰── negative exponent on an Int; use a Float base such as 2.0 ** -1
+   ╰────

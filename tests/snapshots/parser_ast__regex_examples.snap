@@ -1,0 +1,238 @@
+---
+source: tests/parser_ast.rs
+expression: "parsed(r#\"\nlet line = \"user=bob status=200\"\nif line =~ /user=(?<user>\\w+) status=(?<status>\\d+)/ {\n    print \"{user}: {status}\"\n}\n\nlet x = \"foo foo\" =~ s/foo/bar/g\nlet y = x.replace(/bar/, \"baz\", all=true)\nprint(y)\n\"#)"
+---
+Program {
+    stmts: [
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "line",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Literal(
+                        Str(
+                            "user=bob status=200",
+                        ),
+                    ),
+                    span: Span {
+                        start: 12,
+                        end: 33,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 1,
+                end: 33,
+            },
+        },
+        Located {
+            stmt: Expr(
+                If {
+                    cond: Located {
+                        expr: RegexMatch {
+                            value: Ident(
+                                "line",
+                            ),
+                            pattern: "user=(?<user>\\w+) status=(?<status>\\d+)",
+                        },
+                        span: Span {
+                            start: 37,
+                            end: 86,
+                        },
+                    },
+                    pattern: None,
+                    then_body: [
+                        Located {
+                            stmt: Expr(
+                                Located {
+                                    expr: Call {
+                                        callee: Ident(
+                                            "print",
+                                        ),
+                                        args: [
+                                            Located {
+                                                expr: Interpolated(
+                                                    [
+                                                        Expr(
+                                                            Located {
+                                                                expr: Ident(
+                                                                    "user",
+                                                                ),
+                                                                span: Span {
+                                                                    start: 101,
+                                                                    end: 105,
+                                                                },
+                                                            },
+                                                        ),
+                                                        Text(
+                                                            ": ",
+                                                        ),
+                                                        Expr(
+                                                            Located {
+                                                                expr: Ident(
+                                                                    "status",
+                                                                ),
+                                                                span: Span {
+                                                                    start: 109,
+                                                                    end: 115,
+                                                                },
+                                                            },
+                                                        ),
+                                                    ],
+                                                ),
+                                                span: Span {
+                                                    start: 99,
+                                                    end: 117,
+                                                },
+                                            },
+                                        ],
+                                    },
+                                    span: Span {
+                                        start: 93,
+                                        end: 117,
+                                    },
+                                },
+                            ),
+                            span: Span {
+                                start: 93,
+                                end: 117,
+                            },
+                        },
+                    ],
+                    else_body: [],
+                },
+            ),
+            span: Span {
+                start: 34,
+                end: 119,
+            },
+        },
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "x",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: RegexSubstitution {
+                        value: Literal(
+                            Str(
+                                "foo foo",
+                            ),
+                        ),
+                        pattern: "foo",
+                        replacement: "bar",
+                        all: true,
+                    },
+                    span: Span {
+                        start: 129,
+                        end: 153,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 121,
+                end: 153,
+            },
+        },
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "y",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Call {
+                        callee: Field {
+                            base: Ident(
+                                "x",
+                            ),
+                            name: "replace",
+                        },
+                        args: [
+                            Located {
+                                expr: Literal(
+                                    Regex(
+                                        "bar",
+                                    ),
+                                ),
+                                span: Span {
+                                    start: 172,
+                                    end: 177,
+                                },
+                            },
+                            Located {
+                                expr: Literal(
+                                    Str(
+                                        "baz",
+                                    ),
+                                ),
+                                span: Span {
+                                    start: 179,
+                                    end: 184,
+                                },
+                            },
+                            NamedArg {
+                                name: "all",
+                                value: Located {
+                                    expr: Literal(
+                                        Bool(
+                                            true,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 190,
+                                        end: 194,
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                    span: Span {
+                        start: 162,
+                        end: 195,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 154,
+                end: 195,
+            },
+        },
+        Located {
+            stmt: Expr(
+                Located {
+                    expr: Call {
+                        callee: Ident(
+                            "print",
+                        ),
+                        args: [
+                            Located {
+                                expr: Ident(
+                                    "y",
+                                ),
+                                span: Span {
+                                    start: 202,
+                                    end: 203,
+                                },
+                            },
+                        ],
+                    },
+                    span: Span {
+                        start: 196,
+                        end: 204,
+                    },
+                },
+            ),
+            span: Span {
+                start: 196,
+                end: 204,
+            },
+        },
+    ],
+}

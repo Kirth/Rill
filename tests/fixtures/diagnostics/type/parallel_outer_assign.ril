@@ -1,0 +1,4 @@
+var total = 0
+parallel for x in [1, 2, 3] {
+    total += x
+}

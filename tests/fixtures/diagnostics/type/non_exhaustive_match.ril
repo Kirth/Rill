@@ -1,0 +1,5 @@
+let v = some(1)
+let s = match v {
+    some(x) => x,
+}
+print(s)

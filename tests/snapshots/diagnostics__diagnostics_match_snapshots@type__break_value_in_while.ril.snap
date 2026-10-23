@@ -1,0 +1,16 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/break_value_in_while.ril
+---
+rill::type
+
+  × break with a value is only valid inside loop { }
+   ╭─[type/break_value_in_while.ril:2:5]
+ 1 │ while true {
+ 2 │     break 5
+   ·     ───┬───
+   ·        ╰── break with a value is only valid inside loop { }
+ 3 │ }
+   ╰────
+  help: while and for loops do not produce a value from break

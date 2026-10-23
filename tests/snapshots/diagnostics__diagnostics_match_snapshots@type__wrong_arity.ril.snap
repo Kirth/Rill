@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/wrong_arity.ril
+---
+rill::type
+
+  × add needs 2 args, got 1
+   ╭─[type/wrong_arity.ril:2:7]
+ 1 │ fn add(a: Int, b: Int) -> Int { a + b }
+ 2 │ print(add(1))
+   ·       ───┬──
+   ·          ╰── add needs 2 args, got 1
+   ╰────

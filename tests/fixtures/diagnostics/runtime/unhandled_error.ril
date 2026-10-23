@@ -1,0 +1,4 @@
+fn load() -> Result[Int, Error] {
+    err("config is missing")
+}
+load()

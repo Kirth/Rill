@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/while_non_bool.ril
+---
+rill::type
+
+  × while condition must be Bool, got Int
+   ╭─[type/while_non_bool.ril:1:1]
+ 1 │ ╭─▶ while 5 {
+ 2 │ │       print(1)
+ 3 │ ├─▶ }
+   · ╰──── while condition must be Bool, got Int
+   ╰────

@@ -1,0 +1,2 @@
+let text = "a\nb"
+print(text.lnes())

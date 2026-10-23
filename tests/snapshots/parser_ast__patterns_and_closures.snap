@@ -1,0 +1,307 @@
+---
+source: tests/parser_ast.rs
+expression: "parsed(r#\"\nfn classify(x, scale = 2) -> Str {\n    match x {\n        1 | 2 => \"small\",\n        (a, b) if a > b => \"pair\",\n        [first, ..] => \"list {first}\",\n        some(v) => \"some\",\n        _ => \"other\",\n    }\n}\nlet f = || classify(1)\nprint(f())\n\"#)"
+---
+Program {
+    stmts: [
+        Located {
+            stmt: Fn {
+                name: "classify",
+                function: Function {
+                    params: [
+                        Param {
+                            name: "x",
+                            type_name: None,
+                            default: None,
+                        },
+                        Param {
+                            name: "scale",
+                            type_name: None,
+                            default: Some(
+                                Located {
+                                    expr: Literal(
+                                        Int(
+                                            2,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 24,
+                                        end: 25,
+                                    },
+                                },
+                            ),
+                        },
+                    ],
+                    return_type: Some(
+                        Str,
+                    ),
+                    body: [
+                        Located {
+                            stmt: Expr(
+                                Located {
+                                    expr: Match {
+                                        value: Located {
+                                            expr: Ident(
+                                                "x",
+                                            ),
+                                            span: Span {
+                                                start: 46,
+                                                end: 47,
+                                            },
+                                        },
+                                        arms: [
+                                            MatchArm {
+                                                pattern: Or(
+                                                    [
+                                                        Literal(
+                                                            Int(
+                                                                1,
+                                                            ),
+                                                        ),
+                                                        Literal(
+                                                            Int(
+                                                                2,
+                                                            ),
+                                                        ),
+                                                    ],
+                                                ),
+                                                guard: None,
+                                                expr: Located {
+                                                    expr: Literal(
+                                                        Str(
+                                                            "small",
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        start: 67,
+                                                        end: 74,
+                                                    },
+                                                },
+                                            },
+                                            MatchArm {
+                                                pattern: Tuple(
+                                                    [
+                                                        Bind(
+                                                            "a",
+                                                        ),
+                                                        Bind(
+                                                            "b",
+                                                        ),
+                                                    ],
+                                                ),
+                                                guard: Some(
+                                                    Located {
+                                                        expr: Binary {
+                                                            op: Gt,
+                                                            left: Ident(
+                                                                "a",
+                                                            ),
+                                                            right: Located {
+                                                                expr: Ident(
+                                                                    "b",
+                                                                ),
+                                                                span: Span {
+                                                                    start: 98,
+                                                                    end: 99,
+                                                                },
+                                                            },
+                                                        },
+                                                        span: Span {
+                                                            start: 94,
+                                                            end: 99,
+                                                        },
+                                                    },
+                                                ),
+                                                expr: Located {
+                                                    expr: Literal(
+                                                        Str(
+                                                            "pair",
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        start: 103,
+                                                        end: 109,
+                                                    },
+                                                },
+                                            },
+                                            MatchArm {
+                                                pattern: List {
+                                                    items: [
+                                                        Bind(
+                                                            "first",
+                                                        ),
+                                                    ],
+                                                    rest: true,
+                                                },
+                                                guard: None,
+                                                expr: Located {
+                                                    expr: Interpolated(
+                                                        [
+                                                            Text(
+                                                                "list ",
+                                                            ),
+                                                            Expr(
+                                                                Located {
+                                                                    expr: Ident(
+                                                                        "first",
+                                                                    ),
+                                                                    span: Span {
+                                                                        start: 141,
+                                                                        end: 146,
+                                                                    },
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    span: Span {
+                                                        start: 134,
+                                                        end: 148,
+                                                    },
+                                                },
+                                            },
+                                            MatchArm {
+                                                pattern: Some(
+                                                    Bind(
+                                                        "v",
+                                                    ),
+                                                ),
+                                                guard: None,
+                                                expr: Located {
+                                                    expr: Literal(
+                                                        Str(
+                                                            "some",
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        start: 169,
+                                                        end: 175,
+                                                    },
+                                                },
+                                            },
+                                            MatchArm {
+                                                pattern: Wildcard,
+                                                guard: None,
+                                                expr: Located {
+                                                    expr: Literal(
+                                                        Str(
+                                                            "other",
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        start: 190,
+                                                        end: 197,
+                                                    },
+                                                },
+                                            },
+                                        ],
+                                    },
+                                    span: Span {
+                                        start: 40,
+                                        end: 204,
+                                    },
+                                },
+                            ),
+                            span: Span {
+                                start: 40,
+                                end: 204,
+                            },
+                        },
+                    ],
+                    propagation: PropagationCell(
+                        0,
+                    ),
+                },
+            },
+            span: Span {
+                start: 1,
+                end: 206,
+            },
+        },
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "f",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Closure {
+                        params: [],
+                        body: [
+                            Expr(
+                                Located {
+                                    expr: Call {
+                                        callee: Ident(
+                                            "classify",
+                                        ),
+                                        args: [
+                                            Located {
+                                                expr: Literal(
+                                                    Int(
+                                                        1,
+                                                    ),
+                                                ),
+                                                span: Span {
+                                                    start: 227,
+                                                    end: 228,
+                                                },
+                                            },
+                                        ],
+                                    },
+                                    span: Span {
+                                        start: 218,
+                                        end: 229,
+                                    },
+                                },
+                            ),
+                        ],
+                        propagation: PropagationCell(
+                            0,
+                        ),
+                    },
+                    span: Span {
+                        start: 215,
+                        end: 229,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 207,
+                end: 229,
+            },
+        },
+        Located {
+            stmt: Expr(
+                Located {
+                    expr: Call {
+                        callee: Ident(
+                            "print",
+                        ),
+                        args: [
+                            Located {
+                                expr: Call {
+                                    callee: Ident(
+                                        "f",
+                                    ),
+                                    args: [],
+                                },
+                                span: Span {
+                                    start: 236,
+                                    end: 239,
+                                },
+                            },
+                        ],
+                    },
+                    span: Span {
+                        start: 230,
+                        end: 240,
+                    },
+                },
+            ),
+            span: Span {
+                start: 230,
+                end: 240,
+            },
+        },
+    ],
+}

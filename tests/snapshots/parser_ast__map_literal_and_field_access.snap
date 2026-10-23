@@ -1,0 +1,127 @@
+---
+source: tests/parser_ast.rs
+expression: "parsed(r#\"\nlet server = {\n    name: \"compute-01\",\n    ip: \"10.0.0.12\",\n    tags: [\"gpu\", \"prod\"],\n}\n\nprint server.ip\n\"#)"
+---
+Program {
+    stmts: [
+        Located {
+            stmt: Let {
+                pattern: Ident(
+                    "server",
+                ),
+                type_name: None,
+                expr: Located {
+                    expr: Map(
+                        [
+                            (
+                                "name",
+                                Located {
+                                    expr: Literal(
+                                        Str(
+                                            "compute-01",
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 26,
+                                        end: 38,
+                                    },
+                                },
+                            ),
+                            (
+                                "ip",
+                                Located {
+                                    expr: Literal(
+                                        Str(
+                                            "10.0.0.12",
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 48,
+                                        end: 59,
+                                    },
+                                },
+                            ),
+                            (
+                                "tags",
+                                Located {
+                                    expr: List(
+                                        [
+                                            Located {
+                                                expr: Literal(
+                                                    Str(
+                                                        "gpu",
+                                                    ),
+                                                ),
+                                                span: Span {
+                                                    start: 72,
+                                                    end: 77,
+                                                },
+                                            },
+                                            Located {
+                                                expr: Literal(
+                                                    Str(
+                                                        "prod",
+                                                    ),
+                                                ),
+                                                span: Span {
+                                                    start: 79,
+                                                    end: 85,
+                                                },
+                                            },
+                                        ],
+                                    ),
+                                    span: Span {
+                                        start: 71,
+                                        end: 86,
+                                    },
+                                },
+                            ),
+                        ],
+                    ),
+                    span: Span {
+                        start: 14,
+                        end: 89,
+                    },
+                },
+                mutable: false,
+            },
+            span: Span {
+                start: 1,
+                end: 89,
+            },
+        },
+        Located {
+            stmt: Expr(
+                Located {
+                    expr: Call {
+                        callee: Ident(
+                            "print",
+                        ),
+                        args: [
+                            Located {
+                                expr: Field {
+                                    base: Ident(
+                                        "server",
+                                    ),
+                                    name: "ip",
+                                },
+                                span: Span {
+                                    start: 97,
+                                    end: 106,
+                                },
+                            },
+                        ],
+                    },
+                    span: Span {
+                        start: 91,
+                        end: 106,
+                    },
+                },
+            ),
+            span: Span {
+                start: 91,
+                end: 106,
+            },
+        },
+    ],
+}

@@ -1,0 +1,5 @@
+fn pick(flag: Bool) -> Int {
+    if flag {
+        return 1
+    }
+}

@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/parse/else_without_block.ril
+---
+rill::parse
+
+  × expected `{`, found end of line
+   ╭─[parse/else_without_block.ril:3:7]
+ 2 │     print(1)
+ 3 │ } else
+   ·       ┬
+   ·       ╰── expected `{`, found end of line
+   ╰────

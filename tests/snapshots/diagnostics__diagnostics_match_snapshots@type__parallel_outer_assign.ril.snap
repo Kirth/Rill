@@ -1,0 +1,16 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/type/parallel_outer_assign.ril
+---
+rill::type
+
+  × cannot assign to outer variable 'total' from a parallel body; collect
+  │ results with emit or parallel_map
+   ╭─[type/parallel_outer_assign.ril:3:5]
+ 2 │ parallel for x in [1, 2, 3] {
+ 3 │     total += x
+   ·     ─────┬────
+   ·          ╰── cannot assign to outer variable 'total' from a parallel body; collect results with emit or parallel_map
+ 4 │ }
+   ╰────

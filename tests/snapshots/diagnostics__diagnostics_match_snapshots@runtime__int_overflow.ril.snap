@@ -1,0 +1,14 @@
+---
+source: tests/diagnostics.rs
+expression: diagnose(path)
+input_file: tests/fixtures/diagnostics/runtime/int_overflow.ril
+---
+rill::runtime
+
+  × integer overflow or division by zero
+   ╭─[runtime/int_overflow.ril:2:7]
+ 1 │ let big = 9223372036854775807
+ 2 │ print(big + 1)
+   ·       ───┬───
+   ·          ╰── integer overflow or division by zero
+   ╰────
