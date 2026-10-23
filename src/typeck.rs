@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::diagnostic::RillError;
+use crate::diagnostic::{RillError, Span};
 use crate::types::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -825,7 +825,28 @@ impl Checker {
             }
             Expr::Implicit => Ok(self.env.get("it").unwrap_or(Type::Unknown)),
             Expr::ImplicitField(_) => Ok(Type::Unknown),
+            Expr::Interpolated(parts) => {
+                self.check_parts(parts)?;
+                Ok(Type::Str)
+            }
         }
+    }
+
+    fn check_parts(&mut self, parts: &[StrPart]) -> Result<(), RillError> {
+        for part in parts {
+            match part {
+                StrPart::Text(_) | StrPart::Var(_) => {}
+                StrPart::VarDefault(_, default) => self.check_parts(default)?,
+                StrPart::Expr(expr) => {
+                    let ty = self.check_expr(expr)?;
+                    if matches!(ty, Type::Function { .. }) {
+                        return Err(RillError::new("cannot interpolate a function into a string")
+                            .with_span(expr.span().unwrap_or(Span::new(0, 0))));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr]) -> Result<Type, RillError> {
@@ -1784,6 +1805,10 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::Unary { operand, .. } => contains_implicit(operand),
         Expr::Closure { .. } | Expr::Literal(_) | Expr::Ident(_) | Expr::Command(_) => false,
         Expr::Located { expr, .. } => contains_implicit(expr),
+        Expr::Interpolated(parts) => parts.iter().any(|part| match part {
+            StrPart::Expr(expr) => contains_implicit(expr),
+            _ => false,
+        }),
     }
 }
 

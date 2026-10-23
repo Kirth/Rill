@@ -126,6 +126,21 @@ impl RillError {
         self
     }
 
+    /// Move every span by `offset`, for diagnostics produced while parsing an
+    /// embedded fragment such as a `{...}` interpolation.
+    pub fn shift_spans(mut self, offset: usize) -> Self {
+        let shift = |span: Span| Span::new(span.start + offset, span.end + offset);
+        self.span = self.span.map(shift);
+        if let Some(extras) = &mut self.extras {
+            for (span, _) in &mut extras.secondary {
+                *span = shift(*span);
+            }
+            let related = std::mem::take(&mut extras.related);
+            extras.related = related.into_iter().map(|e| e.shift_spans(offset)).collect();
+        }
+        self
+    }
+
     /// Add a secondary labelled span to the report.
     pub fn with_label(mut self, span: Span, text: impl Into<String>) -> Self {
         self.extras().secondary.push((span, text.into()));

@@ -6,15 +6,15 @@ use std::collections::VecDeque;
 enum TokenKind {
     Ident(String),
     Number(String),
-    Str(String),
+    Str(Vec<RawPart>),
     Regex(String),
     Substitution { pattern: String, replacement: String, all: bool },
     Word(String),
     CommandText(String),
-    CommandString(String),
+    CommandString(Vec<RawPart>),
     CommandVar(String),
     CommandSplat(String),
-    CommandVarDefault(String, String),
+    CommandVarDefault(String, Vec<RawPart>),
     CommandRedirect(RedirectKind),
     Let,
     Use,
@@ -76,6 +76,16 @@ enum TokenKind {
     Newline,
     Semi,
     Eof,
+}
+
+/// A piece of a string template as the lexer sees it.  Expression parts are
+/// kept as source text and parsed by the parser so their spans line up.
+#[derive(Debug, Clone, PartialEq)]
+enum RawPart {
+    Text(String),
+    Expr { source: String, offset: usize },
+    Var(String),
+    VarDefault(String, Vec<RawPart>),
 }
 
 impl TokenKind {
@@ -261,7 +271,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     continue;
                 }
                 '"' => {
-                    let (text, end) = lex_string_body(&mut chars, start)?;
+                    let (text, end) = lex_string_body(source, &mut chars, start)?;
                     tokens.push(Token {
                         kind: TokenKind::CommandString(text),
                         span: Span::new(start, end),
@@ -288,7 +298,11 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                         chars.next(); // consume '{'
                         let (name, default, end) = lex_braced_var(&mut chars, start)?;
                         let kind = match default {
-                            Some(d) => TokenKind::CommandVarDefault(name, d),
+                            Some(d) => {
+                                let offset = end - 1 - d.len();
+                                let (parts, _) = lex_template(&d, offset, false)?;
+                                TokenKind::CommandVarDefault(name, parts)
+                            }
                             None => TokenKind::CommandVar(name),
                         };
                         tokens.push(Token { kind, span: Span::new(start, end) });
@@ -370,7 +384,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 }
             }
             '"' => {
-                let (out, end) = lex_string_body(&mut chars, start)?;
+                let (out, end) = lex_string_body(source, &mut chars, start)?;
                 tokens.push(Token { kind: TokenKind::Str(out), span: Span::new(start, end) });
                 at_line_start = false;
             }
@@ -423,6 +437,30 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     }
                 }
                 tokens.push(Token { kind: TokenKind::Number(text), span: Span::new(start, end) });
+                at_line_start = false;
+            }
+            'r' if matches!(chars.peek(), Some((_, '"'))) => {
+                // Raw string: no escapes, no interpolation.
+                chars.next();
+                let mut raw = String::new();
+                let mut end = start + 2;
+                let mut closed = false;
+                for (idx, next) in chars.by_ref() {
+                    end = idx + next.len_utf8();
+                    if next == '"' {
+                        closed = true;
+                        break;
+                    }
+                    raw.push(next);
+                }
+                if !closed {
+                    return Err(RillError::spanned(
+                        "unterminated raw string",
+                        Span::new(start, end),
+                    ));
+                }
+                let parts = if raw.is_empty() { Vec::new() } else { vec![RawPart::Text(raw)] };
+                tokens.push(Token { kind: TokenKind::Str(parts), span: Span::new(start, end) });
                 at_line_start = false;
             }
             'a'..='z' | 'A'..='Z' | '_' => {
@@ -727,47 +765,230 @@ fn push(tokens: &mut Vec<Token>, kind: TokenKind, start: usize, end: usize) {
     tokens.push(Token { kind, span: Span::new(start, end.max(start + 1)) });
 }
 
+/// Lex a double-quoted string whose opening quote sits at `start`; `chars`
+/// is positioned just after it.  Returns the template parts and the byte
+/// offset just past the closing quote.
 fn lex_string_body<I>(
+    source: &str,
     chars: &mut std::iter::Peekable<I>,
     start: usize,
-) -> Result<(String, usize), RillError>
+) -> Result<(Vec<RawPart>, usize), RillError>
 where
     I: Iterator<Item = (usize, char)>,
 {
-    let mut out = String::new();
-    let mut end = start + 1;
-    let mut closed = false;
-    while let Some((idx, next)) = chars.next() {
-        end = idx + next.len_utf8();
-        match next {
-            '"' => {
-                closed = true;
-                break;
+    let body_start = start + 1;
+    let (parts, consumed) = lex_template(&source[body_start..], body_start, true)?;
+    let end = body_start + consumed + 1;
+    while chars.peek().is_some_and(|(idx, _)| *idx < end) {
+        chars.next();
+    }
+    Ok((parts, end))
+}
+
+/// Lex a string template.  `text` starts right after the opening quote (or is
+/// the default of `${X:-...}`) and `base` is its absolute byte offset.  With
+/// `quoted`, an unescaped `"` ends the template and the returned length
+/// excludes it; otherwise the whole text is consumed.
+fn lex_template(text: &str, base: usize, quoted: bool) -> Result<(Vec<RawPart>, usize), RillError> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut chars = text.char_indices().peekable();
+    fn flush(buf: &mut String, parts: &mut Vec<RawPart>) {
+        if !buf.is_empty() {
+            parts.push(RawPart::Text(std::mem::take(buf)));
+        }
+    }
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '"' if quoted => {
+                flush(&mut buf, &mut parts);
+                return Ok((parts, idx));
             }
             '\\' => {
                 let Some((esc_idx, esc)) = chars.next() else {
                     return Err(RillError::spanned(
                         "unterminated string escape",
-                        Span::new(start, end),
+                        Span::new(base + idx, base + idx + 1),
                     ));
                 };
-                end = esc_idx + esc.len_utf8();
-                out.push(match esc {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '"' => '"',
-                    '\\' => '\\',
-                    other => other,
-                });
+                match esc {
+                    'n' => buf.push('\n'),
+                    't' => buf.push('\t'),
+                    'r' => buf.push('\r'),
+                    '0' => buf.push('\0'),
+                    'e' => buf.push('\x1b'),
+                    '"' | '\\' | '{' | '}' | '$' => buf.push(esc),
+                    'u' => {
+                        let unicode_span = |end: usize| Span::new(base + idx, base + end);
+                        if !matches!(chars.next(), Some((_, '{'))) {
+                            return Err(RillError::spanned(
+                                "unicode escapes look like `\\u{1F600}`",
+                                unicode_span(esc_idx + 1),
+                            ));
+                        }
+                        let mut hex = String::new();
+                        let mut end = esc_idx + 2;
+                        loop {
+                            match chars.next() {
+                                Some((j, '}')) => {
+                                    end = j + 1;
+                                    break;
+                                }
+                                Some((j, digit)) if digit.is_ascii_hexdigit() && hex.len() < 6 => {
+                                    hex.push(digit);
+                                    end = j + 1;
+                                }
+                                _ => {
+                                    return Err(RillError::spanned(
+                                        "unicode escapes look like `\\u{1F600}`",
+                                        unicode_span(end),
+                                    ))
+                                }
+                            }
+                        }
+                        let scalar = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32);
+                        match scalar {
+                            Some(c) => buf.push(c),
+                            None => {
+                                return Err(RillError::spanned(
+                                    format!("`\\u{{{hex}}}` is not a valid character"),
+                                    unicode_span(end),
+                                ))
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(RillError::spanned(
+                            format!("unknown string escape `\\{other}`"),
+                            Span::new(base + idx, base + esc_idx + other.len_utf8()),
+                        )
+                        .with_help(
+                            "valid escapes: \\n \\t \\r \\0 \\e \\\\ \\\" \\{ \\} \\$ \\u{...}",
+                        ))
+                    }
+                }
             }
-            other => out.push(other),
+            '{' => {
+                flush(&mut buf, &mut parts);
+                let expr_start = idx + 1;
+                let mut depth = 1usize;
+                let mut close = None;
+                while let Some((j, c)) = chars.next() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(j);
+                                break;
+                            }
+                        }
+                        // Skip a nested string literal, braces and all.
+                        '"' => {
+                            while let Some((_, c2)) = chars.next() {
+                                match c2 {
+                                    '\\' => {
+                                        chars.next();
+                                    }
+                                    '"' => break,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(close) = close else {
+                    return Err(RillError::spanned(
+                        "unterminated interpolation; expected `}`",
+                        Span::new(base + idx, base + text.len()),
+                    )
+                    .with_help("write `\\{` for a literal brace"));
+                };
+                let source = &text[expr_start..close];
+                if source.trim().is_empty() {
+                    // `{}` has nothing to interpolate, so it is literal text
+                    // (handy for JSON such as "{}").
+                    buf.push_str(&text[idx..=close]);
+                    continue;
+                }
+                parts.push(RawPart::Expr { source: source.to_string(), offset: base + expr_start });
+            }
+            '$' => match chars.peek().copied() {
+                Some((_, '{')) => {
+                    chars.next();
+                    let inner_start = idx + 2;
+                    let mut depth = 1usize;
+                    let mut close = None;
+                    for (j, c) in chars.by_ref() {
+                        match c {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(j);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let Some(close) = close else {
+                        return Err(RillError::spanned(
+                            "unclosed `${`",
+                            Span::new(base + idx, base + text.len()),
+                        ));
+                    };
+                    let inner = &text[inner_start..close];
+                    let (name, default) = match inner.find(":-") {
+                        Some(at) => (&inner[..at], Some((&inner[at + 2..], inner_start + at + 2))),
+                        None => (inner, None),
+                    };
+                    if name.is_empty()
+                        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        return Err(RillError::spanned(
+                            format!("invalid variable name `${{{name}}}`"),
+                            Span::new(base + idx, base + close + 1),
+                        )
+                        .with_help("write `\\$` for a literal dollar sign"));
+                    }
+                    flush(&mut buf, &mut parts);
+                    match default {
+                        None => parts.push(RawPart::Var(name.to_string())),
+                        Some((default, default_offset)) => {
+                            let (default_parts, _) =
+                                lex_template(default, base + default_offset, false)?;
+                            parts.push(RawPart::VarDefault(name.to_string(), default_parts));
+                        }
+                    }
+                }
+                Some((_, c)) if c.is_ascii_alphabetic() || c == '_' => {
+                    let mut name = String::new();
+                    while let Some((_, c)) = chars.peek().copied() {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            name.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    flush(&mut buf, &mut parts);
+                    parts.push(RawPart::Var(name));
+                }
+                _ => buf.push('$'),
+            },
+            other => buf.push(other),
         }
     }
-    if !closed {
-        return Err(RillError::spanned("unterminated string", Span::new(start, end)));
+    if quoted {
+        return Err(RillError::spanned(
+            "unterminated string",
+            Span::new(base.saturating_sub(1), base + text.len()),
+        ));
     }
-    Ok((out, end))
+    flush(&mut buf, &mut parts);
+    Ok((parts, text.len()))
 }
 
 /// Parse `NAME}` or `NAME:-default}` after `${` has been consumed.
@@ -1092,10 +1313,11 @@ impl Parser {
         match expr.unspanned() {
             Expr::Literal(Literal::Str(value)) => Ok(value.clone()),
             other => {
-                let error = RillError::new(format!(
-                    "expected a string literal, found {}",
-                    describe_expr(other)
-                ));
+                let error = RillError::new(if matches!(other, Expr::Interpolated(_)) {
+                    "interpolation is not allowed here; use a plain string literal".to_string()
+                } else {
+                    format!("expected a string literal, found {}", describe_expr(other))
+                });
                 Err(match span {
                     Some(span) => error.with_span(span),
                     None => error,
@@ -1513,7 +1735,7 @@ impl Parser {
             TokenKind::Args => Ok(Expr::Ident("args".to_string())),
             TokenKind::Input => Ok(Expr::Ident("input".to_string())),
             TokenKind::Number(text) => Ok(Expr::Literal(parse_number(&text, token.span)?)),
-            TokenKind::Str(text) => Ok(Expr::Literal(Literal::Str(text))),
+            TokenKind::Str(parts) => self.build_string(parts),
             TokenKind::Regex(text) => Ok(Expr::Literal(Literal::Regex(text))),
             TokenKind::True => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::False => Ok(Expr::Literal(Literal::Bool(false))),
@@ -1801,7 +2023,11 @@ impl Parser {
             }
             let end = token.span.end;
             let part = match token.kind {
-                TokenKind::CommandText(v) | TokenKind::CommandString(v) => CommandPart::Text(v),
+                TokenKind::CommandText(v) => CommandPart::Text(v),
+                TokenKind::CommandString(parts) => match self.build_string(parts)? {
+                    Expr::Literal(Literal::Str(text)) => CommandPart::Text(text),
+                    expr => CommandPart::Expr(expr),
+                },
                 TokenKind::CommandVar(v) => CommandPart::Var(v),
                 TokenKind::CommandSplat(_) => {
                     // $*var must stand alone as an arg, not be fused with adjacent parts.
@@ -1814,7 +2040,7 @@ impl Parser {
                     continue;
                 }
                 TokenKind::CommandVarDefault(name, default) => {
-                    CommandPart::VarDefault(name, default)
+                    CommandPart::VarDefault(name, self.build_parts(default)?)
                 }
                 other => {
                     return Err(RillError::spanned(
@@ -1871,7 +2097,10 @@ impl Parser {
         let token = self.next();
         match token.kind {
             TokenKind::CommandText(v) => Ok(parse_command_text_arg(v)),
-            TokenKind::CommandString(v) => Ok(CommandArg::String(v)),
+            TokenKind::CommandString(parts) => match self.build_string(parts)? {
+                Expr::Literal(Literal::Str(text)) => Ok(CommandArg::String(text)),
+                expr => Ok(CommandArg::Expr(expr)),
+            },
             TokenKind::CommandVar(v) => Ok(CommandArg::Var(v)),
             other => Err(RillError::spanned(
                 format!("unexpected {} after redirection", other.describe()),
@@ -1907,6 +2136,40 @@ impl Parser {
             TokenKind::LBracket => Some((ParsedOp::Index, 15, 16)),
             _ => None,
         }
+    }
+
+    /// Turn lexed template parts into an expression: a plain literal when
+    /// there is nothing to interpolate, otherwise `Expr::Interpolated`.
+    fn build_string(&self, parts: Vec<RawPart>) -> Result<Expr, RillError> {
+        if parts.iter().all(|part| matches!(part, RawPart::Text(_))) {
+            let text = parts
+                .into_iter()
+                .map(|part| match part {
+                    RawPart::Text(text) => text,
+                    _ => unreachable!(),
+                })
+                .collect::<String>();
+            return Ok(Expr::Literal(Literal::Str(text)));
+        }
+        Ok(Expr::Interpolated(self.build_parts(parts)?))
+    }
+
+    fn build_parts(&self, parts: Vec<RawPart>) -> Result<Vec<StrPart>, RillError> {
+        parts
+            .into_iter()
+            .map(|part| {
+                Ok(match part {
+                    RawPart::Text(text) => StrPart::Text(text),
+                    RawPart::Var(name) => StrPart::Var(name),
+                    RawPart::VarDefault(name, default) => {
+                        StrPart::VarDefault(name, self.build_parts(default)?)
+                    }
+                    RawPart::Expr { source, offset } => {
+                        StrPart::Expr(parse_embedded_expr(&source, offset)?)
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Whether the token after an identifier starts the argument of a bare
@@ -2203,6 +2466,7 @@ fn expr_propagates(expr: &Expr) -> bool {
         }
         Expr::Block(body) => stmts_propagate(body),
         Expr::Located { expr, .. } => expr_propagates(expr),
+        Expr::Interpolated(parts) => parts_propagate(parts),
         Expr::Closure { .. }
         | Expr::Literal(_)
         | Expr::Ident(_)
@@ -2212,12 +2476,29 @@ fn expr_propagates(expr: &Expr) -> bool {
 }
 
 fn command_arg_propagates(arg: &CommandArg) -> bool {
-    matches!(arg, CommandArg::Expr(expr) if expr_propagates(expr))
+    match arg {
+        CommandArg::Expr(expr) => expr_propagates(expr),
+        CommandArg::Parts(parts) => parts.iter().any(|part| match part {
+            CommandPart::Expr(expr) => expr_propagates(expr),
+            CommandPart::VarDefault(_, default) => parts_propagate(default),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn parts_propagate(parts: &[StrPart]) -> bool {
+    parts.iter().any(|part| match part {
+        StrPart::Expr(expr) => expr_propagates(expr),
+        StrPart::VarDefault(_, default) => parts_propagate(default),
+        _ => false,
+    })
 }
 
 fn describe_expr(expr: &Expr) -> &'static str {
     match expr.unspanned() {
         Expr::Literal(Literal::Str(_)) => "a string literal",
+        Expr::Interpolated(_) => "an interpolated string",
         Expr::Literal(Literal::Int(_)) => "an integer literal",
         Expr::Literal(Literal::Float(_)) => "a float literal",
         Expr::Literal(Literal::Bool(_)) => "a boolean literal",
@@ -2296,4 +2577,25 @@ fn parts_to_arg(parts: Vec<CommandPart>) -> CommandArg {
 
 fn parse_command_text_arg(text: String) -> CommandArg {
     parts_to_arg(vec![CommandPart::Text(text)])
+}
+
+/// Parse the expression inside a `{...}` interpolation.  `offset` is the
+/// absolute byte offset of `source`, so every span lands in the real file.
+fn parse_embedded_expr(source: &str, offset: usize) -> Result<Expr, RillError> {
+    let mut tokens = lex(source).map_err(|error| error.shift_spans(offset))?;
+    for token in &mut tokens {
+        token.span = Span::new(token.span.start + offset, token.span.end + offset);
+    }
+    let mut parser = Parser::new(tokens);
+    parser.skip_separators();
+    let expr = parser.parse_expr(0)?;
+    parser.skip_separators();
+    if !parser.at(TokenKind::Eof) {
+        let token = parser.peek();
+        return Err(RillError::spanned(
+            format!("unexpected {} in interpolation", token.kind.describe()),
+            token.span,
+        ));
+    }
+    Ok(expr)
 }

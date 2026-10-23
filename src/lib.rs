@@ -306,6 +306,7 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_local_imports(body, imports);
         }
         ast::Expr::Located { expr, .. } => collect_expr_imports(expr, imports),
+        ast::Expr::Interpolated(parts) => collect_parts_imports(parts, imports),
         ast::Expr::Literal(_)
         | ast::Expr::Ident(_)
         | ast::Expr::Implicit
@@ -314,8 +315,30 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
 }
 
 fn collect_command_arg_imports(arg: &ast::CommandArg, imports: &mut Vec<String>) {
-    if let ast::CommandArg::Expr(expr) = arg {
-        collect_expr_imports(expr, imports);
+    match arg {
+        ast::CommandArg::Expr(expr) => collect_expr_imports(expr, imports),
+        ast::CommandArg::Parts(parts) => {
+            for part in parts {
+                match part {
+                    ast::CommandPart::Expr(expr) => collect_expr_imports(expr, imports),
+                    ast::CommandPart::VarDefault(_, default) => {
+                        collect_parts_imports(default, imports)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_parts_imports(parts: &[ast::StrPart], imports: &mut Vec<String>) {
+    for part in parts {
+        match part {
+            ast::StrPart::Expr(expr) => collect_expr_imports(expr, imports),
+            ast::StrPart::VarDefault(_, default) => collect_parts_imports(default, imports),
+            _ => {}
+        }
     }
 }
 
@@ -494,7 +517,7 @@ fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
 fn expr_needs_input(expr: &ast::Expr) -> bool {
     match expr.unspanned() {
         ast::Expr::Ident(name) => name == "input",
-        ast::Expr::Literal(ast::Literal::Str(text)) => text.contains("input"),
+        ast::Expr::Interpolated(parts) => parts_need_input(parts),
         ast::Expr::List(items) | ast::Expr::Tuple(items) => items.iter().any(expr_needs_input),
         ast::Expr::Map(items) => items.iter().any(|(_, value)| expr_needs_input(value)),
         ast::Expr::Call { callee, args } => {
@@ -531,9 +554,25 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
 fn command_arg_needs_input(arg: &ast::CommandArg) -> bool {
     match arg {
         ast::CommandArg::Expr(expr) => expr_needs_input(expr),
-        ast::CommandArg::Parts(parts) => parts.iter().any(|part| matches!(part, ast::CommandPart::Var(name) | ast::CommandPart::VarDefault(name, _) if name == "input")),
+        ast::CommandArg::Parts(parts) => parts.iter().any(|part| match part {
+            ast::CommandPart::Var(name) => name == "input",
+            ast::CommandPart::VarDefault(name, default) => {
+                name == "input" || parts_need_input(default)
+            }
+            ast::CommandPart::Expr(expr) => expr_needs_input(expr),
+            ast::CommandPart::Text(_) => false,
+        }),
         _ => false,
     }
+}
+
+fn parts_need_input(parts: &[ast::StrPart]) -> bool {
+    parts.iter().any(|part| match part {
+        ast::StrPart::Text(_) => false,
+        ast::StrPart::Var(name) => name == "input",
+        ast::StrPart::VarDefault(name, default) => name == "input" || parts_need_input(default),
+        ast::StrPart::Expr(expr) => expr_needs_input(expr),
+    })
 }
 
 pub fn unhandled_error(value: &types::Value) -> Option<RillError> {

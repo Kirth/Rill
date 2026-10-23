@@ -1341,6 +1341,7 @@ impl Evaluator {
                 },
                 None,
             )),
+            Expr::Interpolated(parts) => Ok(Value::Str(self.eval_parts(parts)?)),
             Expr::Try(inner) => match self.eval_expr(inner)? {
                 Value::Option(Some(value)) => Ok(*value),
                 Value::Option(None) => self.propagate(Value::Option(None)),
@@ -1368,7 +1369,7 @@ impl Evaluator {
 
     fn eval_literal(&mut self, value: &Literal) -> Result<Value, EvalError> {
         match value {
-            Literal::Str(text) => self.interpolate_string(text),
+            Literal::Str(text) => Ok(Value::Str(text.clone())),
             Literal::Null => Ok(Value::Null),
             Literal::Bool(value) => Ok(Value::Bool(*value)),
             Literal::Int(value) => Ok(Value::Int(*value)),
@@ -1516,128 +1517,66 @@ impl Evaluator {
         }
     }
 
-    fn interpolate_string(&mut self, text: &str) -> Result<Value, EvalError> {
+    /// Render the parts of an interpolated string.
+    fn eval_parts(&mut self, parts: &[StrPart]) -> Result<String, EvalError> {
         let mut out = String::new();
-        let mut chars = text.char_indices().peekable();
-        while let Some((idx, ch)) = chars.next() {
-            match ch {
-                '{' => {
-                    let start = idx + ch.len_utf8();
-                    let mut end = None;
-                    for (next_idx, next) in chars.by_ref() {
-                        if next == '}' {
-                            end = Some(next_idx);
-                            break;
-                        }
-                    }
-                    let Some(end) = end else {
-                        out.push_str(&text[idx..]);
-                        break;
-                    };
-                    out.push_str(&self.eval_interpolation(text[start..end].trim())?);
+        for part in parts {
+            match part {
+                StrPart::Text(text) => out.push_str(text),
+                StrPart::Expr(expr) => {
+                    let value = self.eval_expr(expr)?;
+                    out.push_str(&interpolated_text(&value));
                 }
-                '$' => {
-                    if matches!(chars.peek(), Some((_, '{'))) {
-                        chars.next(); // consume '{'
-                                      // Collect name and optional `:-default`.
-                        let mut name = String::new();
-                        let mut default: Option<String> = None;
-                        'braced: loop {
-                            match chars.next() {
-                                None | Some((_, '}')) => break 'braced,
-                                Some((_, ':')) if matches!(chars.peek(), Some((_, '-'))) => {
-                                    chars.next(); // consume '-'
-                                    let mut d = String::new();
-                                    let mut depth = 1usize;
-                                    loop {
-                                        match chars.next() {
-                                            None => break,
-                                            Some((_, '{')) => {
-                                                depth += 1;
-                                                d.push('{');
-                                            }
-                                            Some((_, '}')) => {
-                                                depth -= 1;
-                                                if depth == 0 {
-                                                    break;
-                                                }
-                                                d.push('}');
-                                            }
-                                            Some((_, ch)) => d.push(ch),
-                                        }
-                                    }
-                                    default = Some(d);
-                                    break 'braced;
-                                }
-                                Some((_, ch)) => name.push(ch),
-                            }
-                        }
-                        if name.is_empty() && default.is_none() {
-                            out.push_str("${}");
-                        } else if let Some(dflt) = default {
-                            // Rill binding first, then evaluator environment, then default.
-                            let val = self.lookup_environment_value(&name);
-                            let s = val.as_ref().map(|v| v.as_string_lossy());
-                            if s.as_deref().is_some_and(|v| !v.is_empty()) {
-                                out.push_str(&s.unwrap());
-                            } else {
-                                let expanded = self.interpolate_string(&dflt)?.as_string_lossy();
-                                out.push_str(&expanded);
-                            }
-                        } else {
-                            // `${NAME}` – same as `$NAME` (with process-env fallback).
-                            out.push_str(&self.eval_interpolation(&name)?);
-                        }
-                    } else {
-                        let mut name = String::new();
-                        while let Some((_, next)) = chars.peek().copied() {
-                            if next.is_ascii_alphanumeric() || next == '_' {
-                                chars.next();
-                                name.push(next);
-                            } else {
-                                break;
-                            }
-                        }
-                        if name.is_empty() {
-                            out.push('$');
-                        } else {
-                            out.push_str(&self.eval_interpolation(&name)?);
+                StrPart::Var(name) => {
+                    let value = self.lookup_environment_value(name).ok_or_else(|| {
+                        RillError::new(format!("unknown variable '${name}'"))
+                            .with_help("`$name` looks up a Rill binding, then the environment")
+                    })?;
+                    out.push_str(&interpolated_text(&value));
+                }
+                StrPart::VarDefault(name, default) => {
+                    let value = self.lookup_environment_value(name).map(|v| interpolated_text(&v));
+                    match value {
+                        Some(text) if !text.is_empty() => out.push_str(&text),
+                        _ => {
+                            let text = self.eval_parts(default)?;
+                            out.push_str(&text);
                         }
                     }
                 }
-                other => out.push(other),
             }
         }
-        Ok(Value::Str(out))
+        Ok(out)
     }
 
-    fn eval_interpolation(&mut self, expr: &str) -> Result<String, EvalError> {
-        let mut parts = expr.split('.').collect::<Vec<_>>();
-        if parts.is_empty() {
-            return Ok(String::new());
+    /// Resolve an expression to a path.  A leading `~` is expanded only in
+    /// source text (string literals and interpolations, possibly wrapped in
+    /// `path(...)` or `file(...)`); runtime values are taken literally.
+    fn path_from_expr(&mut self, expr: &Expr) -> Result<PathBuf, EvalError> {
+        if let Expr::Call { callee, args } = expr.unspanned() {
+            if args.len() == 1
+                && matches!(callee.unspanned(), Expr::Ident(name) if name == "file" || name == "path")
+            {
+                return self.path_from_expr(&args[0]);
+            }
         }
-        let first = parts.remove(0);
-        // Rill binding first, then evaluator environment.
-        let mut value = self
-            .lookup_environment_value(first)
-            .ok_or_else(|| RillError::new(format!("unknown interpolation '{first}'")))?;
-        for part in parts {
-            value = if let Some(name) = part.strip_suffix("()") {
-                self.env.push();
-                self.env.set("$interpolation_receiver".into(), value);
-                let result =
-                    self.eval_method(&Expr::Ident("$interpolation_receiver".into()), name, &[]);
-                self.env.pop();
-                result?
-            } else {
-                field_value(value, part)?
-            };
+        let source_text = is_source_text(expr);
+        match self.eval_expr(expr)? {
+            Value::Path(path) => Ok(path),
+            Value::Str(text) => Ok(self.path_from_text(&text, source_text)?),
+            other => {
+                Err(RillError::new(format!("expected a Str or Path, got {}", other.type_name()))
+                    .into())
+            }
         }
-        let text = match value {
-            Value::Option(_) => value.to_string(),
-            _ => value.as_string_lossy(),
-        };
-        Ok(text)
+    }
+
+    fn path_from_text(&self, text: &str, expand_tilde: bool) -> Result<PathBuf, RillError> {
+        if expand_tilde {
+            self.eval_resolve_path(text)
+        } else {
+            Ok(PathBuf::from(text))
+        }
     }
 
     fn eval_replace_method(&mut self, base: &Expr, args: &[Expr]) -> Result<Value, EvalError> {
@@ -1808,9 +1747,10 @@ impl Evaluator {
             crate::methods::ReceiverAdapter::Path => {
                 values[0] = match &values[0] {
                     Value::Path(path) => Value::Path(path.clone()),
-                    Value::Str(path) => {
-                        Value::Path(self.eval_resolve_path(path).map_err(EvalError::from)?)
-                    }
+                    Value::Str(path) => Value::Path(
+                        self.path_from_text(path, is_source_text(&args[0]))
+                            .map_err(EvalError::from)?,
+                    ),
                     other => {
                         return Err(RillError::new(format!(
                             "{module}.{name} needs a Str or Path, got {}",
@@ -2099,8 +2039,7 @@ impl Evaluator {
                     return Err(RillError::new("path.join needs 2 args").into());
                 }
                 let base = self.eval_expr(&args[0])?.as_string_lossy();
-                let child_str = self.eval_expr(&args[1])?.as_string_lossy();
-                let child = self.eval_resolve_path(&child_str)?;
+                let child = self.eval_expr(&args[1])?.as_string_lossy();
                 Ok(Value::Path(PathBuf::from(base).join(child)))
             }
             ("csv", "parse") => {
@@ -2183,8 +2122,7 @@ impl Evaluator {
                     return Err(RillError::new("archive.extract needs 2 args").into());
                 }
                 let archive = self.eval_expr(&args[0])?.as_string_lossy();
-                let dest_str = self.eval_expr(&args[1])?.as_string_lossy();
-                let destination = self.eval_resolve_path(&dest_str)?;
+                let destination = self.path_from_expr(&args[1])?;
                 let file = fs::File::open(&archive).map_err(|err| {
                     RillError::new(format!("failed to open archive '{archive}': {err}"))
                 })?;
@@ -2436,11 +2374,7 @@ impl Evaluator {
                             items.iter().map(|v| v.as_string_lossy()).collect();
                         Ok(Value::Str(parts.join(&sep)))
                     }
-                    Value::Path(base) => {
-                        let child_str = arg.as_string_lossy();
-                        let child = self.eval_resolve_path(&child_str)?;
-                        Ok(Value::Path(base.join(child)))
-                    }
+                    Value::Path(base) => Ok(Value::Path(base.join(arg.as_string_lossy()))),
                     other => Err(RillError::new(format!(
                         "join needs a List or Path, got {}",
                         other.type_name()
@@ -2741,10 +2675,7 @@ impl Evaluator {
                 self.set_environment(&name, value)?;
                 Ok(Value::Null)
             }
-            Builtin::Path | Builtin::File => {
-                let value = self.eval_expr(&args[0])?.as_string_lossy();
-                Ok(Value::Path(self.eval_resolve_path(&value)?))
-            }
+            Builtin::Path | Builtin::File => Ok(Value::Path(self.path_from_expr(&args[0])?)),
             Builtin::Shell => {
                 let script = self.eval_expr(&args[0])?.as_string_lossy();
                 let argv = self.apply_remote_prefix(vec!["sh".into(), "-c".into(), script]);
@@ -3399,92 +3330,64 @@ impl Evaluator {
         let mut out = Vec::new();
         for arg in &command.argv {
             match arg {
-                CommandArg::Word(value) => {
-                    let interpolated = self.interpolate_string(value)?.as_string_lossy();
-                    // Expand a leading tilde prefix from the source text.
-                    out.push(expand_tilde_prefix(
-                        &interpolated,
-                        self.environment.get("HOME").map(String::as_str),
-                    ));
-                }
-                CommandArg::String(value) => {
-                    out.push(self.interpolate_string(value)?.as_string_lossy());
-                }
-                CommandArg::Var(name) => {
-                    let value = self.env.get(name).ok_or_else(|| {
-                        RillError::new(format!("unknown command variable '${name}'"))
-                    })?;
-                    match value {
-                        Value::List(items) => {
-                            out.extend(items.into_iter().map(|item| item.as_string_lossy()));
-                        }
-                        other => out.push(other.as_string_lossy()),
+                CommandArg::Word(value) => out.push(self.expand_word_tilde(value)),
+                CommandArg::String(value) => out.push(value.clone()),
+                CommandArg::Var(name) => match self.command_var(name)? {
+                    Value::List(items) => {
+                        out.extend(items.into_iter().map(|item| item.as_string_lossy()));
                     }
-                }
-                CommandArg::Splat(name) => {
-                    let value = self.env.get(name).ok_or_else(|| {
-                        RillError::new(format!("unknown command variable '${name}'"))
-                    })?;
-                    match value {
-                        Value::List(items) => {
-                            out.extend(items.into_iter().map(|item| item.as_string_lossy()));
-                        }
-                        other => {
-                            out.extend(
-                                other.as_string_lossy().split_whitespace().map(|w| w.to_string()),
-                            );
-                        }
+                    other => out.push(other.as_string_lossy()),
+                },
+                CommandArg::Splat(name) => match self.command_var(name)? {
+                    Value::List(items) => {
+                        out.extend(items.into_iter().map(|item| item.as_string_lossy()));
                     }
-                }
-                CommandArg::Parts(parts) => {
-                    let mut arg = String::new();
-                    let mut is_first = true;
-                    for part in parts {
-                        match part {
-                            CommandPart::Text(text) => {
-                                let s = self.interpolate_string(text)?.as_string_lossy();
-                                // Expand leading tilde only when it is the very first
-                                // fragment of a Parts arg.
-                                if is_first {
-                                    arg.push_str(&expand_tilde_prefix(
-                                        &s,
-                                        self.environment.get("HOME").map(String::as_str),
-                                    ));
-                                } else {
-                                    arg.push_str(&s);
-                                }
-                            }
-                            CommandPart::Var(name) => {
-                                let value = self.env.get(name).ok_or_else(|| {
-                                    RillError::new(format!("unknown command variable '${name}'"))
-                                })?;
-                                arg.push_str(&value.as_string_lossy());
-                            }
-                            CommandPart::VarDefault(name, default) => {
-                                let val = self.env.get(name);
-                                let s = val.as_ref().map(|v| v.as_string_lossy());
-                                if s.as_deref().is_some_and(|v| !v.is_empty()) {
-                                    arg.push_str(&s.unwrap());
-                                } else {
-                                    // Expand the default as a path template so that
-                                    // `~` and env vars work there too.
-                                    let expanded = self
-                                        .eval_resolve_path(default)
-                                        .map_err(EvalError::from)?
-                                        .to_string_lossy()
-                                        .into_owned();
-                                    arg.push_str(&expanded);
-                                }
-                            }
-                        }
-                        is_first = false;
-                    }
-                    out.push(arg);
-                }
+                    other => out
+                        .extend(other.as_string_lossy().split_whitespace().map(|w| w.to_string())),
+                },
+                CommandArg::Parts(parts) => out.push(self.eval_command_parts(parts, true)?),
                 CommandArg::Expr(expr) => out.push(self.eval_expr(expr)?.as_string_lossy()),
             }
         }
         Ok(self.apply_remote_prefix(out))
+    }
+
+    fn command_var(&self, name: &str) -> Result<Value, EvalError> {
+        self.env
+            .get(name)
+            .ok_or_else(|| RillError::new(format!("unknown command variable '${name}'")).into())
+    }
+
+    /// Join the fragments of one command argument.  With `tilde`, a leading
+    /// `~` in source text at the start of the argument is expanded.
+    fn eval_command_parts(
+        &mut self,
+        parts: &[CommandPart],
+        tilde: bool,
+    ) -> Result<String, EvalError> {
+        let mut arg = String::new();
+        for (index, part) in parts.iter().enumerate() {
+            let fragment = match part {
+                CommandPart::Text(text) => text.clone(),
+                CommandPart::Var(name) => self.command_var(name)?.as_string_lossy(),
+                CommandPart::VarDefault(name, default) => match self.env.get(name) {
+                    Some(value) if !value.as_string_lossy().is_empty() => value.as_string_lossy(),
+                    _ => self.eval_parts(default)?,
+                },
+                CommandPart::Expr(expr) => self.eval_expr(expr)?.as_string_lossy(),
+            };
+            let source_text = matches!(part, CommandPart::Text(_) | CommandPart::VarDefault(..));
+            if index == 0 && tilde && source_text {
+                arg.push_str(&self.expand_word_tilde(&fragment));
+            } else {
+                arg.push_str(&fragment);
+            }
+        }
+        Ok(arg)
+    }
+
+    fn expand_word_tilde(&self, text: &str) -> String {
+        expand_tilde_prefix(text, self.environment.get("HOME").map(String::as_str))
     }
 
     fn command_io(&mut self, command: &CommandExpr) -> Result<CommandIo, EvalError> {
@@ -3492,7 +3395,17 @@ impl Evaluator {
         let mut io = CommandIo::default();
         for redirect in &command.redirects {
             let target = self.command_arg_to_string(&redirect.target)?;
-            let path = self.eval_resolve_path(&target)?;
+            let source_text = match &redirect.target {
+                CommandArg::Word(_) | CommandArg::String(_) => true,
+                CommandArg::Parts(parts) => {
+                    matches!(
+                        parts.first(),
+                        Some(CommandPart::Text(_) | CommandPart::VarDefault(..))
+                    )
+                }
+                _ => false,
+            };
+            let path = self.path_from_text(&target, source_text)?;
             match redirect.kind {
                 RedirectKind::Stdout => io.stdout_file = Some(path),
                 RedirectKind::Stderr => io.stderr_file = Some(path),
@@ -3536,28 +3449,13 @@ impl Evaluator {
     }
 
     fn config_path(&mut self, expr: &Expr, name: &str) -> Result<PathBuf, EvalError> {
-        match expr.unspanned() {
-            Expr::Call { callee, args } if matches!(callee.unspanned(), Expr::Ident(value) if value == "file") =>
-            {
-                if args.len() != 1 {
-                    return Err(RillError::new("file needs 1 arg").into());
-                }
-                let s = self.eval_expr(&args[0])?.as_string_lossy();
-                Ok(self.eval_resolve_path(&s)?)
-            }
-            _ => {
-                let value = self.eval_expr(expr)?;
-                match value {
-                    Value::Path(path) => Ok(path),
-                    Value::Str(path) => Ok(self.eval_resolve_path(&path)?),
-                    other => Err(RillError::new(format!(
-                        "command {name} config needs Str or Path, got {}",
-                        other.type_name()
-                    ))
-                    .into()),
-                }
-            }
-        }
+        self.path_from_expr(expr).map_err(|error| match error {
+            EvalError::Runtime(error) => EvalError::Runtime(RillError::new(format!(
+                "command {name} config: {}",
+                error.message
+            ))),
+            other => other,
+        })
     }
 
     fn config_stream(&mut self, expr: &Expr, name: &str) -> Result<ConfigStream, EvalError> {
@@ -3580,55 +3478,12 @@ impl Evaluator {
 
     fn command_arg_to_string(&mut self, arg: &CommandArg) -> Result<String, EvalError> {
         match arg {
-            CommandArg::Word(value) | CommandArg::String(value) => {
-                Ok(self.interpolate_string(value)?.as_string_lossy())
+            CommandArg::Word(value) | CommandArg::String(value) => Ok(value.clone()),
+            CommandArg::Var(name) | CommandArg::Splat(name) => {
+                Ok(self.command_var(name)?.as_string_lossy())
             }
-            CommandArg::Var(name) => {
-                let value = self
-                    .env
-                    .get(name)
-                    .ok_or_else(|| RillError::new(format!("unknown command variable '${name}'")))?;
-                Ok(value.as_string_lossy())
-            }
-            CommandArg::Parts(parts) => {
-                let mut arg = String::new();
-                for part in parts {
-                    match part {
-                        CommandPart::Text(text) => {
-                            arg.push_str(&self.interpolate_string(text)?.as_string_lossy())
-                        }
-                        CommandPart::Var(name) => {
-                            let value = self.env.get(name).ok_or_else(|| {
-                                RillError::new(format!("unknown command variable '${name}'"))
-                            })?;
-                            arg.push_str(&value.as_string_lossy());
-                        }
-                        CommandPart::VarDefault(name, default) => {
-                            let val = self.env.get(name);
-                            let s = val.as_ref().map(|v| v.as_string_lossy());
-                            if s.as_deref().is_some_and(|v| !v.is_empty()) {
-                                arg.push_str(&s.unwrap());
-                            } else {
-                                let expanded = self
-                                    .eval_resolve_path(default)
-                                    .map_err(EvalError::from)?
-                                    .to_string_lossy()
-                                    .into_owned();
-                                arg.push_str(&expanded);
-                            }
-                        }
-                    }
-                }
-                Ok(arg)
-            }
+            CommandArg::Parts(parts) => self.eval_command_parts(parts, false),
             CommandArg::Expr(expr) => Ok(self.eval_expr(expr)?.as_string_lossy()),
-            CommandArg::Splat(name) => {
-                let value = self
-                    .env
-                    .get(name)
-                    .ok_or_else(|| RillError::new(format!("unknown command variable '${name}'")))?;
-                Ok(value.as_string_lossy())
-            }
         }
     }
 }
@@ -4154,6 +4009,23 @@ fn contains_implicit(expr: &Expr) -> bool {
         Expr::Unary { operand, .. } => contains_implicit(operand),
         Expr::Closure { .. } | Expr::Literal(_) | Expr::Ident(_) | Expr::Command(_) => false,
         Expr::Located { expr, .. } => contains_implicit(expr),
+        Expr::Interpolated(parts) => parts.iter().any(|part| match part {
+            StrPart::Expr(expr) => contains_implicit(expr),
+            _ => false,
+        }),
+    }
+}
+
+/// Whether an expression is literal source text, i.e. a string literal or an
+/// interpolation, for the purpose of tilde expansion.
+fn is_source_text(expr: &Expr) -> bool {
+    matches!(expr.unspanned(), Expr::Literal(Literal::Str(_)) | Expr::Interpolated(_))
+}
+
+fn interpolated_text(value: &Value) -> String {
+    match value {
+        Value::Option(_) => value.to_string(),
+        other => other.as_string_lossy(),
     }
 }
 

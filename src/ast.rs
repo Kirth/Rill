@@ -273,6 +273,21 @@ pub enum Expr {
     Implicit,
     ImplicitField(String),
     Try(Box<Expr>),
+    /// A string literal with `{expr}`, `$name`, or `${name:-default}` parts,
+    /// resolved at parse time.
+    Interpolated(Vec<StrPart>),
+}
+
+/// One piece of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrPart {
+    Text(String),
+    /// `{expr}`: any expression.
+    Expr(Expr),
+    /// `$name` or `${name}`: a Rill binding, falling back to the environment.
+    Var(String),
+    /// `${name:-default}`: the default is itself a template.
+    VarDefault(String, Vec<StrPart>),
 }
 
 /// Literal syntax is deliberately independent from runtime values.  In
@@ -405,8 +420,10 @@ pub enum CommandArg {
 pub enum CommandPart {
     Text(String),
     Var(String),
-    /// `${name:-default}` with a default template string.
-    VarDefault(String, String),
+    /// `${name:-default}`; the default is a string template.
+    VarDefault(String, Vec<StrPart>),
+    /// A quoted argument fragment with interpolation.
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

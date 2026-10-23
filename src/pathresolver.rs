@@ -1,17 +1,11 @@
 use crate::diagnostic::RillError;
 use std::path::PathBuf;
 
-/// Resolves a path template with tilde and variable expansion.
-///
-/// Expansion order:
-/// 1. Leading `~` or `~/` → `lookup("HOME")`; `~user` → that user's home directory.
-/// 2. `$NAME`, `${NAME}`, `${NAME:-default}` via `lookup` (Rill binding first, then
-///    process env at the call site), inserting values literally to prevent
-///    double expansion.  Default expressions are themselves expanded recursively.
-///
-/// A missing variable without a default is a diagnostic error.
-/// An unresolvable tilde expression is left literal.
-/// Backslash escapes the next character (`\$` → `$`, `\~` → `~`).
+/// Resolves a path written as source text: a leading `~` or `~/` becomes
+/// `lookup("HOME")` and `~user` becomes that user's home directory.  Variable
+/// references are not expanded here; string interpolation already did that at
+/// parse time, so values are never expanded twice.  An unresolvable tilde
+/// expression is left literal.
 pub fn resolve_path(
     template: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -90,106 +84,10 @@ fn expand_template(
         }
     }
 
-    // Step 2: expand variables and handle escapes.
-    while let Some((_, ch)) = chars.next() {
-        match ch {
-            '\\' => {
-                // Escape: next char is literal.
-                match chars.next() {
-                    Some((_, next)) => result.push(next),
-                    None => result.push('\\'),
-                }
-            }
-            '$' => {
-                if matches!(chars.peek(), Some((_, '{'))) {
-                    chars.next(); // consume '{'
-                    let (name, default) = parse_braced(&mut chars)?;
-                    let value = lookup(&name);
-                    let nonempty = value.as_deref().is_some_and(|v| !v.is_empty());
-                    if nonempty {
-                        // Insert literally – no re-expansion of the value.
-                        result.push_str(value.unwrap().as_str());
-                    } else if let Some(dflt) = default {
-                        // Default is itself a template.
-                        result.push_str(&expand_template(&dflt, lookup, users)?);
-                    } else if value.is_some() {
-                        // Set but empty, no default – insert nothing.
-                    } else {
-                        return Err(RillError::new(format!(
-                            "unset variable '${{{}}}' in path",
-                            name
-                        )));
-                    }
-                } else {
-                    let mut name = String::new();
-                    while let Some((_, c)) = chars.peek() {
-                        if c.is_ascii_alphanumeric() || *c == '_' {
-                            name.push(*c);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if name.is_empty() {
-                        result.push('$');
-                    } else if let Some(value) = lookup(&name) {
-                        result.push_str(&value); // literal
-                    } else {
-                        return Err(RillError::new(format!("unset variable '${name}' in path")));
-                    }
-                }
-            }
-            other => result.push(other),
-        }
-    }
+    // Everything after the tilde prefix is literal.
+    result.extend(chars.map(|(_, ch)| ch));
 
     Ok(result)
-}
-
-/// Parse `NAME}` or `NAME:-default}` after the opening `{` has been consumed.
-fn parse_braced(
-    chars: &mut std::iter::Peekable<impl Iterator<Item = (usize, char)>>,
-) -> Result<(String, Option<String>), RillError> {
-    let mut name = String::new();
-    loop {
-        match chars.next() {
-            None => return Err(RillError::new("unclosed '${'  in path")),
-            Some((_, '}')) => return Ok((name, None)),
-            Some((_, ':')) => {
-                if matches!(chars.peek(), Some((_, '-'))) {
-                    chars.next(); // consume '-'
-                    return Ok((name, Some(collect_default(chars)?)));
-                }
-                name.push(':');
-            }
-            Some((_, ch)) => name.push(ch),
-        }
-    }
-}
-
-/// Collect the default template up to the closing `}`, tracking brace depth.
-fn collect_default(
-    chars: &mut std::iter::Peekable<impl Iterator<Item = (usize, char)>>,
-) -> Result<String, RillError> {
-    let mut result = String::new();
-    let mut depth = 1usize;
-    loop {
-        match chars.next() {
-            None => return Err(RillError::new("unclosed '${'  in path")),
-            Some((_, '{')) => {
-                depth += 1;
-                result.push('{');
-            }
-            Some((_, '}')) => {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(result);
-                }
-                result.push('}');
-            }
-            Some((_, ch)) => result.push(ch),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -229,60 +127,6 @@ mod tests {
         assert_eq!(r2, PathBuf::from("/home/testuser/data"));
         let r3 = resolve_with_users("~/data", &env_lookup(&[]), &FakeUsers(vec![])).unwrap();
         assert_eq!(r3, PathBuf::from("~/data"));
-    }
-
-    #[test]
-    fn dollar_name_substitution() {
-        let r = resolve("$FOO/bar", &[("FOO", "/opt")]).unwrap();
-        assert_eq!(r, PathBuf::from("/opt/bar"));
-    }
-
-    #[test]
-    fn braced_dollar_substitution() {
-        let r = resolve("${FOO}/bar", &[("FOO", "/opt")]).unwrap();
-        assert_eq!(r, PathBuf::from("/opt/bar"));
-    }
-
-    #[test]
-    fn default_used_when_unset() {
-        let r = resolve("${FOO:-/fallback}/bar", &[]).unwrap();
-        assert_eq!(r, PathBuf::from("/fallback/bar"));
-    }
-
-    #[test]
-    fn default_skipped_when_set() {
-        let r = resolve("${FOO:-/fallback}/bar", &[("FOO", "/real")]).unwrap();
-        assert_eq!(r, PathBuf::from("/real/bar"));
-    }
-
-    #[test]
-    fn empty_var_uses_default() {
-        let r = resolve("${FOO:-/fallback}", &[("FOO", "")]).unwrap();
-        assert_eq!(r, PathBuf::from("/fallback"));
-    }
-
-    #[test]
-    fn nested_default() {
-        let r = resolve("${A:-${B:-/deep}}", &[]).unwrap();
-        assert_eq!(r, PathBuf::from("/deep"));
-    }
-
-    #[test]
-    fn value_inserted_literally_no_reexpand() {
-        // $VAR contains shell-looking text; it must NOT be re-expanded.
-        let r = resolve("$VAR/end", &[("VAR", "$OTHER")]).unwrap();
-        assert_eq!(r, PathBuf::from("$OTHER/end"));
-    }
-
-    #[test]
-    fn missing_var_no_default_is_error() {
-        assert!(resolve("$MISSING", &[]).is_err());
-    }
-
-    #[test]
-    fn backslash_escapes_dollar() {
-        let r = resolve("\\$NAME/x", &[]).unwrap();
-        assert_eq!(r, PathBuf::from("$NAME/x"));
     }
 
     #[test]
