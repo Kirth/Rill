@@ -327,3 +327,30 @@ fn append_in_loop_is_linear() {
     assert_eq!(value, Value::Int(20000));
     assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
 }
+
+#[test]
+fn deep_recursion_reports_depth_limit_instead_of_crashing() {
+    let source = "fn f(n) { if n == 0 { 0 } else { f(n - 1) } }\nf(20000)";
+    let error = rill::run_source(source, vec![]).expect_err("depth limit must trigger");
+    assert!(error.to_string().contains("call depth limit"), "{error}");
+}
+
+#[test]
+fn moderate_recursion_succeeds() {
+    assert_eq!(run("fn f(n) { if n == 0 { 0 } else { f(n - 1) } }\nf(5000)"), Value::Int(0));
+}
+
+#[test]
+fn slice_with_reversed_bounds_is_an_error() {
+    let error = rill::run_source("[1, 2, 3].slice(2, 1)", vec![]).expect_err("reversed slice");
+    assert!(error.to_string().contains("slice start 2 is after end 1"), "{error}");
+    assert_eq!(run("[1, 2, 3].slice(1, 1)"), Value::List(vec![]));
+}
+
+#[test]
+fn repeat_and_range_refuse_absurd_sizes() {
+    let error = rill::run_source("\"x\".repeat(2000000000)", vec![]).expect_err("repeat cap");
+    assert!(error.to_string().contains("repeat would produce"), "{error}");
+    let error = rill::run_source("0..100000000", vec![]).expect_err("range cap");
+    assert!(error.to_string().contains("would produce more than"), "{error}");
+}

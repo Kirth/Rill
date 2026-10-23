@@ -14,6 +14,29 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
+/// Stack reserved for the evaluator thread (see `lib::run_compiled`).  Debug
+/// builds use far larger frames, so they get twice the reservation.
+pub const EVAL_STACK_SIZE: usize = if cfg!(debug_assertions) { 2 << 30 } else { 1 << 30 };
+/// Stack reserved for each parallel worker thread.
+const WORKER_STACK_SIZE: usize = 256 << 20;
+/// Default limit on nested Rill function calls.
+const DEFAULT_MAX_CALL_DEPTH: usize = 10_000;
+/// Largest list a range expression may produce.
+const MAX_RANGE_LEN: i64 = 32 << 20;
+/// Largest string `repeat` may produce, in bytes.
+const MAX_REPEAT_BYTES: usize = 1 << 30;
+
+fn max_call_depth() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("RILL_MAX_CALL_DEPTH")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_MAX_CALL_DEPTH)
+    })
+}
+
 #[derive(Clone)]
 pub struct ParallelExecutor {
     pool: Arc<rayon::ThreadPool>,
@@ -23,6 +46,7 @@ impl ParallelExecutor {
     pub fn new(parallelism: NonZeroUsize) -> Result<Self, RillError> {
         rayon::ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
+            .stack_size(WORKER_STACK_SIZE)
             .thread_name(|index| format!("rill-worker-{index}"))
             .build()
             .map(|pool| Self { pool: Arc::new(pool) })
@@ -2442,6 +2466,13 @@ impl Evaluator {
             "repeat" => {
                 let s = self.eval_expr(&args[0])?.as_string_lossy();
                 let n = as_usize(&self.eval_expr(&args[1])?)?;
+                if s.len().saturating_mul(n) > MAX_REPEAT_BYTES {
+                    return Err(RillError::new(format!(
+                        "repeat would produce more than {} bytes",
+                        MAX_REPEAT_BYTES
+                    ))
+                    .into());
+                }
                 Ok(Value::Str(s.repeat(n)))
             }
             "index_of" => {
@@ -2489,6 +2520,11 @@ impl Evaluator {
                 let Value::List(items) = list else {
                     return Err(RillError::new("slice needs a List").into());
                 };
+                if start > end {
+                    return Err(
+                        RillError::new(format!("slice start {start} is after end {end}")).into()
+                    );
+                }
                 let len = items.len();
                 let start = start.min(len);
                 let end = end.min(len);
@@ -3061,6 +3097,13 @@ impl Evaluator {
         function: &Function,
         args: Vec<Value>,
     ) -> Result<Value, EvalError> {
+        if self.function_depth >= max_call_depth() {
+            return Err(RillError::new(format!(
+                "call depth limit of {} exceeded; set RILL_MAX_CALL_DEPTH to raise it",
+                max_call_depth()
+            ))
+            .into());
+        }
         self.function_depth += 1;
         self.env.push();
         for (param, value) in function.params.iter().zip(args) {
@@ -3153,7 +3196,15 @@ impl Evaluator {
                 })
             }
             BinaryOp::Range => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Value::List((*a..*b).map(Value::Int).collect()),
+                (Value::Int(a), Value::Int(b)) => {
+                    if b.saturating_sub(*a) > MAX_RANGE_LEN {
+                        return Err(RillError::new(format!(
+                            "range {a}..{b} would produce more than {MAX_RANGE_LEN} elements"
+                        ))
+                        .into());
+                    }
+                    Value::List((*a..*b).map(Value::Int).collect())
+                }
                 _ => {
                     return Err(RillError::new(format!(
                         "range requires Int..Int, got {}..{}",

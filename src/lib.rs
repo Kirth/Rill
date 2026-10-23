@@ -410,6 +410,35 @@ pub fn run_compiled_with_environment(
     input: Option<String>,
     environment: BTreeMap<String, String>,
 ) -> Result<types::Value, RillError> {
+    // The tree-walking evaluator recurses once per nested Rill call, so deep
+    // (but legitimate) recursion needs far more stack than the main thread
+    // offers.  The reservation is virtual; pages are only touched when used.
+    // Smaller reservations are tried when the platform refuses the large one.
+    std::thread::scope(|scope| {
+        for stack_size in [eval::EVAL_STACK_SIZE, 256 << 20, 64 << 20] {
+            let (args, input, environment) = (args.clone(), input.clone(), environment.clone());
+            let job = move || execute_program(program, args, input, environment);
+            let spawned = std::thread::Builder::new()
+                .name("rill-main".to_string())
+                .stack_size(stack_size)
+                .spawn_scoped(scope, job);
+            if let Ok(handle) = spawned {
+                return match handle.join() {
+                    Ok(result) => result,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                };
+            }
+        }
+        Err(RillError::new("failed to start the evaluator thread"))
+    })
+}
+
+fn execute_program(
+    program: &CompiledProgram,
+    args: Vec<String>,
+    input: Option<String>,
+    environment: BTreeMap<String, String>,
+) -> Result<types::Value, RillError> {
     let mut evaluator = eval::Evaluator::with_environment(args, input, environment);
     for module in &program.modules {
         evaluator
