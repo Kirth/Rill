@@ -304,7 +304,7 @@ pub struct Evaluator {
     /// child processes.  Evaluator-local; the host process is never mutated.
     environment: BTreeMap<String, String>,
     function_depth: usize,
-    remote_prefix: Vec<Vec<String>>,
+    remote_prefix: Vec<RemoteLayer>,
     executor: ParallelExecutor,
     cancellation: CancellationToken,
     cancellation_active: bool,
@@ -573,13 +573,14 @@ impl Evaluator {
         Ok(io)
     }
 
-    fn apply_remote_prefix(&self, argv: Vec<String>) -> Vec<String> {
+    /// Wrap a local argv in the active `on host { }` layers.
+    fn wrap_remote(&self, argv: Vec<String>, stdin_piped: bool) -> Result<Vec<String>, RillError> {
         if self.remote_prefix.is_empty() {
-            return argv;
+            return Ok(argv);
         }
-        let mut result: Vec<String> = self.remote_prefix.iter().flatten().cloned().collect();
-        result.extend(argv);
-        result
+        let needs_ssh = self.remote_prefix.iter().any(|layer| matches!(layer, RemoteLayer::Ssh(_)));
+        let control = if needs_ssh { ssh_control_options()? } else { Vec::new() };
+        Ok(wrap_remote_layers(&self.remote_prefix, argv, stdin_piped, &control))
     }
 
     /// Resolve a path template using Rill bindings first, then process env.
@@ -1004,14 +1005,16 @@ impl Evaluator {
             Stmt::On { host, body } => {
                 let host_val = self.eval_expr(host)?;
                 let prefix = match host_val {
-                    Value::Str(h) => {
-                        let mut prefix = vec!["ssh".to_string()];
-                        prefix.extend(ssh_control_options()?);
-                        prefix.push(h);
-                        prefix.push("--".to_string());
-                        prefix
+                    Value::Str(host) => {
+                        validate_remote_name("ssh host", &host)?;
+                        RemoteLayer::Ssh(host)
                     }
-                    Value::List(items) => items.into_iter().map(|v| v.as_string_lossy()).collect(),
+                    Value::List(items) => {
+                        if items.is_empty() {
+                            return Err(RillError::new("on needs a nonempty command prefix").into());
+                        }
+                        RemoteLayer::Exec(items.into_iter().map(|v| v.as_string_lossy()).collect())
+                    }
                     other => {
                         return Err(RillError::new(format!(
                             "on needs Str or List[Str], got {}",
@@ -2408,7 +2411,7 @@ impl Evaluator {
             }
             ("process", "run") => {
                 let raw = argv_from_value(self.eval_one_arg("process.run", args)?, "process.run")?;
-                let argv = self.apply_remote_prefix(raw);
+                let argv = self.wrap_remote(raw, false)?;
                 Ok(self
                     .execute_command(&argv, None, &CommandIo::default())
                     .map(Value::ProcessResult)?)
@@ -2456,12 +2459,13 @@ impl Evaluator {
             }
             "spawn" => {
                 let value = self.eval_one_arg("spawn", args)?;
-                let argv = self.apply_remote_prefix(argv_from_value(value, "spawn")?);
+                let argv = self.wrap_remote(argv_from_value(value, "spawn")?, false)?;
                 self.check_cancelled()?;
                 let handle = TokioProcessRuntime.spawn(ProcessSpec {
                     argv,
                     input: None,
                     io: self.command_io_with_environment(CommandIo::default())?,
+                    cancellation: None,
                 })?;
                 Ok(Value::ProcessHandle(handle))
             }
@@ -2470,6 +2474,12 @@ impl Evaluator {
                 let Value::ProcessHandle(handle) = value else {
                     return Err(RillError::new("await needs ProcessHandle").into());
                 };
+                // Poll so a cancelled race or parallel worker stops waiting; the
+                // process itself is only killed when its last handle is dropped.
+                while self.cancellation_active && !TokioProcessRuntime.is_finished(&handle) {
+                    self.check_cancelled()?;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
                 Ok(Value::ProcessResult(TokioProcessRuntime.await_process(handle)?))
             }
             "parallel" => {
@@ -2481,16 +2491,20 @@ impl Evaluator {
                     .into_iter()
                     .map(|command| {
                         Ok(ProcessSpec {
-                            argv: self.apply_remote_prefix(argv_from_value(command, "parallel")?),
+                            argv: self.wrap_remote(argv_from_value(command, "parallel")?, false)?,
                             input: None,
                             io: self.command_io_with_environment(CommandIo::default())?,
+                            cancellation: self
+                                .cancellation_active
+                                .then(|| self.cancellation.child_token()),
                         })
                     })
                     .collect::<Result<Vec<_>, EvalError>>()?;
                 self.check_cancelled()?;
+                let limit = self.executor.parallelism().max(8);
                 Ok(Value::List(
                     TokioProcessRuntime
-                        .parallel(specs)?
+                        .parallel(specs, limit)?
                         .into_iter()
                         .map(Value::ProcessResult)
                         .collect(),
@@ -2868,13 +2882,14 @@ impl Evaluator {
             Builtin::Path | Builtin::File => Ok(Value::Path(self.path_from_expr(&args[0])?)),
             Builtin::Shell => {
                 let script = self.eval_expr(&args[0])?.as_string_lossy();
-                let argv = self.apply_remote_prefix(vec!["sh".into(), "-c".into(), script]);
+                let argv = self.wrap_remote(vec!["sh".into(), "-c".into(), script], false)?;
                 Ok(self
                     .execute_command(&argv, None, &CommandIo::default())
                     .map(Value::ProcessResult)?)
             }
             Builtin::Docker => {
                 let container = self.eval_expr(&args[0])?.as_string_lossy();
+                validate_remote_name("container name", &container)?;
                 Ok(Value::List(vec![
                     Value::Str("sudo".into()),
                     Value::Str("docker".into()),
@@ -3547,8 +3562,9 @@ impl Evaluator {
     fn eval_pipeline_commands(&mut self, commands: Vec<&CommandExpr>) -> Result<Value, EvalError> {
         let mut argv = Vec::with_capacity(commands.len());
         let mut io_configs = Vec::with_capacity(commands.len());
-        for command in &commands {
-            argv.push(self.command_argv(command)?);
+        for (index, command) in commands.iter().enumerate() {
+            let local = self.command_argv(command)?;
+            argv.push(self.wrap_remote(local, index > 0)?);
             io_configs.push(self.command_io(command)?);
         }
         let result = self.execute_pipeline(&argv, &io_configs)?;
@@ -3561,6 +3577,7 @@ impl Evaluator {
         input: Option<Vec<u8>>,
     ) -> Result<Value, EvalError> {
         let argv = self.command_argv(command)?;
+        let argv = self.wrap_remote(argv, input.is_some())?;
         let io = self.command_io(command)?;
         if command.check_exit {
             // For run!, convert both spawn failures and non-zero exits into propagated Err.
@@ -3572,10 +3589,12 @@ impl Evaluator {
                 }
             };
             if result.status != 0 {
-                let msg = if result.err.is_empty() {
-                    format!("command exited with status {}", result.status)
-                } else {
+                let msg = if !result.err.is_empty() {
                     result.stderr_text_lossy().trim().to_string()
+                } else if let Some(signal) = result.signal {
+                    format!("command killed by signal {signal}")
+                } else {
+                    format!("command exited with status {}", result.status)
                 };
                 return self.check_exit_error(msg, Some(result.status), command.span);
             }
@@ -3628,7 +3647,7 @@ impl Evaluator {
                 CommandArg::Expr(expr) => out.push(self.eval_expr(expr)?.as_string_lossy()),
             }
         }
-        Ok(self.apply_remote_prefix(out))
+        Ok(out)
     }
 
     fn command_var(&self, name: &str) -> Result<Value, EvalError> {
@@ -3707,7 +3726,13 @@ impl Evaluator {
                 "stdin" => match self.config_stream(expr, "stdin")? {
                     ConfigStream::File(path) => io.stdin_file = Some(path),
                     ConfigStream::Mode(StreamMode::Null) => io.stdin_null = true,
-                    ConfigStream::Mode(StreamMode::Inherit | StreamMode::Capture) => {}
+                    ConfigStream::Mode(StreamMode::Inherit) => io.stdin_inherit = true,
+                    ConfigStream::Mode(StreamMode::Capture) => {
+                        return Err(RillError::new(
+                            "stdin: capture is not supported; a command reads stdin from a pipe, a file, or the terminal",
+                        )
+                        .into())
+                    }
                 },
                 "stdout" => match self.config_stream(expr, "stdout")? {
                     ConfigStream::File(path) => io.stdout_file = Some(path),
@@ -3901,6 +3926,9 @@ fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
         }
         Value::ProcessResult(result) => match name {
             "status" => Ok(Value::Int(result.status as i64)),
+            "signal" => {
+                Ok(Value::Option(result.signal.map(|signal| Box::new(Value::Int(signal as i64)))))
+            }
             "out" => Ok(Value::Str(result.stdout_text_lossy().into_owned())),
             "err" => Ok(Value::Str(result.stderr_text_lossy().into_owned())),
             "ok" => Ok(Value::Bool(result.ok())),
@@ -4562,6 +4590,65 @@ fn literal_value(literal: &Literal) -> Value {
     }
 }
 
+/// One `on ... { }` layer wrapping commands run inside it.
+#[derive(Debug, Clone, PartialEq)]
+enum RemoteLayer {
+    /// `on "host"`: run through ssh with a persistent control connection.
+    Ssh(String),
+    /// `on ["cmd", ...]` (including `docker(name)`): prefix the argv.
+    Exec(Vec<String>),
+}
+
+/// Build the full local argv for `argv` inside the given layers, innermost
+/// first.  Remote words are shell-quoted so each arrives as one argument,
+/// only the outermost ssh carries the local control-socket options, and
+/// `docker exec` gets `-i` when stdin is piped.
+fn wrap_remote_layers(
+    layers: &[RemoteLayer],
+    mut argv: Vec<String>,
+    stdin_piped: bool,
+    control: &[String],
+) -> Vec<String> {
+    let outermost_ssh = layers.iter().position(|layer| matches!(layer, RemoteLayer::Ssh(_)));
+    for (index, layer) in layers.iter().enumerate().rev() {
+        argv = match layer {
+            RemoteLayer::Exec(prefix) => {
+                let mut wrapped = prefix.clone();
+                let docker_exec = wrapped.windows(2).any(|w| w[0] == "docker" && w[1] == "exec");
+                if stdin_piped && docker_exec && !wrapped.iter().any(|word| word == "-i") {
+                    let at = wrapped.iter().position(|word| word == "exec").map_or(0, |i| i + 1);
+                    wrapped.insert(at, "-i".to_string());
+                }
+                wrapped.extend(argv);
+                wrapped
+            }
+            RemoteLayer::Ssh(host) => {
+                let mut wrapped = vec!["ssh".to_string()];
+                if Some(index) == outermost_ssh {
+                    wrapped.extend(control.iter().cloned());
+                }
+                wrapped.push(host.clone());
+                wrapped.push("--".to_string());
+                wrapped.extend(crate::runtime::shell_quote_argv(&argv));
+                wrapped
+            }
+        };
+    }
+    argv
+}
+
+/// Reject host and container names that ssh/docker would read as options.
+fn validate_remote_name(what: &str, name: &str) -> Result<(), RillError> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.chars().any(|c| c.is_whitespace() || c == ';')
+    {
+        return Err(RillError::new(format!("invalid {what} '{name}'"))
+            .with_help("names must be nonempty and must not start with '-' or contain spaces"));
+    }
+    Ok(())
+}
+
 /// Normalise slice bounds: negative values count from the end and
 /// out-of-range values are clamped.  `to` may end up before `from` for a
 /// reversed range; callers decide whether that is empty or an error.
@@ -4660,4 +4747,43 @@ fn argv_from_value(value: Value, operation: &str) -> Result<Vec<String>, RillErr
             ))),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn layers_nest_with_quoting_and_control_on_outermost_ssh() {
+        let control = vec!["-o".to_string(), "ControlMaster=auto".to_string()];
+        let layers = vec![
+            RemoteLayer::Ssh("outer".into()),
+            RemoteLayer::Exec(vec!["sudo".into(), "docker".into(), "exec".into(), "c".into()]),
+            RemoteLayer::Ssh("inner".into()),
+        ];
+        let argv = vec!["printf".to_string(), "a b".to_string()];
+        let wrapped = wrap_remote_layers(&layers, argv, true, &control);
+        assert_eq!(
+            wrapped,
+            vec![
+                "ssh",
+                "-o",
+                "ControlMaster=auto",
+                "outer",
+                "--",
+                "sudo",
+                "docker",
+                "exec",
+                "-i",
+                "c",
+                "ssh",
+                "inner",
+                "--",
+                "printf",
+                "''\\''a b'\\'''"
+            ]
+        );
+        let plain = wrap_remote_layers(&layers[1..2], vec!["ls".into()], false, &control);
+        assert_eq!(plain, vec!["sudo", "docker", "exec", "c", "ls"]);
+    }
 }

@@ -1456,3 +1456,33 @@ fn transitive_module_symbols_are_not_visible() {
     assert_eq!(run_in(&scratch, "main.ril", "use ./outer.ril\nshallow()"), Value::Int(2));
     assert!(compile_in(&scratch, "bad.ril", "use ./outer.ril\ndeep()").is_err());
 }
+
+#[test]
+fn on_rejects_hosts_and_containers_that_look_like_options() {
+    for source in [
+        "on \"-oProxyCommand=x\" { run true }",
+        "on \"\" { run true }",
+        "on \"a b\" { run true }",
+        "docker(\"-it\")",
+        "on [] { run true }",
+    ] {
+        let error = rill::run_source(source, vec![]).expect_err(source);
+        assert!(
+            error.to_string().contains("invalid") || error.to_string().contains("nonempty"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exec_prefix_layers_wrap_commands() {
+    let value = run(r#"
+on ["printf", "%s|"] {
+    on ["x"] {
+        let r = run y "a b"
+        r.out
+    }
+}
+"#);
+    assert_eq!(value, Value::Str("x|y|a b|".into()));
+}

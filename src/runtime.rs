@@ -17,6 +17,25 @@ pub struct ProcessSpec {
     pub argv: Vec<String>,
     pub input: Option<Vec<u8>>,
     pub io: CommandIo,
+    /// Cancelling this token (or dropping the handle) terminates the process.
+    pub cancellation: Option<CancellationToken>,
+}
+
+/// How long a process group gets to exit after SIGTERM before SIGKILL.
+const TERMINATION_GRACE: Duration = Duration::from_secs(1);
+
+/// Quote a word for a POSIX shell so it arrives as exactly one argument.
+pub fn shell_quote(word: &str) -> String {
+    let bare = !word.is_empty()
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || "_./:=@%+,-".contains(c));
+    if bare {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+pub fn shell_quote_argv(argv: &[String]) -> Vec<String> {
+    argv.iter().map(|word| shell_quote(word)).collect()
 }
 
 static SSH_RUNTIME_DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -106,7 +125,14 @@ impl PartialEq for ProcessHandle {
 pub trait ProcessRuntime {
     fn spawn(&self, spec: ProcessSpec) -> Result<ProcessHandle, RillError>;
     fn await_process(&self, handle: ProcessHandle) -> Result<ProcessResult, RillError>;
-    fn parallel(&self, specs: Vec<ProcessSpec>) -> Result<Vec<ProcessResult>, RillError>;
+    /// Whether the process behind `handle` has finished (or was already awaited).
+    fn is_finished(&self, handle: &ProcessHandle) -> bool;
+    /// Run every spec, at most `limit` at a time, returning results in order.
+    fn parallel(
+        &self,
+        specs: Vec<ProcessSpec>,
+        limit: usize,
+    ) -> Result<Vec<ProcessResult>, RillError>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -115,7 +141,8 @@ pub struct TokioProcessRuntime;
 impl ProcessRuntime for TokioProcessRuntime {
     fn spawn(&self, spec: ProcessSpec) -> Result<ProcessHandle, RillError> {
         validate_argv(&spec.argv)?;
-        let cancellation = CancellationToken::new();
+        let cancellation =
+            spec.cancellation.as_ref().map(CancellationToken::child_token).unwrap_or_default();
         let task_cancellation = cancellation.clone();
         let result = thread::Builder::new()
             .name("rill-process".to_string())
@@ -138,6 +165,15 @@ impl ProcessRuntime for TokioProcessRuntime {
         })
     }
 
+    fn is_finished(&self, handle: &ProcessHandle) -> bool {
+        handle
+            .state
+            .result
+            .lock()
+            .map(|task| task.as_ref().map_or(true, |task| task.is_finished()))
+            .unwrap_or(true)
+    }
+
     fn await_process(&self, handle: ProcessHandle) -> Result<ProcessResult, RillError> {
         let join = handle
             .state
@@ -155,10 +191,23 @@ impl ProcessRuntime for TokioProcessRuntime {
             .map_err(|_| RillError::new("process task panicked").with_kind(ErrorKind::Runtime))?
     }
 
-    fn parallel(&self, specs: Vec<ProcessSpec>) -> Result<Vec<ProcessResult>, RillError> {
-        let handles =
-            specs.into_iter().map(|spec| self.spawn(spec)).collect::<Result<Vec<_>, _>>()?;
-        handles.into_iter().map(|handle| self.await_process(handle)).collect()
+    fn parallel(
+        &self,
+        specs: Vec<ProcessSpec>,
+        limit: usize,
+    ) -> Result<Vec<ProcessResult>, RillError> {
+        let mut results = Vec::with_capacity(specs.len());
+        for batch in specs.chunks(limit.max(1)) {
+            let handles = batch
+                .iter()
+                .cloned()
+                .map(|spec| self.spawn(spec))
+                .collect::<Result<Vec<_>, _>>()?;
+            for handle in handles {
+                results.push(self.await_process(handle)?);
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -210,11 +259,20 @@ async fn run_command_async(
         result = child.wait() => result.map_err(process_error),
         () = cancellation.cancelled() => {
             was_cancelled = true;
+            // SIGTERM first so the process can clean up, SIGKILL if it lingers.
             if let Some(id) = child.id() {
-                terminate_process_group(id);
+                signal_process_group(id, libc::SIGTERM);
             }
-            let _ = child.kill().await;
-            child.wait().await.map_err(process_error)
+            match tokio::time::timeout(TERMINATION_GRACE, child.wait()).await {
+                Ok(status) => status.map_err(process_error),
+                Err(_) => {
+                    if let Some(id) = child.id() {
+                        signal_process_group(id, libc::SIGKILL);
+                    }
+                    let _ = child.kill().await;
+                    child.wait().await.map_err(process_error)
+                }
+            }
         }
     };
     if let Some(writer) = writer {
@@ -260,6 +318,8 @@ pub struct CommandIo {
     pub env: BTreeMap<String, String>,
     pub stdin_file: Option<PathBuf>,
     pub stdin_null: bool,
+    /// `stdin: inherit` was requested explicitly (conflicts with piped input).
+    pub stdin_inherit: bool,
     pub stdout_file: Option<PathBuf>,
     pub stderr_file: Option<PathBuf>,
     pub all_file: Option<PathBuf>,
@@ -429,7 +489,15 @@ fn read_stream(stream: Option<impl Read>) -> Result<Vec<u8>, RillError> {
 }
 
 fn process_result(status: std::process::ExitStatus, out: Vec<u8>, err: Vec<u8>) -> ProcessResult {
-    ProcessResult { status: status.code().unwrap_or(128), out, err }
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let status = status.code().or(signal.map(|signal| 128 + signal)).unwrap_or(128);
+    ProcessResult { status, signal, out, err }
 }
 
 fn check_write(result: io::Result<()>) -> Result<(), RillError> {
@@ -452,8 +520,9 @@ fn cancelled_error() -> RillError {
 }
 
 fn validate_io(io: &CommandIo, piped: bool) -> Result<(), RillError> {
-    if (piped && (io.stdin_file.is_some() || io.stdin_null))
+    if (piped && (io.stdin_file.is_some() || io.stdin_null || io.stdin_inherit))
         || (io.stdin_null && io.stdin_file.is_some())
+        || (io.stdin_inherit && (io.stdin_null || io.stdin_file.is_some()))
     {
         return Err(io_error("conflicting stdin settings"));
     }
@@ -536,21 +605,37 @@ fn prepare_command(
     Ok(command)
 }
 
+/// Stop a child and its process group: SIGTERM, a short grace period, then
+/// SIGKILL for anything still running.
 fn terminate_child(child: &mut std::process::Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }
-    terminate_process_group(child.id());
+    signal_process_group(child.id(), libc::SIGTERM);
+    let deadline = std::time::Instant::now() + TERMINATION_GRACE;
+    while std::time::Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            // The direct child is gone; make sure the rest of its group is too.
+            signal_process_group(child.id(), libc::SIGKILL);
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    signal_process_group(child.id(), libc::SIGKILL);
     let _ = child.kill();
 }
 
-fn terminate_process_group(id: u32) {
+/// Send `signal` to the process group led by `id` (a no-op when the child
+/// was not started in its own group).
+fn signal_process_group(id: u32, signal: libc::c_int) {
     #[cfg(unix)]
     if let Ok(group) = i32::try_from(id) {
         unsafe {
-            libc::kill(-group, libc::SIGKILL);
+            libc::kill(-group, signal);
         }
     }
+    #[cfg(not(unix))]
+    let _ = (id, signal);
 }
 
 pub fn spawn_tail(hosts: Vec<String>, path: String) -> Result<StreamHandle, RillError> {
@@ -605,6 +690,28 @@ pub fn spawn_tail(hosts: Vec<String>, path: String) -> Result<StreamHandle, Rill
 #[cfg(test)]
 mod tests {
     use super::ssh_control_options;
+
+    #[test]
+    fn shell_quoting_keeps_each_word_intact() {
+        let words: Vec<String> =
+            ["plain", "two words", "it's", "", "$HOME", "a;b", "ünï", "/usr/bin:x"]
+                .iter()
+                .map(|w| w.to_string())
+                .collect();
+        assert_eq!(
+            super::shell_quote_argv(&words),
+            vec![
+                "plain",
+                "'two words'",
+                "'it'\\''s'",
+                "''",
+                "'$HOME'",
+                "'a;b'",
+                "'ünï'",
+                "/usr/bin:x"
+            ]
+        );
+    }
 
     #[test]
     fn ssh_control_path_uses_private_runtime_directory_and_hash_token() {

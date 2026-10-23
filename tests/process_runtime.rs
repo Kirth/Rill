@@ -22,7 +22,12 @@ fn process_stress_worker() {
     assert_eq!(result.out, bytes);
     assert_eq!(result.err.len(), 1048576);
     let handle = TokioProcessRuntime
-        .spawn(ProcessSpec { argv, input: Some(bytes.clone()), io: CommandIo::default() })
+        .spawn(ProcessSpec {
+            argv,
+            input: Some(bytes.clone()),
+            io: CommandIo::default(),
+            cancellation: None,
+        })
         .unwrap();
     let result = TokioProcessRuntime.await_process(handle).unwrap();
     assert_eq!(result.out, bytes);
@@ -123,6 +128,7 @@ fn dropping_last_process_handle_cancels_and_reaps_child() {
             argv: vec!["sh".into(), "-c".into(), script],
             input: None,
             io: CommandIo::default(),
+            cancellation: None,
         })
         .unwrap();
     let start = std::time::Instant::now();
@@ -235,4 +241,89 @@ fn programmatic_command_config_can_write_streams() {
     assert_eq!(result.out, b"");
     assert_eq!(fs::read_to_string(&out).expect("read config output"), "configured");
     let _ = fs::remove_file(out);
+}
+
+#[test]
+fn signal_killed_process_reports_signal_and_128_plus() {
+    let value = run(r#"
+let r = run sh -c "kill -TERM $$"
+[r.status, r.signal, r.ok]
+"#);
+    assert_eq!(
+        value,
+        Value::List(vec![
+            Value::Int(143),
+            Value::Option(Some(Box::new(Value::Int(15)))),
+            Value::Bool(false)
+        ])
+    );
+    assert_eq!(run("let t = run true\nt.signal"), Value::Option(None));
+}
+
+#[test]
+fn cancellation_sends_sigterm_before_sigkill() {
+    let marker = temp_path("sigterm-marker");
+    let source = format!(
+        r#"
+let winner = race for job in ["slow", "fast"] {{
+    if job == "slow" {{
+        run sh -c "trap 'echo trapped > {marker}; exit 0' TERM; sleep 10 & wait $!"
+        emit "slow"
+    }}
+    if job == "fast" {{
+        50ms.sleep()
+        emit "fast"
+    }}
+}}
+winner
+"#,
+        marker = marker.display()
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(run(&source), Value::Str("fast".into()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    // The slow job trapped SIGTERM and wrote its marker before exiting.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "SIGTERM should reach the losing command");
+    let _ = fs::remove_file(marker);
+}
+
+#[test]
+fn parallel_builtin_keeps_order_beyond_the_concurrency_limit() {
+    let value = run(r#"
+let commands = for i in 0..40 { emit ["printf", Str(i)] }
+commands.parallel().map(.out).join(",")
+"#);
+    let expected = (0..40).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    assert_eq!(value, Value::Str(expected));
+}
+
+#[test]
+fn race_cancellation_interrupts_a_spawned_process_await() {
+    let started = std::time::Instant::now();
+    let value = run(r#"
+race for job in ["slow", "fast"] {
+    if job == "slow" {
+        let handle = ["sleep", "10"].spawn()
+        handle.await()
+        emit "slow"
+    }
+    if job == "fast" {
+        50ms.sleep()
+        emit "fast"
+    }
+}
+"#);
+    assert_eq!(value, Value::Str("fast".into()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+}
+
+#[test]
+fn stdin_config_modes_are_validated() {
+    assert!(rill::run_source(r#"run cat { stdin: capture }"#, vec![]).is_err());
+    assert!(rill::run_source(r#""x" | run cat { stdin: inherit }"#, vec![]).is_err());
+    assert_eq!(run(r#"(run printf hi { stdin: inherit }).out"#), Value::Str("hi".into()));
 }

@@ -29,7 +29,10 @@ pub struct ErrorValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessResult {
+    /// Exit code, or 128 + signal number when the process was killed by a signal.
     pub status: i32,
+    /// The signal that killed the process, if any.
+    pub signal: Option<i32>,
     pub out: Vec<u8>,
     pub err: Vec<u8>,
 }

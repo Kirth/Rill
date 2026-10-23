@@ -1502,12 +1502,13 @@ impl Checker {
         match base_ty {
             Type::ProcessResult => match name {
                 "status" => Ok(Type::Int),
+                "signal" => Ok(Type::Option(Box::new(Type::Int))),
                 "out" | "err" => Ok(Type::Str),
                 "ok" => Ok(Type::Bool),
                 _ => Err(RillError::new(format!("ProcessResult has no field '{name}'"))
                     .with_optional_help(crate::suggest::did_you_mean(
                         name,
-                        ["status", "out", "err", "ok"],
+                        ["status", "signal", "out", "err", "ok"],
                     ))),
             },
             Type::Map(value) => Ok(*value),
