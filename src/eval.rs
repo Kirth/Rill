@@ -573,6 +573,12 @@ impl Evaluator {
         copy
     }
 
+    /// Bind `name` in the current (global, for a host) scope to a value the
+    /// host made, such as a database handle: `ev.define("db", Value::Db(db))`.
+    pub fn define(&mut self, name: impl Into<String>, value: Value) {
+        self.env.bind_immutable(name.into(), value);
+    }
+
     /// The current value of a name in scope.
     pub fn binding(&self, name: &str) -> Option<Value> {
         self.env.get(name)
@@ -2156,6 +2162,10 @@ impl Evaluator {
             .ok_or_else(|| RillError::new(format!("unknown method .{name}()")))?;
         let kind = method_kind(&receiver);
         method.validate(kind, args.len()).map_err(RillError::new)?;
+        #[cfg(feature = "postgres")]
+        if let Value::Db(db) = &receiver {
+            return self.eval_sql_method(db.clone(), name, args);
+        }
         if let Target::Structural(operation) = method.target {
             return self.eval_structural_method(operation, receiver, args);
         }
@@ -2288,6 +2298,11 @@ impl Evaluator {
                     ))
                 }
                 Target::Structural(_) => unreachable!("structural methods dispatch before binding"),
+                Target::Sql => Err(RillError::new(format!(
+                    ".{name}() needs a Db from sql.connect(..), got {}",
+                    receiver.type_name()
+                ))
+                .into()),
             }
         })();
         self.env.pop();
@@ -3635,6 +3650,10 @@ impl Evaluator {
         function: &'static crate::methods::NamespaceFunction,
         args: &[Expr],
     ) -> Result<Value, EvalError> {
+        if function.module == "sql" && function.name == "statement" {
+            // Before evaluation: the interpolations become parameters.
+            return Ok(self.sql_statement("sql.statement", args)?.to_value());
+        }
         let (positional, named) = self.eval_call_args(args)?;
         let kinds: Vec<crate::methods::Kind> = positional.iter().map(method_kind).collect();
         let named_kinds: Vec<(&str, crate::methods::Kind)> =
@@ -3643,6 +3662,14 @@ impl Evaluator {
         self.check_cancelled()?;
         match function.module {
             "ostack" => self.eval_ostack(function.name, positional, named),
+            "sql" => match function.name {
+                "ident" => Ok(crate::sql::fragment(crate::sql::quote_ident(
+                    &positional[0].as_string_lossy(),
+                ))),
+                "raw" => Ok(crate::sql::fragment(positional[0].as_string_lossy())),
+                "connect" => self.eval_sql_connect(positional, named),
+                other => Err(RillError::new(format!("sql has no function '{other}'")).into()),
+            },
             "time" => match function.name {
                 "now" => Ok(Value::Time(chrono::Utc::now())),
                 "from_unix" => match positional.first() {
@@ -3834,6 +3861,224 @@ impl Evaluator {
         ))
         .with_help("rebuild with `cargo build --features openstack`")
         .into())
+    }
+
+    /// The SQL text and parameters of `db.query(q, params?)`.  A literal
+    /// `q` with interpolations becomes `$n` placeholders bound to the
+    /// interpolated values (fragments from `sql.ident` / `sql.raw` are
+    /// spliced); any other `q` is run as written with `params`.
+    fn sql_statement(
+        &mut self,
+        what: &str,
+        args: &[Expr],
+    ) -> Result<crate::sql::Statement, EvalError> {
+        let (query, params) = match args {
+            [query] => (query, None),
+            [query, params] => (query, Some(params)),
+            _ => {
+                return Err(RillError::new(format!(
+                    "{what} needs a query and optional params, got {} args",
+                    args.len()
+                ))
+                .into())
+            }
+        };
+        let params = match params {
+            None => None,
+            Some(params) => match self.eval_expr(params)? {
+                Value::List(items) => Some(items.to_vec()),
+                other => {
+                    return Err(RillError::new(format!(
+                        "{what} params must be a List, got {}",
+                        other.type_name()
+                    ))
+                    .into())
+                }
+            },
+        };
+        if let Expr::Interpolated(parts) = query.unspanned() {
+            let mut builder = crate::sql::StatementBuilder::new();
+            self.sql_parts(&mut builder, parts)?;
+            if params.is_some() && builder.has_params() {
+                return Err(RillError::new(format!(
+                    "{what}: the query interpolates values and also has a params list"
+                ))
+                .with_help("use one or the other")
+                .into());
+            }
+            let mut statement = builder.finish()?;
+            if let Some(params) = params {
+                statement.params = params;
+            }
+            return Ok(statement);
+        }
+        match self.eval_expr(query)? {
+            Value::Str(text) => {
+                Ok(crate::sql::Statement { text, params: params.unwrap_or_default() })
+            }
+            other => Err(RillError::new(format!(
+                "{what} needs the query as a Str, got {}",
+                other.type_name()
+            ))
+            .into()),
+        }
+    }
+
+    fn sql_parts(
+        &mut self,
+        builder: &mut crate::sql::StatementBuilder,
+        parts: &[StrPart],
+    ) -> Result<(), EvalError> {
+        for part in parts {
+            match part {
+                StrPart::Text(text) => builder.text(text),
+                StrPart::Expr(expr) => {
+                    let value = self.eval_expr(expr)?;
+                    builder.value(value)?;
+                }
+                StrPart::Var(name) => {
+                    let value = self.lookup_environment_value(name).ok_or_else(|| {
+                        RillError::new(format!("unknown variable '${name}'"))
+                            .with_help("`$name` looks up a Rill binding, then the environment")
+                    })?;
+                    builder.value(value)?;
+                }
+                StrPart::VarDefault(name, default) => {
+                    let value = self
+                        .lookup_environment_value(name)
+                        .filter(|value| !interpolated_text(value).is_empty());
+                    let value = match value {
+                        Some(value) => value,
+                        None => Value::Str(self.eval_parts(default)?),
+                    };
+                    builder.value(value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "postgres")]
+    fn eval_sql_connect(
+        &mut self,
+        positional: Vec<Value>,
+        named: Vec<(String, Value)>,
+    ) -> Result<Value, EvalError> {
+        let url = positional.first().map(Value::as_string_lossy);
+        if let Some((scheme, _)) = url.as_deref().and_then(|url| url.split_once("://")) {
+            if !matches!(scheme, "postgres" | "postgresql") {
+                return Err(RillError::new(format!("sql: no driver for {scheme}:// URLs"))
+                    .with_help("sql.connect supports postgres:// (and postgresql://)")
+                    .into());
+            }
+        }
+        let mut options = crate::sql::ConnectOptions::default();
+        for (name, value) in named {
+            match (name.as_str(), value) {
+                ("password", value) => options.password = Some(value.as_string_lossy()),
+                ("tls", value) => options.tls = Some(value.as_string_lossy().parse()?),
+                ("app", value) => options.app = Some(value.as_string_lossy()),
+                ("timeout", Value::Duration(duration)) => options.timeout = Some(duration),
+                ("timeout", Value::Int(secs)) if secs > 0 => {
+                    options.timeout = Some(std::time::Duration::from_secs(secs as u64))
+                }
+                (name, value) => {
+                    return Err(RillError::new(format!(
+                        "sql.connect: invalid {name}= {}",
+                        value.type_name()
+                    ))
+                    .with_help("timeout= takes a Duration such as 30s")
+                    .into())
+                }
+            }
+        }
+        let cancellation = self.cancellation.clone();
+        let lookup = |key: &str| self.lookup_environment_value(key).map(|v| v.as_string_lossy());
+        crate::sql::Db::connect_with_env(url.as_deref(), &options, &lookup, &cancellation)
+            .map(Value::Db)
+            .map_err(sql_failure)
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    fn eval_sql_connect(
+        &mut self,
+        _positional: Vec<Value>,
+        _named: Vec<(String, Value)>,
+    ) -> Result<Value, EvalError> {
+        Err(RillError::new(
+            "sql.connect needs a database driver, which this rill was built without",
+        )
+        .with_help("rebuild with `cargo build --features postgres`")
+        .into())
+    }
+
+    /// `.query()`, `.one()`, `.scalar()`, `.exec()`, `.batch()`,
+    /// `.transaction()` and `.close()` on a `Db`.
+    #[cfg(feature = "postgres")]
+    fn eval_sql_method(
+        &mut self,
+        db: crate::sql::Db,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Value, EvalError> {
+        let cancellation = self.cancellation.clone();
+        match name {
+            "query" | "one" | "scalar" | "exec" => {
+                let statement = self.sql_statement(&format!(".{name}()"), args)?;
+                self.check_cancelled()?;
+                let (text, params) = (&statement.text, &statement.params);
+                if name == "exec" {
+                    let count = db.exec(text, params, &cancellation).map_err(sql_failure)?;
+                    return Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)));
+                }
+                let rows = db.query(text, params, &cancellation).map_err(sql_failure)?;
+                let mut rows = rows.into_iter();
+                Ok(match name {
+                    "query" => Value::list(rows.collect()),
+                    "one" => Value::Option(rows.next().map(Box::new)),
+                    _ => match rows.next() {
+                        Some(Value::Map(row)) => {
+                            row.values().next().cloned().unwrap_or(Value::Null)
+                        }
+                        _ => Value::Null,
+                    },
+                })
+            }
+            "batch" => match self.eval_expr(&args[0])? {
+                Value::Str(sql) => {
+                    db.batch(&sql, &cancellation).map_err(sql_failure)?;
+                    Ok(Value::Null)
+                }
+                other => Err(RillError::new(format!(
+                    ".batch() needs the SQL as a Str, got {}",
+                    other.type_name()
+                ))
+                .into()),
+            },
+            "transaction" => {
+                let callback = self.eval_expr(&args[0])?;
+                if !matches!(callback, Value::Function(_)) {
+                    return Err(RillError::new(format!(
+                        ".transaction() needs a function |tx| ..., got {}",
+                        callback.type_name()
+                    ))
+                    .into());
+                }
+                db.begin(&cancellation).map_err(sql_failure)?;
+                let result = self.call_callable(callback, vec![Value::Db(db.clone())]);
+                let commit =
+                    matches!(&result, Ok(value) if !matches!(value, Value::Result(Err(_))));
+                let finished = db.finish(commit);
+                let value = result?;
+                finished?;
+                Ok(value)
+            }
+            "close" => {
+                db.close();
+                Ok(Value::Null)
+            }
+            other => Err(RillError::new(format!("Db has no method '{other}'")).into()),
+        }
     }
 
     fn eval_flat_map(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
@@ -4766,6 +5011,14 @@ pub fn value_kind(value: &Value) -> crate::methods::Kind {
     method_kind(value)
 }
 
+#[cfg(feature = "postgres")]
+fn sql_failure(error: crate::blocking::Error) -> EvalError {
+    match error {
+        crate::blocking::Error::Cancelled => EvalError::Cancelled,
+        crate::blocking::Error::Failed(error) => error.into(),
+    }
+}
+
 fn method_kind(value: &Value) -> crate::methods::Kind {
     use crate::methods::Kind;
     match value {
@@ -4780,6 +5033,7 @@ fn method_kind(value: &Value) -> crate::methods::Kind {
         Value::Duration(_) => Kind::Duration,
         Value::Time(_) => Kind::Time,
         Value::ProcessHandle(_) => Kind::ProcessHandle,
+        Value::Db(_) => Kind::Db,
         Value::Int(_) => Kind::Int,
         Value::Bool(_) => Kind::Bool,
         Value::Function(_) => Kind::Function,

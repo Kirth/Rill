@@ -31,10 +31,23 @@ roxmltree = "0.20"
 # The `ostack.*` namespace (feature `openstack`); Kirth's OpenStack client crate.
 ostack = { path = "../../LeafCloud/FastOpenStackCLI", optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
+# The `sql.*` namespace (feature `postgres`).
+tokio-postgres = { version = "0.7", optional = true, features = ["with-chrono-0_4", "with-serde_json-1", "array-impls"] }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
 
 [features]
-default = []
+default = ["postgres"]
 openstack = ["dep:ostack", "dep:anyhow"]
+postgres = [
+    "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "dep:bytes",
+]
 
 [dev-dependencies]
 insta = { version = "1", features = ["glob"] }

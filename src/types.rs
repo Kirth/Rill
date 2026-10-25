@@ -174,6 +174,8 @@ pub enum Value {
     ProcessHandle(crate::runtime::ProcessHandle),
     Stream(StreamHandle),
     Function(Arc<FunctionValue>),
+    /// A database connection (`sql.connect(..)`).
+    Db(crate::sql::Db),
 }
 
 /// `iter.collect()` straight into a shared list, for `Value::List(..)` sites.
@@ -227,6 +229,7 @@ impl Value {
             Value::ProcessResult(v) => v.ok(),
             Value::ProcessHandle(_) | Value::Stream(_) => true,
             Value::Function(_) => true,
+            Value::Db(_) => true,
         }
     }
 
@@ -252,6 +255,7 @@ impl Value {
             Value::ProcessHandle(_) => "ProcessHandle",
             Value::Stream(_) => "Stream",
             Value::Function(_) => "Function",
+            Value::Db(_) => "Db",
         }
     }
 
@@ -279,6 +283,7 @@ impl Value {
             Value::ProcessHandle(_) => "<process handle>".to_string(),
             Value::Stream(_) => "<stream>".to_string(),
             Value::Function(_) => "<function>".to_string(),
+            Value::Db(db) => db.to_string(),
         }
     }
 }
@@ -335,6 +340,7 @@ impl fmt::Display for Value {
             Value::ProcessHandle(_) => write!(f, "<process handle>"),
             Value::Stream(_) => write!(f, "<stream>"),
             Value::Function(_) => write!(f, "<function>"),
+            Value::Db(db) => write!(f, "{db}"),
         }
     }
 }

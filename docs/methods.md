@@ -318,3 +318,105 @@ values may be any value, so `{tag: "boot", attrs: {dev: "hd"}}.to_xml()` works.
 Edit a document with nested assignment on a `var`
 (`d.children[0].text = "vm2"`); `select` returns copies, so changing its results
 does not change the document.
+
+## sql namespace
+
+Databases, through a `Db` handle. Postgres is the one driver so far; it is
+compiled in by default (the `postgres` cargo feature). A build without it
+still type-checks `sql.*`, and `sql.connect` raises an error that says so.
+
+| Function | Returns |
+|---|---|
+| `sql.connect(url?, password=, tls=, timeout=, app=)` | a `Db`. `url` is `postgres://user:pass@host:5432/db?sslmode=…` or `host=… user=…`; without it, `$DATABASE_URL`, then `PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGSSLMODE` (and a local Unix socket when no host is set). The variables are read from the script's environment, so `with env {}` applies. `tls` is `disable`, `prefer` (default), `require` (encrypt, no certificate check, as libpq) or `verify` (check against the web PKI roots; also `sslmode=verify-full`). `timeout` (a Duration) limits each statement; default `RILL_SQL_TIMEOUT_SECS` or 300s. `app` sets `application_name` (default `rill`). |
+| `sql.ident(name)` | a fragment: `name` as a quoted identifier (`"my table"`; `schema.table` quotes each part) |
+| `sql.raw(text)` | a fragment: trusted SQL spliced verbatim |
+| `sql.statement(query)` | `{text, params}`: what a query string turns into, without running it |
+
+| Method on `Db` | Returns |
+|---|---|
+| `db.query(sql, params?)` | `List[Map]`: the rows as records, columns in order (a repeated name becomes `id_2`, …) |
+| `db.one(sql, params?)` | `Option[Map]`: the first row, or `none` |
+| `db.scalar(sql, params?)` | the first column of the first row, or `null` |
+| `db.exec(sql, params?)` | `Int`: rows affected |
+| `db.batch(sql)` | runs several `;`-separated statements, without parameters (a schema file) |
+| `db.transaction(\|tx\| …)` | what the function returns. `BEGIN`, then `COMMIT` when it returns, or `ROLLBACK` when it raises an error or returns `err(..)` (the error still raises). Nested calls use savepoints. `tx` is the same connection. |
+| `db.close()` | closes the connection for every copy of the handle |
+
+**Interpolation binds.** When the query is a string literal, every `$name`,
+`${name:-default}` and `{expr}` in it becomes a `$1`, `$2`, … parameter, and
+the value goes to the server separately. It is never spliced into the text,
+so quoting and injection are not a concern:
+
+```ril
+let db = sql.connect("postgres://kirth@localhost/leaf")
+let project = "ops"
+db.query("select id, name from servers where project = $project and vcpus >= {min + 1}")
+db.query("select * from servers where id = any({ids})")       # a List binds as an array
+db.query("select * from users where name ilike {"%" + q + "%"}")
+db.query("select count(*) from {sql.ident(table)} where {sql.raw(filter)}")
+```
+
+- An interpolation inside a quoted SQL string (`'%{q}%'`), a quoted identifier
+  or a comment is an error: there it could not be a parameter. Bind the whole
+  value instead, as above.
+- A query held in a variable has already been interpolated as text. Pass its
+  values as a list instead: `db.query(q, [a, b])` with `$1`, `$2` in `q`
+  (write `r"…"` or `\$` so Rill leaves `$1` alone in strings that interpolate).
+  One query can't use both interpolations and a params list.
+- A literal `{` in SQL is written `\{` (`'\{1,2}'::int[]`), as in any Rill
+  string. Dollar-quoted bodies need `\$tag\$` or a raw string.
+- Each parameter is converted to the type the server expects for it, such as
+  `{42}` against an `int4`, `numeric` or `text` column. Where nothing gives it
+  a type (`select {x}`), the server treats it as `text`, so cast it there:
+  `select {x}::int`.
+
+Values convert as follows. Anything else is an error that names the `$n` or
+the column, and suggests a `::text` cast:
+
+| Rill | Postgres parameter |
+|---|---|
+| `Null`, `none` | `NULL` |
+| `Bool` | `bool` |
+| `Int` | `int2` `int4` `int8` `oid` `float4` `float8` `numeric` |
+| `Float` | `float4` `float8` `numeric` |
+| `Str` | text types (`text varchar char name citext`, enums). It is also parsed for `int*` `float*` `numeric` `uuid` `inet` `cidr` `date` `timestamptz` `bytea` |
+| `Bytes` | `bytea` |
+| `Time` | `timestamptz` `timestamp` `date` |
+| `Duration` | `interval` |
+| `List` | an array of its element type, or `json`/`jsonb` |
+| `Map` | `json` `jsonb` |
+
+| Postgres column | Rill |
+|---|---|
+| `bool` | `Bool` |
+| `int2` `int4` `int8` `oid` | `Int` |
+| `float4` `float8`, `numeric` | `Float` (cast `numeric` to `::text` to keep every digit) |
+| text types, enums, `uuid`, `inet`, `cidr`, `time` | `Str` |
+| `bytea` | `Bytes` |
+| `timestamptz` `timestamp` `date` | `Time` (UTC; a `date` is midnight) |
+| `interval` | `Duration` (a month counts as 30 days) |
+| `json` `jsonb` | `Map`, `List` or scalars |
+| arrays | `List` |
+| `NULL` | `null` |
+
+Errors from the server raise with the SQLSTATE in the message and the
+server's detail and hint as help: `sql: duplicate key value violates unique
+constraint "users_pkey" (SQLSTATE 23505)`. Cancelling the script (Ctrl-C, or
+the host's cancellation token) also cancels the running statement on the
+server.
+
+A host can open a connection itself and hand it to scripts:
+
+```rust
+use rill::sql::{ConnectOptions, Db};
+use rill::types::Value;
+
+let cancel = rill::eval::CancellationToken::new();
+let db = Db::connect("postgres://kirth@localhost/leaf", &ConnectOptions::default(), &cancel)?;
+let rows: Vec<Value> = db.query("select * from servers where id = $1", &[Value::Int(7)], &cancel)?;
+
+let mut evaluator = rill::eval::Evaluator::new(vec![]);
+evaluator.define("db", Value::Db(db.clone()));
+let mut session = rill::typeck::Session::new();
+session.define("db", &Value::Db(db));             // so `db.query(..)` type-checks
+```

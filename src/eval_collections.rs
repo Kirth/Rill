@@ -77,7 +77,8 @@ fn hash_key(value: &Value) -> Option<HashKey> {
         Value::ProcessResult(_)
         | Value::ProcessHandle(_)
         | Value::Stream(_)
-        | Value::Function(_) => return None,
+        | Value::Function(_)
+        | Value::Db(_) => return None,
     })
 }
 

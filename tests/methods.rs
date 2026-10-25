@@ -407,6 +407,10 @@ fn registry_arities_conform_between_checker_and_evaluator() {
         if let Target::Builtin(implementation) = method.target {
             assert_eq!(implementation.name(), method.name);
         }
+        if method.receivers == [Kind::Db] {
+            // Needs a live database; tests/sql.rs covers these.
+            continue;
+        }
         let receiver_kind = match method.name {
             "await" => Kind::ProcessHandle,
             "is_ok" | "is_err" | "ok" | "err" => Kind::Result,

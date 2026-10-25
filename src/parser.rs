@@ -657,7 +657,7 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), RillError> {
                         "false" => TokenKind::False,
                         "null" => TokenKind::Null,
                         "Bool" | "Int" | "Float" | "Str" | "Bytes" | "List" | "Map"
-                        | "Duration" | "Time" | "Path" | "Regex" | "ProcessResult"
+                        | "Duration" | "Time" | "Db" | "Path" | "Regex" | "ProcessResult"
                         | "ProcessHandle" | "Error" | "Fn" | "Option" | "Result" => {
                             TokenKind::TypeIdent(text)
                         }
@@ -2644,6 +2644,7 @@ impl Parser {
             }
             "Duration" => TypeName::Duration,
             "Time" => TypeName::Time,
+            "Db" => TypeName::Db,
             "Path" => TypeName::Path,
             "Regex" => TypeName::Regex,
             "Error" => TypeName::Error,

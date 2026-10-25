@@ -45,7 +45,7 @@ print(total)                # 6
 
 `Null`, `Bool`, `Int`, `Float`, `Str`, `Bytes`, `List[T]`, `Tuple[A, B, ...]`,
 `Map[Str, V]` (or just `Map`), `Path`, `Duration`, `Time`, `Regex`, `Error`,
-`ProcessResult`, `ProcessHandle`, `Option[T]` (or `T?`), `Result[T, E]` (or
+`ProcessResult`, `ProcessHandle`, `Db`, `Option[T]` (or `T?`), `Result[T, E]` (or
 `Result[T]`), `Fn`, `Fn(A, B) -> R` (also written `Fn[A, B] -> R`).
 
 Map keys are always strings. There are no user-defined structs.
@@ -298,6 +298,8 @@ value.to_json()  value.to_json_pretty()  value.to_yaml()  value.to_toml()
 print env.HOME;  env.DEBUG = "1";  with env { DEBUG = "1" } { run env }
 250ms.sleep()
 ostack.servers().filter(.status == "ACTIVE")   # OpenStack records, see methods.md
+let db = sql.connect("postgres://me@localhost/app")
+db.query("select * from users where name = $name")   # $name is a bind parameter, see methods.md
 ```
 
 `read_text()` and `read_yaml()` return a Result; other operations raise.

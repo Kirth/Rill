@@ -16,6 +16,7 @@ pub enum Kind {
     Regex,
     Duration,
     ProcessHandle,
+    Db,
     Int,
     Bool,
     Function,
@@ -33,6 +34,9 @@ pub enum Target {
     Match,
     Replace,
     Structural(Structural),
+    /// A method on a `Db` handle; the evaluator sees its raw arguments so an
+    /// interpolated query can become bind parameters.
+    Sql,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,6 +359,7 @@ pub enum Return {
     Path,
     ProcessResult,
     ProcessHandle,
+    Db,
     Receiver,
     ReceiverItem,
     OptionalReceiverItem,
@@ -816,6 +821,45 @@ pub static METHODS: &[Method] = &[
         Target::Builtin(BuiltinMethod::TimeFormat)
     ),
     method!("age", [Time], 0, [], Return::Duration, Target::Builtin(BuiltinMethod::TimeAge)),
+    Method {
+        name: "query",
+        receivers: &[Kind::Db],
+        min_args: 1,
+        max_args: 2,
+        arguments: &[Argument::Str, Argument::List],
+        returns: Return::ListMap,
+        target: Target::Sql,
+    },
+    Method {
+        name: "one",
+        receivers: &[Kind::Db],
+        min_args: 1,
+        max_args: 2,
+        arguments: &[Argument::Str, Argument::List],
+        returns: Return::OptionMap,
+        target: Target::Sql,
+    },
+    Method {
+        name: "scalar",
+        receivers: &[Kind::Db],
+        min_args: 1,
+        max_args: 2,
+        arguments: &[Argument::Str, Argument::List],
+        returns: Return::Unknown,
+        target: Target::Sql,
+    },
+    Method {
+        name: "exec",
+        receivers: &[Kind::Db],
+        min_args: 1,
+        max_args: 2,
+        arguments: &[Argument::Str, Argument::List],
+        returns: Return::Int,
+        target: Target::Sql,
+    },
+    method!("batch", [Db], 1, [Argument::Str], Return::Null, Target::Sql),
+    method!("transaction", [Db], 1, [Argument::Function], Return::Unknown, Target::Sql),
+    method!("close", [Db], 0, [], Return::Null, Target::Sql),
     method!("parse_xml", [Str], 0, [], Return::Map, Target::Builtin(BuiltinMethod::XmlParse)),
     method!(
         "select",
@@ -2071,6 +2115,47 @@ pub static NAMESPACE_FUNCTIONS: &[NamespaceFunction] = &[
         returns: Return::Time,
         summary: "the time a Unix timestamp (seconds) stands for",
     },
+    NamespaceFunction {
+        module: "sql",
+        name: "connect",
+        min_args: 0,
+        positional: &[Argument::Str],
+        named: &[
+            ("password", Argument::Str),
+            ("tls", Argument::Str),
+            ("timeout", Argument::Any),
+            ("app", Argument::Str),
+        ],
+        returns: Return::Db,
+        summary: "a database handle for a postgres:// URL (default: $DATABASE_URL, then the PG* variables)",
+    },
+    NamespaceFunction {
+        module: "sql",
+        name: "ident",
+        min_args: 1,
+        positional: &[Argument::Str],
+        named: &[],
+        returns: Return::Map,
+        summary: "a quoted identifier (table or column name) to interpolate into a query",
+    },
+    NamespaceFunction {
+        module: "sql",
+        name: "raw",
+        min_args: 1,
+        positional: &[Argument::Str],
+        named: &[],
+        returns: Return::Map,
+        summary: "trusted SQL text to interpolate into a query verbatim",
+    },
+    NamespaceFunction {
+        module: "sql",
+        name: "statement",
+        min_args: 1,
+        positional: &[Argument::Str],
+        named: &[],
+        returns: Return::Map,
+        summary: "the {text, params} a query string becomes, without running it",
+    },
 ];
 
 /// A method's or builtin's parameter names and one-line description, for
@@ -2246,6 +2331,13 @@ pub static METHOD_DOCS: &[Doc] = &[
     doc!("iso", [], "the time as RFC 3339 (2026-10-15T14:29:21Z)"),
     doc!("format", ["fmt"], "the time formatted with strftime syntax (%Y-%m-%d %H:%M)"),
     doc!("age", [], "how long ago the time was (zero for a future time)"),
+    doc!("query", ["sql", "params?"], "sql: the rows of a query as records; interpolations in a literal query are bind parameters"),
+    doc!("one", ["sql", "params?"], "sql: the first row of a query, or none"),
+    doc!("scalar", ["sql", "params?"], "sql: the first column of the first row, or null"),
+    doc!("exec", ["sql", "params?"], "sql: run a statement, returning the number of rows it affected"),
+    doc!("batch", ["sql"], "sql: run several ;-separated statements without parameters"),
+    doc!("transaction", ["f"], "sql: f(db) inside a transaction, committed when f returns and rolled back when it fails or returns err(..)"),
+    doc!("close", [], "sql: close the connection"),
     doc!("parse_xml", [], "the root element of the XML in the string, as a record {tag, attrs, text, children}"),
     doc!("select", ["path"], "every match of an XPath-like path (a/b, //a, a[@k='v'], a[2], …/@attr, …/text()) under an XML element or list of elements"),
     doc!("select_one", ["path"], "the first match of an XPath-like path under an XML element, or none"),
@@ -2310,6 +2402,9 @@ pub fn namespace_params(function: &NamespaceFunction) -> Vec<String> {
         "project_of" => &["record"],
         "actions" => &["server"],
         "from_unix" => &["seconds"],
+        "connect" => &["url?"],
+        "ident" => &["name"],
+        "raw" | "statement" => &["sql"],
         _ if function.positional.len() == 1 => &["id_or_name"],
         _ => &[],
     };
@@ -2392,7 +2487,7 @@ pub fn namespace_method(module: &str, name: &str) -> Option<NamespaceCall> {
 /// The standard namespaces that `use` accepts and that resolve as `name.func(...)`.
 pub const NAMESPACES: &[&str] = &[
     "json", "toml", "yaml", "csv", "url", "path", "fs", "process", "time", "regex", "archive",
-    "hashes", "ostack",
+    "hashes", "ostack", "sql",
 ];
 
 pub fn is_namespace(name: &str) -> bool {

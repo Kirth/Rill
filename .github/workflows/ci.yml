@@ -27,6 +27,13 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Start Postgres
+        if: runner.os == 'Linux'
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -c "create user rill superuser password 'rill'"
+          sudo -u postgres createdb -O rill rill_test
+          echo "RILL_TEST_DATABASE_URL=postgres://rill:rill@localhost/rill_test?sslmode=disable" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --all-targets
       - name: Release build

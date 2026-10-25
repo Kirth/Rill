@@ -7,6 +7,7 @@ pkgs.mkShell {
     rustfmt
     clippy
     rust-analyzer
+    postgresql
   ];
 
   RUST_BACKTRACE = "1";

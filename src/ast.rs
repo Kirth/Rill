@@ -107,6 +107,7 @@ pub enum TypeName {
     Map(Option<Box<TypeName>>),
     Duration,
     Time,
+    Db,
     Path,
     Regex,
     Error,

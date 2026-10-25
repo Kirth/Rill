@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod blocking;
 pub mod diagnostic;
 pub mod eval;
 mod eval_collections;
@@ -10,6 +11,7 @@ pub mod parser;
 pub mod pathresolver;
 pub mod repl;
 pub mod runtime;
+pub mod sql;
 pub mod suggest;
 pub mod term;
 pub mod typeck;

@@ -1,0 +1,23 @@
+# Servers per project from a Postgres inventory, with the busiest hosts.
+# Usage: DATABASE_URL=postgres://me@localhost/inventory rill examples/sql_report.ril [min_vcpus]
+
+let min_vcpus = Int(args.get(0).unwrap_or("4"))
+let db = sql.connect()
+
+let projects = db.query("
+    select project, count(*) as servers, sum(vcpus) as vcpus
+    from servers
+    where vcpus >= {min_vcpus}
+    group by project
+    order by vcpus desc
+")
+show(projects, "projects with servers of at least {min_vcpus} vCPUs")
+
+for p in projects.filter(.servers > 10) {
+    let busiest = db.one("select host, count(*) as n from servers where project = {p.project}
+                          group by host order by n desc limit 1")
+    match busiest {
+        some(row) => print("{p.project}: {row.n} servers on {row.host}"),
+        none => null,
+    }
+}

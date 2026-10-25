@@ -37,6 +37,9 @@
             clippy
             rust-analyzer
             cargo-insta
+            just
+            # `just test-sql` runs a throwaway server for tests/sql.rs.
+            postgresql
           ];
           RUST_BACKTRACE = "1";
         };

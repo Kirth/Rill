@@ -10,6 +10,18 @@ All notable changes to Rill are documented here. The format follows
 - `show value` / `show(value, title)`: records print as a text table and anything else as
   the pretty value; a host that installs `Evaluator::set_show` (eddy, eddy-web)
   gets the value itself and draws a live table or tree.
+- `sql.*` and the `Db` type: `sql.connect(url)` opens a Postgres connection
+  (the default `postgres` feature; `tokio-postgres` with rustls), with
+  `db.query`, `one`, `scalar`, `exec`, `batch`, `transaction` (nested ones
+  use savepoints) and `close`. Interpolations in a literal query become bind
+  parameters, so `db.query("… where name = $name")` is injection-safe.
+  `sql.ident`/`sql.raw` splice identifiers and trusted text, and
+  `sql.statement` shows what a query sends. Cancelling a script cancels the
+  statement on the server.
+- `Evaluator::define` and `typeck::Session::define`, so a host can hand scripts
+  values such as an open `Db`.
+- `just test-sql` runs the database tests against a throwaway Postgres; CI runs
+  them on Linux.
 
 This is the first release with a changelog. Everything below compares against
 the single-commit prototype that preceded it.

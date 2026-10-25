@@ -28,6 +28,7 @@ enum Type {
     ProcessResult,
     ProcessHandle,
     Stream,
+    Db,
     Function {
         /// Maximum number of positional arguments.
         arity: Option<usize>,
@@ -94,6 +95,7 @@ impl fmt::Display for Type {
             Type::ProcessResult => write!(f, "ProcessResult"),
             Type::ProcessHandle => write!(f, "ProcessHandle"),
             Type::Stream => write!(f, "Stream"),
+            Type::Db => write!(f, "Db"),
             Type::Function { .. } => write!(f, "Fn"),
         }
     }
@@ -288,6 +290,12 @@ impl Session {
         self.checker.hoist_top_level(program);
         let _ = self.checker.check_stmts(&program.stmts);
         self.checker.take_diagnostics()
+    }
+
+    /// Declare a binding the host provides (see `Evaluator::define`), typed
+    /// from its value.
+    pub fn define(&mut self, name: impl Into<String>, value: &Value) {
+        self.checker.env.set(name.into(), type_from_value(value));
     }
 
     /// The static type of an expression in the current scope.
@@ -2142,7 +2150,7 @@ impl Checker {
                 }
                 1
             }
-            Type::List(_) | Type::Map(_) | Type::Option(_) | Type::Result(..) => {
+            Type::List(_) | Type::Map(_) | Type::Option(_) | Type::Result(..) | Type::Db => {
                 crate::methods::callback_arity(name, method_kind(collection))
             }
             _ => return Err(RillError::new(format!("{name} cannot iterate {collection}"))),
@@ -2427,6 +2435,7 @@ fn type_from_value(value: &Value) -> Type {
         Value::ProcessResult(_) => Type::ProcessResult,
         Value::ProcessHandle(_) => Type::ProcessHandle,
         Value::Stream(_) => Type::Stream,
+        Value::Db(_) => Type::Db,
         Value::Function(function) => Type::Function {
             required: Some(function.function.params.iter().filter(|p| p.default.is_none()).count()),
             names: Some(function.function.params.iter().map(|p| p.name.clone()).collect()),
@@ -2452,6 +2461,7 @@ fn method_kind(ty: &Type) -> crate::methods::Kind {
         Type::Duration => Kind::Duration,
         Type::Time => Kind::Time,
         Type::ProcessHandle => Kind::ProcessHandle,
+        Type::Db => Kind::Db,
         Type::Int => Kind::Int,
         Type::Bool => Kind::Bool,
         Type::Function { .. } => Kind::Function,
@@ -2481,6 +2491,7 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::Path => Type::Path,
         Return::ProcessResult => Type::ProcessResult,
         Return::ProcessHandle => Type::ProcessHandle,
+        Return::Db => Type::Db,
         Return::Receiver => receiver.clone(),
         Return::ReceiverItem => receiver.list_item(),
         Return::OptionalReceiverItem => Type::Option(Box::new(receiver.list_item())),
@@ -2596,6 +2607,7 @@ fn type_from_name(name: &TypeName) -> Type {
         ),
         TypeName::ProcessResult => Type::ProcessResult,
         TypeName::ProcessHandle => Type::ProcessHandle,
+        TypeName::Db => Type::Db,
         TypeName::Function { params, return_type } => Type::Function {
             required: None,
             names: None,
@@ -2944,6 +2956,7 @@ fn callback_param_types(method: &str, receiver: &Type) -> Vec<Type> {
         ("map" | "and_then", Type::Result(value, _)) => vec![(**value).clone()],
         ("map_err" | "unwrap_or_else", Type::Result(_, error)) => vec![(**error).clone()],
         ("unwrap_or_else", Type::Option(_)) => Vec::new(),
+        ("transaction", Type::Db) => vec![Type::Db],
         _ => Vec::new(),
     }
 }

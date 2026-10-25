@@ -193,3 +193,19 @@ fn namespace_functions_include_the_ostack_table() {
     assert_eq!(function.min_args, 2);
     assert!(rill::methods::namespace_function("json", "parse").is_none(), "methods stay methods");
 }
+
+#[test]
+fn a_host_defines_bindings_for_the_checker_and_the_evaluator() {
+    let mut evaluator = Evaluator::new(Vec::new());
+    evaluator.define("limit", Value::Int(3));
+    let mut session = Session::new();
+    session.define("limit", &Value::Int(3));
+    let program = rill::parser::parse("[1, 2, 3, 4, 5].filter(|x| x <= limit)").expect("parses");
+    session.check(&program).expect("limit is known to the checker");
+    assert_eq!(
+        evaluator.eval_program(&program).unwrap(),
+        Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+    );
+    let wrong = rill::parser::parse("limit.trim()").expect("parses");
+    assert!(session.check(&wrong).is_err(), "limit is typed as Int");
+}

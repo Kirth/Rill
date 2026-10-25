@@ -10,6 +10,7 @@
 //! `RILL_OPENSTACK_FIXTURE=<dir>` serves `<dir>/<collection>.json` files
 //! instead of a cloud, for tests and demos.
 
+use crate::blocking::env_secs;
 use crate::diagnostic::RillError;
 use crate::eval::CancellationToken;
 use crate::eval_data::json_to_value;
@@ -38,16 +39,7 @@ pub struct Call<'a> {
     pub cancellation: CancellationToken,
 }
 
-pub enum Error {
-    Cancelled,
-    Failed(RillError),
-}
-
-impl From<RillError> for Error {
-    fn from(error: RillError) -> Self {
-        Error::Failed(error)
-    }
-}
+pub use crate::blocking::Error;
 
 const DEFAULT_KINDS: &[&str] = &[
     "servers",
@@ -356,54 +348,19 @@ fn pairs(map: &Map) -> Vec<(String, String)> {
 
 // ---------------------------------------------------------------- runtime
 
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("rill-ostack")
-            .enable_all()
-            .build()
-            .expect("tokio runtime for ostack")
-    })
-}
-
-fn env_secs(name: &str, default: u64) -> Duration {
-    Duration::from_secs(std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default))
-}
-
-/// Run `future` on the ostack runtime and wait for it here, giving up when
-/// the evaluator is cancelled or the call takes too long.  The future is
-/// spawned rather than blocked on, so this works from inside rayon workers
-/// and from threads that already run a tokio runtime.
+/// Run `future` on the shared runtime (see [`crate::blocking::run`]).
 fn run<T: Send + 'static>(
     future: impl Future<Output = anyhow::Result<T>> + Send + 'static,
     cancellation: &CancellationToken,
 ) -> Result<T, Error> {
-    let cancellation = cancellation.clone();
-    let timeout = env_secs("RILL_OPENSTACK_TIMEOUT_SECS", 60);
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    runtime().spawn(async move {
-        let result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(Error::Cancelled),
-            outcome = tokio::time::timeout(timeout, future) => match outcome {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(error)) => Err(Error::Failed(rill_error(error))),
-                Err(_) => Err(Error::Failed(
-                    RillError::new(format!(
-                        "ostack: no answer within {}s (RILL_OPENSTACK_TIMEOUT_SECS)",
-                        timeout.as_secs()
-                    ))
-                    .with_kind(ErrorKind::Io),
-                )),
-            },
-        };
-        let _ = sender.send(result);
-    });
-    receiver
-        .recv()
-        .unwrap_or_else(|_| Err(Error::Failed(RillError::new("ostack: the request task died"))))
+    crate::blocking::run(
+        async move { future.await.map_err(rill_error) },
+        cancellation,
+        env_secs("RILL_OPENSTACK_TIMEOUT_SECS", 60),
+        |timeout| {
+            format!("ostack: no answer within {}s (RILL_OPENSTACK_TIMEOUT_SECS)", timeout.as_secs())
+        },
+    )
 }
 
 fn rill_error(error: anyhow::Error) -> RillError {
