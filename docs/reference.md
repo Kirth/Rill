@@ -44,7 +44,7 @@ print(total)                # 6
 ### Types
 
 `Null`, `Bool`, `Int`, `Float`, `Str`, `Bytes`, `List[T]`, `Tuple[A, B, ...]`,
-`Map[Str, V]` (or just `Map`), `Path`, `Duration`, `Regex`, `Error`,
+`Map[Str, V]` (or just `Map`), `Path`, `Duration`, `Time`, `Regex`, `Error`,
 `ProcessResult`, `ProcessHandle`, `Option[T]` (or `T?`), `Result[T, E]` (or
 `Result[T]`), `Fn`, `Fn(A, B) -> R` (also written `Fn[A, B] -> R`).
 

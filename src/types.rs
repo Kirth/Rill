@@ -163,6 +163,8 @@ pub enum Value {
     Tuple(Arc<Vec<Value>>),
     Map(Arc<Map>),
     Duration(Duration),
+    /// A point in time, in UTC (`"…".parse_time()`, `time.now()`).
+    Time(chrono::DateTime<chrono::Utc>),
     Path(PathBuf),
     Regex(String),
     Error(Box<ErrorValue>),
@@ -214,6 +216,7 @@ impl Value {
             Value::Tuple(_) => true,
             Value::Map(v) => !v.is_empty(),
             Value::Duration(v) => !v.is_zero(),
+            Value::Time(_) => true,
             Value::Path(v) => !v.as_os_str().is_empty(),
             Value::Regex(v) => !v.is_empty(),
             Value::Error(_) => false,
@@ -239,6 +242,7 @@ impl Value {
             Value::Tuple(_) => "Tuple",
             Value::Map(_) => "Map",
             Value::Duration(_) => "Duration",
+            Value::Time(_) => "Time",
             Value::Path(_) => "Path",
             Value::Regex(_) => "Regex",
             Value::Error(_) => "Error",
@@ -263,6 +267,7 @@ impl Value {
             Value::Tuple(_) => format!("{self}"),
             Value::Map(_) => format!("{self}"),
             Value::Duration(v) => format_duration(*v),
+            Value::Time(t) => format_time(t),
             Value::Path(v) => v.display().to_string(),
             Value::Regex(v) => v.clone(),
             Value::Error(v) => v.message.clone(),
@@ -318,6 +323,7 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Duration(v) => write!(f, "{}", format_duration(*v)),
+            Value::Time(t) => write!(f, "{}", format_time(t)),
             Value::Path(v) => write!(f, "{}", v.display()),
             Value::Regex(v) => write!(f, "/{v}/"),
             Value::Error(v) => write!(f, "{}: {}", error_kind_name(&v.kind), v.message),
@@ -349,8 +355,13 @@ pub fn format_duration(duration: Duration) -> String {
         return format!("{}ms", trim_float(nanos as f64 / 1e6));
     }
     let total_secs = duration.as_secs();
-    let (hours, minutes, secs) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
+    let days = total_secs / 86_400;
+    let (hours, minutes, secs) =
+        ((total_secs % 86_400) / 3600, (total_secs % 3600) / 60, total_secs % 60);
     let mut out = String::new();
+    if days > 0 {
+        out.push_str(&format!("{days}d"));
+    }
     if hours > 0 {
         out.push_str(&format!("{hours}h"));
     }
@@ -397,4 +408,10 @@ fn error_kind_name(kind: &ErrorKind) -> &'static str {
         ErrorKind::Type => "type error",
         ErrorKind::Parse => "parse error",
     }
+}
+
+/// A time as RFC 3339 in UTC (`2026-10-15T14:29:21Z`), with fractional
+/// seconds only when there are any.
+pub fn format_time(time: &chrono::DateTime<chrono::Utc>) -> String {
+    time.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }

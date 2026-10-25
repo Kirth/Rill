@@ -14,6 +14,7 @@ pub mod suggest;
 pub mod term;
 pub mod typeck;
 pub mod types;
+pub mod xml;
 
 use diagnostic::RillError;
 use std::collections::{BTreeMap, BTreeSet};

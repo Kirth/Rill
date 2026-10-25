@@ -318,6 +318,11 @@ pub enum OutStream {
 /// evaluator writes to the real stdout and stderr.
 pub type OutputSink = Arc<dyn Fn(OutStream, &str) + Send + Sync>;
 
+/// Receives what `show` is given (an optional title and the value), so a
+/// host with a display can draw records as a live table and anything else
+/// as a tree.  Without one, `show` writes a text table to stdout.
+pub type ShowSink = Arc<dyn Fn(Option<&str>, &Value) + Send + Sync>;
+
 /// How child processes may touch the host's terminal.  The default changes
 /// nothing; an embedding host that owns the terminal (an IDE in raw mode)
 /// turns both on.
@@ -336,6 +341,7 @@ pub struct IoPolicy {
 pub struct Evaluator {
     env: Env,
     output: Option<OutputSink>,
+    show: Option<ShowSink>,
     io_policy: IoPolicy,
     /// The process environment seen by `env.NAME`, `set_env`, `with env`, and
     /// child processes.  Evaluator-local; the host process is never mutated.
@@ -494,6 +500,7 @@ impl Evaluator {
         Self {
             env: Env::new(args, input),
             output: None,
+            show: None,
             io_policy: IoPolicy::default(),
             environment,
             function_depth: 0,
@@ -513,6 +520,7 @@ impl Evaluator {
         Self {
             env,
             output: self.output.clone(),
+            show: self.show.clone(),
             io_policy: self.io_policy,
             environment: self.environment.clone(),
             function_depth: self.function_depth,
@@ -527,6 +535,11 @@ impl Evaluator {
     /// Route script output through `sink` instead of the process's stdio.
     pub fn set_output(&mut self, sink: OutputSink) {
         self.output = Some(sink);
+    }
+
+    /// Hand `show`'s values to `sink` instead of printing a text table.
+    pub fn set_show(&mut self, sink: ShowSink) {
+        self.show = Some(sink);
     }
 
     /// Make this evaluator stop at `token`: statements poll it, `sleep` wakes
@@ -1644,6 +1657,10 @@ impl Evaluator {
                 other => Err(RillError::new(format!(
                     "? needs Option or Result, got {}",
                     other.type_name()
+                ))
+                .with_help(format!(
+                    "the value is {}\n? unwraps an Option or Result; it does not test whether a field exists (use .get(\"name\") for that)",
+                    preview_value(&other)
                 ))
                 .into()),
             },
@@ -2778,6 +2795,37 @@ impl Evaluator {
             "zip" => self.eval_zip(args),
             "enumerate" => self.eval_enumerate(args),
             "group_by" => self.eval_group_by(args),
+            "parse_xml" => {
+                let text = self.eval_expr(&args[0])?.as_string_lossy();
+                Ok(crate::xml::parse(&text)?)
+            }
+            "select" | "select_one" => {
+                let receiver = self.eval_expr(&args[0])?;
+                let path = match args.get(1) {
+                    Some(path) => self.eval_expr(path)?.as_string_lossy(),
+                    None => return Err(RillError::new(format!("{name} needs a path")).into()),
+                };
+                let matches = crate::xml::select(&receiver, &path, name)?;
+                Ok(if name == "select" {
+                    Value::list(matches)
+                } else {
+                    Value::Option(matches.into_iter().next().map(Box::new))
+                })
+            }
+            "to_xml" => {
+                let receiver = self.eval_expr(&args[0])?;
+                Ok(Value::Str(crate::xml::to_xml(&receiver)?))
+            }
+            "parse_time" => {
+                let text = self.eval_expr(&args[0])?.as_string_lossy();
+                let format = match args.get(1) {
+                    Some(format) => Some(self.eval_expr(format)?.as_string_lossy()),
+                    None => None,
+                };
+                Ok(Value::Time(parse_time(&text, format.as_deref())?))
+            }
+            "year" | "month" | "day" | "hour" | "minute" | "second" | "weekday" | "unix"
+            | "date" | "iso" | "format" | "age" => self.eval_time_method(name, args),
             "index_by" => self.eval_index_by(args),
             "sort_by" => self.eval_sort_by(args),
             "unique" => self.eval_unique(args),
@@ -3134,6 +3182,24 @@ impl Evaluator {
                     format!("{}\n", pretty_value(&value, 0))
                 };
                 self.emit(OutStream::Stdout, &text)?;
+                Ok(Value::Null)
+            }
+            Builtin::Show => {
+                let value = self.eval_expr(&args[0])?;
+                let title = match args.get(1) {
+                    Some(arg) => Some(self.eval_expr(arg)?.as_string_lossy()),
+                    None => None,
+                };
+                if let Some(sink) = &self.show {
+                    sink(title.as_deref(), &value);
+                } else {
+                    let mut text = show_text(&value, title.as_deref());
+                    if crate::term::color_enabled() {
+                        text.push_str(ANSI_RESET);
+                        text.push('\n');
+                    }
+                    self.emit(OutStream::Stdout, &text)?;
+                }
                 Ok(Value::Null)
             }
             Builtin::Print | Builtin::Prin | Builtin::Warn => {
@@ -3577,6 +3643,16 @@ impl Evaluator {
         self.check_cancelled()?;
         match function.module {
             "ostack" => self.eval_ostack(function.name, positional, named),
+            "time" => match function.name {
+                "now" => Ok(Value::Time(chrono::Utc::now())),
+                "from_unix" => match positional.first() {
+                    Some(Value::Int(seconds)) => chrono::DateTime::from_timestamp(*seconds, 0)
+                        .map(Value::Time)
+                        .ok_or_else(|| RillError::new("timestamp out of range").into()),
+                    _ => Err(RillError::new("time.from_unix needs Int seconds").into()),
+                },
+                other => Err(RillError::new(format!("time has no function '{other}'")).into()),
+            },
             other => {
                 Err(RillError::new(format!("{other} has no function '{}'", function.name)).into())
             }
@@ -3695,6 +3771,37 @@ impl Evaluator {
         ))
         .with_help("rebuild with `cargo build --features openstack`")
         .into())
+    }
+
+    fn eval_time_method(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
+        use chrono::{Datelike, Timelike};
+        let Value::Time(time) = self.eval_expr(&args[0])? else {
+            return Err(RillError::new(format!("{name} needs a Time")).into());
+        };
+        Ok(match name {
+            "year" => Value::Int(time.year() as i64),
+            "month" => Value::Int(time.month() as i64),
+            "day" => Value::Int(time.day() as i64),
+            "hour" => Value::Int(time.hour() as i64),
+            "minute" => Value::Int(time.minute() as i64),
+            "second" => Value::Int(time.second() as i64),
+            "weekday" => Value::Str(time.format("%A").to_string()),
+            "unix" => Value::Int(time.timestamp()),
+            "date" => Value::Str(time.format("%Y-%m-%d").to_string()),
+            "iso" => Value::Str(crate::types::format_time(&time)),
+            "format" => {
+                let format = self.eval_expr(&args[1])?.as_string_lossy();
+                let mut out = String::new();
+                use std::fmt::Write;
+                write!(out, "{}", time.format(&format))
+                    .map_err(|_| RillError::new(format!("invalid time format '{format}'")))?;
+                Value::Str(out)
+            }
+            "age" => Value::Duration(
+                chrono::Utc::now().signed_duration_since(time).to_std().unwrap_or_default(),
+            ),
+            other => return Err(RillError::new(format!("Time has no method '{other}'")).into()),
+        })
     }
 
     #[cfg(feature = "openstack")]
@@ -4422,6 +4529,109 @@ fn pretty_string(value: &str) -> String {
     pretty_color(ANSI_GREEN, serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}")))
 }
 
+/// What `show` writes without a host: a text table for a list of records
+/// (one column per key, nested values summarised), the pretty value
+/// otherwise, under `title` when given.
+pub fn show_text(value: &Value, title: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(title) = title {
+        out.push_str(title);
+        out.push('\n');
+    }
+    if let Some(groups) = grouped_tables(value) {
+        for (index, (key, table)) in groups.into_iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            out.push_str(&key);
+            out.push('\n');
+            out.push_str(&table);
+        }
+        return out;
+    }
+    match text_table(value) {
+        Some(table) => out.push_str(&table),
+        None => {
+            out.push_str(&pretty_value(value, 0));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `group_by` output: a map whose values are all lists of records, as one
+/// table per key.
+fn grouped_tables(value: &Value) -> Option<Vec<(String, String)>> {
+    let Value::Map(map) = value else { return None };
+    if map.is_empty() {
+        return None;
+    }
+    map.iter().map(|(key, list)| text_table(list).map(|table| (key.clone(), table))).collect()
+}
+
+fn text_table(value: &Value) -> Option<String> {
+    const MAX_WIDTH: usize = 40;
+    let Value::List(items) = value else { return None };
+    if items.is_empty() || !items.iter().all(|item| matches!(item, Value::Map(_))) {
+        return None;
+    }
+    let mut columns: Vec<&str> = Vec::new();
+    for item in items.iter() {
+        if let Value::Map(map) = item {
+            for key in map.keys() {
+                if !columns.contains(&key.as_str()) {
+                    columns.push(key);
+                }
+            }
+        }
+    }
+    let cell = |value: Option<&Value>| -> String {
+        let text = match value {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::Str(text)) => text.lines().next().unwrap_or("").to_string(),
+            Some(Value::Map(map)) => format!("{{{} keys}}", map.len()),
+            Some(Value::List(items)) => format!("[{} items]", items.len()),
+            Some(other) => other.to_string(),
+        };
+        if text.chars().count() > MAX_WIDTH {
+            format!("{}…", text.chars().take(MAX_WIDTH - 1).collect::<String>())
+        } else {
+            text
+        }
+    };
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|item| match item {
+            Value::Map(map) => columns.iter().map(|column| cell(map.get(*column))).collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let widths: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            rows.iter()
+                .map(|row| row[index].chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(column.chars().count())
+        })
+        .collect();
+    let line = |cells: Vec<String>| -> String {
+        let padded: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(index, text)| format!("{text:<width$}", width = widths[index]))
+            .collect();
+        format!("{}\n", padded.join("  ").trim_end())
+    };
+    let mut out = line(columns.iter().map(|c| c.to_string()).collect());
+    for row in rows {
+        out.push_str(&line(row));
+    }
+    Some(out)
+}
+
 /// Indented, coloured (when enabled) rendering used by `pretty_print` and the REPL.
 pub fn pretty_value(value: &Value, level: usize) -> String {
     match value {
@@ -4465,6 +4675,75 @@ pub fn pretty_value(value: &Value, level: usize) -> String {
     }
 }
 
+/// Bounded, uncoloured rendering of a value for diagnostics: one level of
+/// entries, nested collections summarised, long strings and long collections
+/// cut short.
+pub fn preview_value(value: &Value) -> String {
+    const MAX_ENTRIES: usize = 12;
+    let entries: Vec<String> = match value {
+        Value::Map(map) => map
+            .iter()
+            .map(|(key, value)| format!("{}: {}", preview_string(key), preview_scalar(value)))
+            .collect(),
+        Value::List(values) | Value::Tuple(values) => values.iter().map(preview_scalar).collect(),
+        other => return preview_scalar(other),
+    };
+    let (open, close, unit) = match value {
+        Value::Map(_) => ("{", "}", "fields"),
+        Value::Tuple(_) => ("(", ")", "items"),
+        _ => ("[", "]", "items"),
+    };
+    if entries.is_empty() {
+        return format!("{open}{close}");
+    }
+    let total = entries.len();
+    let mut lines: Vec<String> =
+        entries.into_iter().take(MAX_ENTRIES).map(|entry| format!("  {entry}")).collect();
+    if total > MAX_ENTRIES {
+        lines.push(format!("  … {} more {unit}", total - MAX_ENTRIES));
+    }
+    format!("{open}\n{}\n{close}", lines.join(",\n"))
+}
+
+fn preview_string(text: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    if text.chars().count() > MAX_CHARS {
+        let cut: String = text.chars().take(MAX_CHARS).collect();
+        let quoted = serde_json::to_string(&cut).unwrap_or_else(|_| format!("{cut:?}"));
+        // Re-open the closing quote so the ellipsis sits inside the string.
+        format!("{}…\"", &quoted[..quoted.len() - 1])
+    } else {
+        serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"))
+    }
+}
+
+fn preview_scalar(value: &Value) -> String {
+    let count =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    match value {
+        Value::Str(text) => preview_string(text),
+        Value::Map(map) if map.is_empty() => "{}".to_string(),
+        Value::Map(map) => format!("{{{}}}", count(map.len(), "field", "fields")),
+        Value::List(values) if values.is_empty() => "[]".to_string(),
+        Value::List(values) => format!("[{}]", count(values.len(), "item", "items")),
+        Value::Tuple(values) => format!("({})", count(values.len(), "item", "items")),
+        Value::Option(Some(inner)) => format!("some({})", preview_scalar(inner)),
+        Value::Option(None) => "none".to_string(),
+        Value::Result(Ok(inner)) => format!("ok({})", preview_scalar(inner)),
+        Value::Result(Err(inner)) => format!("err({})", preview_scalar(inner)),
+        other => preview_other(other),
+    }
+}
+
+fn preview_other(value: &Value) -> String {
+    let text = value.to_string();
+    if text.chars().count() > 60 {
+        format!("{}…", text.chars().take(60).collect::<String>())
+    } else {
+        text
+    }
+}
+
 fn pretty_collection(open: &str, close: &str, values: &[Value], level: usize) -> String {
     if values.is_empty() {
         return format!("{open}{close}");
@@ -4499,6 +4778,7 @@ fn method_kind(value: &Value) -> crate::methods::Kind {
         Value::Path(_) => Kind::Path,
         Value::Regex(_) => Kind::Regex,
         Value::Duration(_) => Kind::Duration,
+        Value::Time(_) => Kind::Time,
         Value::ProcessHandle(_) => Kind::ProcessHandle,
         Value::Int(_) => Kind::Int,
         Value::Bool(_) => Kind::Bool,
@@ -4511,9 +4791,20 @@ fn method_kind(value: &Value) -> crate::methods::Kind {
 
 fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
     match base {
-        Value::Map(map) => {
-            map.get(name).cloned().ok_or_else(|| RillError::new(format!("unknown field '{name}'")))
-        }
+        Value::Map(ref map) => match map.get(name) {
+            Some(value) => Ok(value.clone()),
+            None => {
+                let mut help = String::new();
+                if let Some(close) = crate::suggest::closest(name, map.keys().map(String::as_str)) {
+                    help.push_str(&format!("did you mean '{close}'?\n"));
+                }
+                help.push_str(&format!(
+                    "this record has no '{name}'; it is:\n{}\nuse .get(\"{name}\") when the field is optional",
+                    preview_value(&base)
+                ));
+                Err(RillError::new(format!("unknown field '{name}'")).with_help(help))
+            }
+        },
         Value::ProcessResult(result) => match name {
             "status" => Ok(Value::Int(result.status as i64)),
             "signal" => {
@@ -4522,7 +4813,8 @@ fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
             "out" => Ok(Value::Str(result.stdout_text_lossy().into_owned())),
             "err" => Ok(Value::Str(result.stderr_text_lossy().into_owned())),
             "ok" => Ok(Value::Bool(result.ok())),
-            other => Err(RillError::new(format!("unknown ProcessResult field '{other}'"))),
+            other => Err(RillError::new(format!("unknown ProcessResult field '{other}'"))
+                .with_help("a ProcessResult has the fields status, signal, out, err and ok")),
         },
         ref value
             if crate::methods::lookup(name)
@@ -4530,7 +4822,8 @@ fn field_value(base: Value, name: &str) -> Result<Value, RillError> {
         {
             Err(RillError::new(format!(".{name} is a method; call .{name}(...)")))
         }
-        other => Err(RillError::new(format!("{} has no field '{name}'", other.type_name()))),
+        other => Err(RillError::new(format!("{} has no field '{name}'", other.type_name()))
+            .with_help(format!("the value is {}", preview_value(&other)))),
     }
 }
 
@@ -4542,6 +4835,9 @@ fn numeric_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, Rill
     }
     if let (Value::Str(a), Value::Str(b), BinaryOp::Add) = (&left, &right, op) {
         return Ok(Value::Str(format!("{a}{b}")));
+    }
+    if matches!(left, Value::Time(_)) || matches!(right, Value::Time(_)) {
+        return time_binary(left, right, op);
     }
     if matches!(left, Value::Duration(_)) || matches!(right, Value::Duration(_)) {
         return duration_binary(left, right, op);
@@ -4717,6 +5013,85 @@ fn check_numeric_operands(left: &Value, right: &Value, op: BinaryOp) -> Result<(
     )))
 }
 
+/// `Time ± Duration` and `Time - Time`.
+fn time_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, RillError> {
+    let span = |d: &std::time::Duration| {
+        chrono::Duration::from_std(*d).map_err(|_| RillError::new("duration too large for a time"))
+    };
+    let out_of_range = || RillError::new("time out of range");
+    match (&left, &right, op) {
+        (Value::Time(t), Value::Duration(d), BinaryOp::Add)
+        | (Value::Duration(d), Value::Time(t), BinaryOp::Add) => {
+            t.checked_add_signed(span(d)?).map(Value::Time).ok_or_else(out_of_range)
+        }
+        (Value::Time(t), Value::Duration(d), BinaryOp::Sub) => {
+            t.checked_sub_signed(span(d)?).map(Value::Time).ok_or_else(out_of_range)
+        }
+        (Value::Time(a), Value::Time(b), BinaryOp::Sub) => {
+            let difference = a.signed_duration_since(*b);
+            difference.to_std().map(Value::Duration).map_err(|_| {
+                RillError::new(
+                    "the second time is later than the first; a Duration cannot be negative",
+                )
+                .with_help("swap the operands, or compare the times with < and >")
+            })
+        }
+        _ => Err(RillError::new(format!(
+            "operator '{}' is not defined for {} and {}",
+            operator_symbol(op),
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
+}
+
+/// Parse a time: RFC 3339 / ISO 8601 (with or without a zone, which then
+/// means UTC), `YYYY-MM-DD HH:MM:SS`, a bare date, or a strftime `format`.
+pub fn parse_time(
+    text: &str,
+    format: Option<&str>,
+) -> Result<chrono::DateTime<chrono::Utc>, RillError> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+    let text = text.trim();
+    let fail = || {
+        RillError::new(format!("cannot parse '{text}' as a time")).with_help(match format {
+            Some(_) => "check the format against the text (strftime syntax, e.g. %Y-%m-%d %H:%M)",
+            None => "expected RFC 3339 (2026-10-15T14:29:21Z), YYYY-MM-DD HH:MM:SS or YYYY-MM-DD; pass a strftime format otherwise",
+        })
+    };
+    if let Some(format) = format {
+        if let Ok(time) = DateTime::parse_from_str(text, format) {
+            return Ok(time.with_timezone(&Utc));
+        }
+        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
+            return Ok(naive.and_utc());
+        }
+        if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+            return Ok(date.and_hms_opt(0, 0, 0).ok_or_else(fail)?.and_utc());
+        }
+        return Err(fail());
+    }
+    if let Ok(time) = DateTime::parse_from_rfc3339(text) {
+        return Ok(time.with_timezone(&Utc));
+    }
+    for pattern in
+        ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"]
+    {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(text, pattern) {
+            return Ok(naive.and_utc());
+        }
+    }
+    for pattern in ["%Y-%m-%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%.f%z"] {
+        if let Ok(time) = DateTime::parse_from_str(text, pattern) {
+            return Ok(time.with_timezone(&Utc));
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return Ok(date.and_hms_opt(0, 0, 0).ok_or_else(fail)?.and_utc());
+    }
+    Err(fail())
+}
+
 /// Arithmetic involving a Duration: `+`/`-` between durations, scaling by a
 /// number, dividing by a number, and the ratio or remainder of two durations.
 fn duration_binary(left: Value, right: Value, op: BinaryOp) -> Result<Value, RillError> {
@@ -4872,6 +5247,7 @@ fn compare_values(
         }
         (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
         (Value::Duration(a), Value::Duration(b)) => Ok(a.cmp(b)),
+        (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
         _ => Err(RillError::new(format!(
             "operator '{}' needs two numbers, two strings, or two durations, got {} and {}",
             operator_symbol(op),
@@ -4892,7 +5268,8 @@ fn order_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             Value::Int(_) | Value::Float(_) => 2,
             Value::Str(_) => 3,
             Value::Duration(_) => 4,
-            _ => 5,
+            Value::Time(_) => 5,
+            _ => 6,
         }
     }
     match (a, b) {
@@ -4904,6 +5281,7 @@ fn order_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         }
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (Value::Duration(x), Value::Duration(y)) => x.cmp(y),
+        (Value::Time(x), Value::Time(y)) => x.cmp(y),
         _ => rank(a).cmp(&rank(b)).then_with(|| a.as_string_lossy().cmp(&b.as_string_lossy())),
     }
 }

@@ -76,6 +76,31 @@ fn output_sink_receives_print_prin_and_warn() {
 }
 
 #[test]
+fn show_hands_values_to_a_host_or_prints_a_text_table() {
+    let mut evaluator = Evaluator::new(Vec::new());
+    let captured = capture(&mut evaluator);
+    eval(&mut evaluator, "show([{id: 1, name: \"x\"}, {id: 22, extra: true}], \"two\")").unwrap();
+    let text = captured.lock().unwrap()[0].1.clone();
+    assert_eq!(text, "two\nid  name  extra\n1   x\n22        true\n");
+    captured.lock().unwrap().clear();
+    eval(&mut evaluator, "show {a: [1, 2]}").unwrap();
+    assert!(captured.lock().unwrap()[0].1.starts_with('{'));
+
+    type Shown = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+    let shown: Shown = Arc::default();
+    let sink = shown.clone();
+    evaluator.set_show(Arc::new(move |title, value| {
+        sink.lock().unwrap().push((title.map(str::to_string), value.clone()));
+    }));
+    captured.lock().unwrap().clear();
+    eval(&mut evaluator, "show([1, 2], \"list\")\nshow 3").unwrap();
+    let shown = shown.lock().unwrap();
+    assert_eq!(shown[0].0.as_deref(), Some("list"));
+    assert_eq!(shown[1], (None, Value::Int(3)));
+    assert!(captured.lock().unwrap().is_empty(), "a host sink replaces the text");
+}
+
+#[test]
 fn cancellation_stops_a_running_command() {
     let mut evaluator = Evaluator::new(Vec::new());
     let token = CancellationToken::new();

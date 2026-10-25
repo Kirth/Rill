@@ -19,6 +19,7 @@ enum Type {
     /// A string-keyed map and the type of its values.
     Map(Box<Type>),
     Duration,
+    Time,
     Path,
     Regex,
     Error,
@@ -84,6 +85,7 @@ impl fmt::Display for Type {
             Type::Map(value) if value.is_unknown() => write!(f, "Map"),
             Type::Map(value) => write!(f, "Map[Str, {value}]"),
             Type::Duration => write!(f, "Duration"),
+            Type::Time => write!(f, "Time"),
             Type::Path => write!(f, "Path"),
             Type::Regex => write!(f, "Regex"),
             Type::Error => write!(f, "Error"),
@@ -1945,10 +1947,11 @@ impl Checker {
                     || right_ty.is_unknown()
                     || (left_ty.is_numeric() && right_ty.is_numeric())
                     || (left_ty == Type::Str && right_ty == Type::Str)
-                    || (left_ty == Type::Duration && right_ty == Type::Duration);
+                    || (left_ty == Type::Duration && right_ty == Type::Duration)
+                    || (left_ty == Type::Time && right_ty == Type::Time);
                 if !orderable {
                     return Err(RillError::new(format!(
-                        "comparison needs two numbers, two strings, or two durations, got {left_ty} and {right_ty}"
+                        "comparison needs two numbers, strings, durations or times, got {left_ty} and {right_ty}"
                     )));
                 }
                 Ok(Type::Bool)
@@ -1982,6 +1985,28 @@ impl Checker {
             }
             BinaryOp::Add if left_ty == Type::Unknown || right_ty == Type::Unknown => {
                 Ok(Type::Unknown)
+            }
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::Pow
+                if left_ty == Type::Time || right_ty == Type::Time =>
+            {
+                match (op, &left_ty, &right_ty) {
+                    (BinaryOp::Add, Type::Time, Type::Duration)
+                    | (BinaryOp::Add, Type::Duration, Type::Time)
+                    | (BinaryOp::Sub, Type::Time, Type::Duration) => Ok(Type::Time),
+                    (BinaryOp::Sub, Type::Time, Type::Time) => Ok(Type::Duration),
+                    (BinaryOp::Add | BinaryOp::Sub, Type::Unknown, _)
+                    | (BinaryOp::Add | BinaryOp::Sub, _, Type::Unknown) => Ok(Type::Unknown),
+                    _ => Err(RillError::new(format!(
+                        "operator '{}' is not defined for {left_ty} and {right_ty}",
+                        operator_symbol(op)
+                    ))
+                    .with_help("times take `+`/`-` with a Duration, and `-` with another Time")),
+                }
             }
             BinaryOp::Add
             | BinaryOp::Sub
@@ -2387,6 +2412,7 @@ fn type_from_value(value: &Value) -> Type {
         Value::Tuple(items) => Type::Tuple(items.iter().map(type_from_value).collect()),
         Value::Map(_) => Type::map_any(),
         Value::Duration(_) => Type::Duration,
+        Value::Time(_) => Type::Time,
         Value::Path(_) => Type::Path,
         Value::Regex(_) => Type::Regex,
         Value::Error(_) => Type::Error,
@@ -2424,6 +2450,7 @@ fn method_kind(ty: &Type) -> crate::methods::Kind {
         Type::Path => Kind::Path,
         Type::Regex => Kind::Regex,
         Type::Duration => Kind::Duration,
+        Type::Time => Kind::Time,
         Type::ProcessHandle => Kind::ProcessHandle,
         Type::Int => Kind::Int,
         Type::Bool => Kind::Bool,
@@ -2446,7 +2473,10 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::Map => Type::map_any(),
         Return::MapOfItem => Type::Map(Box::new(receiver.list_item())),
         Return::ListMap => Type::List(Box::new(Type::map_any())),
+        Return::Time => Type::Time,
+        Return::Duration => Type::Duration,
         Return::OptionMap => Type::Option(Box::new(Type::map_any())),
+        Return::OptionUnknown => Type::Option(Box::new(Type::Unknown)),
         Return::MapListMap => Type::Map(Box::new(Type::List(Box::new(Type::map_any())))),
         Return::Path => Type::Path,
         Return::ProcessResult => Type::ProcessResult,
@@ -2555,6 +2585,7 @@ fn type_from_name(name: &TypeName) -> Type {
             Type::Map(Box::new(value.as_deref().map(type_from_name).unwrap_or(Type::Unknown)))
         }
         TypeName::Duration => Type::Duration,
+        TypeName::Time => Type::Time,
         TypeName::Path => Type::Path,
         TypeName::Regex => Type::Regex,
         TypeName::Error => Type::Error,
@@ -2814,6 +2845,7 @@ fn compound_assignment_type(op: AssignOp, current: &Type, value: &Type) -> Resul
             Type::Int | Type::Float,
         ) => Ok(common_type(current.clone(), value.clone())),
         (AssignOp::Add | AssignOp::Sub, Type::Duration, Type::Duration) => Ok(Type::Duration),
+        (AssignOp::Add | AssignOp::Sub, Type::Time, Type::Duration) => Ok(Type::Time),
         (AssignOp::Mul | AssignOp::Div, Type::Duration, Type::Int | Type::Float) => {
             Ok(Type::Duration)
         }

@@ -49,7 +49,7 @@ fn strings_compare_lexicographically() {
     assert_eq!(run("\"a\" < \"b\""), Value::Bool(true));
     assert_eq!(run("\"B\" < \"a\""), Value::Bool(true));
     assert_eq!(run("\"\" <= \"\""), Value::Bool(true));
-    assert!(check_err("\"a\" < 1").contains("two numbers, two strings, or two durations"));
+    assert!(check_err("\"a\" < 1").contains("numbers, strings, durations or times"));
 }
 
 #[test]

@@ -657,8 +657,10 @@ fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), RillError> {
                         "false" => TokenKind::False,
                         "null" => TokenKind::Null,
                         "Bool" | "Int" | "Float" | "Str" | "Bytes" | "List" | "Map"
-                        | "Duration" | "Path" | "Regex" | "ProcessResult" | "ProcessHandle"
-                        | "Error" | "Fn" | "Option" | "Result" => TokenKind::TypeIdent(text),
+                        | "Duration" | "Time" | "Path" | "Regex" | "ProcessResult"
+                        | "ProcessHandle" | "Error" | "Fn" | "Option" | "Result" => {
+                            TokenKind::TypeIdent(text)
+                        }
                         _ => TokenKind::Ident(text),
                     }
                 };
@@ -2551,7 +2553,8 @@ impl Parser {
             }
             // `print {a: 1}`: only for output builtins, so `if ok {` stays a block.
             TokenKind::LBrace => {
-                spaced && matches!(callee, "print" | "prin" | "warn" | "pretty_print" | "die")
+                spaced
+                    && matches!(callee, "print" | "prin" | "warn" | "pretty_print" | "show" | "die")
             }
             _ => false,
         }
@@ -2640,6 +2643,7 @@ impl Parser {
                 }
             }
             "Duration" => TypeName::Duration,
+            "Time" => TypeName::Time,
             "Path" => TypeName::Path,
             "Regex" => TypeName::Regex,
             "Error" => TypeName::Error,
@@ -2922,6 +2926,8 @@ fn parse_number(text: &str, span: Span) -> Result<Literal, RillError> {
         ("s", 1_000_000_000.0),
         ("m", 60_000_000_000.0),
         ("h", 3_600_000_000_000.0),
+        ("d", 86_400_000_000_000.0),
+        ("w", 604_800_000_000_000.0),
     ] {
         if let Some(raw) = text.strip_suffix(suffix) {
             let nanos = raw.parse::<f64>().map_err(|_| {

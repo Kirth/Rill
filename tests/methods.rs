@@ -425,6 +425,7 @@ fn registry_arities_conform_between_checker_and_evaluator() {
             (_, Kind::Path) => format!(r#"path("{}")"#, scratch.0.join(method.name).display()),
             (_, Kind::Regex) => "/a/".to_string(),
             (_, Kind::Duration) => "0s".to_string(),
+            (_, Kind::Time) => r#""2026-01-01T00:00:00Z".parse_time()"#.to_string(),
             (_, Kind::Int) => "0".to_string(),
             (_, Kind::Float) => "0.0".to_string(),
             (_, Kind::Bool) => "true".to_string(),

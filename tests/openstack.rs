@@ -330,10 +330,7 @@ fn relations_between_network_records() {
 fn hypervisors_list_their_servers_and_match_by_fragment() {
     let names = run(r#"ostack.hypervisor("compute-1").servers().map(.name)"#);
     assert_eq!(names, strs(&["web-1", "web-1"]));
-    assert_eq!(
-        run(r#"ostack.hypervisor("lab-compute-2").servers().map(.name)"#),
-        strs(&["db-1"])
-    );
+    assert_eq!(run(r#"ostack.hypervisor("lab-compute-2").servers().map(.name)"#), strs(&["db-1"]));
     let error = run_err(r#"ostack.hypervisor("compute")"#);
     assert!(error.contains("matches 2 hypervisors"), "{error}");
     // By id it is a single show; by numeric id too.

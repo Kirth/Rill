@@ -134,13 +134,15 @@ Parentheses are required even for zero-argument methods.
 
 | Receiver | Methods |
 |---|---|
-| `Str` | `trim lines split(sep) upper lower len contains(part) starts_with ends_with repeat(n) index_of(part) replace(pattern, with, all=false) is_match(regex) glob sha256 parse_json parse_yaml parse_toml parse_csv parse_url` |
+| `Str` | `trim lines split(sep) upper lower len contains(part) starts_with ends_with repeat(n) index_of(part) replace(pattern, with, all=false) is_match(regex) glob sha256 parse_json parse_yaml parse_toml parse_xml parse_csv parse_url` |
 | `List` | `map filter flat_map flatten find any all(f) count(f) first last get(i) take(n) skip(n) slice(a, b) step(n) reverse sort sort_by(f) unique sum contains len join(sep) zip(other) enumerate group_by(f) index_by(f) difference symmetric_difference parallel_map parallel_filter run spawn parallel` |
 | `Map` | `get(key) keys values entries contains_key merge(other) len map parallel_map` |
+| XML element (`Map`) | `select(path) select_one(path) to_xml`; `select` and `select_one` also take a list of elements |
 | `Option` | `is_some is_none unwrap unwrap_or unwrap_or_else expect map and_then ok_or` |
 | `Result` | `is_ok is_err ok err unwrap unwrap_or unwrap_or_else expect map map_err and_then` |
 | `Path` | `exists is_file is_dir read_text read_lines read_yaml write append mkdir rename stat ls join parent basename stem extension canonicalize archive_list archive_extract` |
 | `Duration` | `secs ms us ns as_secs_float sleep` |
+| `Time` | `year month day hour minute second weekday unix date iso format(fmt) age` |
 | `Int` | `human_size` |
 | `ProcessHandle` | `await` |
 | any value | `to_json to_json_pretty to_yaml to_toml` |
@@ -249,3 +251,70 @@ disables it). TLS verification is off unless `OS_VERIFY_TLS=1`, as in the CLI.
 `RILL_OPENSTACK_FIXTURE=<dir>` serves `<dir>/<collection>.json` files instead of
 a cloud; see `tests/fixtures/openstack` and `examples/openstack_attached.ril`.
 
+## Times
+
+`text.parse_time()` turns a timestamp into a `Time` (kept in UTC): RFC 3339 /
+ISO 8601 with `Z` or an offset, the same without a zone (taken as UTC, as Nova
+and Keystone write it), `YYYY-MM-DD HH:MM:SS`, or a bare `YYYY-MM-DD`. With an
+argument it uses strftime syntax: `"15/10/2026 14:29".parse_time("%d/%m/%Y %H:%M")`.
+A string that does not parse raises an error.
+
+```ril
+let updated = server.updated.parse_time()
+updated < time.now() - 7d                 # compare with <, <=, >, >=, ==, !=
+updated.age() > 30d                       # how long ago, as a Duration
+let gap = time.now() - updated            # Time - Time is a Duration
+servers.sort_by(.updated.parse_time())    # times sort and group like numbers
+updated.format("%Y-%m-%d %H:%M")  updated.date()  updated.weekday()  updated.unix()
+time.now()  time.parse("2026-10-15")  time.from_unix(1792074561)
+```
+
+`Time ± Duration` is a `Time`; `Time - Time` is a `Duration` and raises when the
+result would be negative. Duration literals include `d` (days) and `w` (weeks).
+Times print and serialise as RFC 3339 (`2026-10-15T14:29:21Z`).
+
+## XML
+
+`text.parse_xml()` turns XML into its root element. Every element is a plain
+record with the same four fields, so a tag that appears once or many times is
+always a list entry in `children`:
+
+| Field | Value |
+|---|---|
+| `tag` | the name as written, with its prefix (`domain`, `qemu:commandline`) |
+| `attrs` | a Map of attribute values in document order; namespace declarations (`xmlns:qemu`) included |
+| `text` | the element's own text, trimmed (`""` when none); CDATA counts as text |
+| `children` | a List of child element records |
+
+Comments, processing instructions and whitespace-only text are dropped.
+`el.select(path)` returns every match as a List and `el.select_one(path)` the
+first as an Option. Both also take a list of elements, so selections chain.
+Paths are a small XPath subset, relative to the element:
+
+| Path | Matches |
+|---|---|
+| `devices/disk` | child elements by tag, step by step |
+| `*` / `.` | any child element / the element itself |
+| `//graphics`, `devices//source` | elements at any depth |
+| `disk[@device]`, `disk[@device='cdrom']` | elements with the attribute, or with that value |
+| `disk[readonly]`, `.[name='vm1']` | elements with that child, or whose child has that text |
+| `disk[2]` | the second match, counting from 1 |
+| `…/@file` | the attribute's value as a Str (elements without it are skipped) |
+| `…/text()` | the element's text as a Str |
+
+```ril
+let dom = $(virsh dumpxml vm1).out.parse_xml()
+dom.attrs.type                                           # "kvm"
+dom.select_one("name/text()")                            # some("vm1")
+dom.select("devices/disk[@device='disk']/source/@file")  # the disk images
+dom.select("devices/interface").map(|i| (i.select_one("mac/@address"), i.select_one("source/@bridge")))
+dom.select("//graphics/@port")
+```
+
+`el.to_xml()` writes an element back as indented XML without a declaration, as
+`virsh dumpxml` does; `text.parse_xml().to_xml().parse_xml()` gives the same
+record. Missing `attrs`, `text` or `children` count as empty and attribute
+values may be any value, so `{tag: "boot", attrs: {dev: "hd"}}.to_xml()` works.
+Edit a document with nested assignment on a `var`
+(`d.children[0].text = "vm2"`); `select` returns copies, so changing its results
+does not change the document.

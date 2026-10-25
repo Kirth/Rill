@@ -5,6 +5,12 @@ All notable changes to Rill are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `show value` / `show(value, title)`: records print as a text table and anything else as
+  the pretty value; a host that installs `Evaluator::set_show` (eddy, eddy-web)
+  gets the value itself and draws a live table or tree.
+
 This is the first release with a changelog. Everything below compares against
 the single-commit prototype that preceded it.
 
@@ -70,6 +76,17 @@ the single-commit prototype that preceded it.
   names. Floating IPs, security groups and routers are kinds, and records
   follow relations by kind (`port.server()`, `subnet.routers()`,
   `hypervisor.servers()`, `server.security_groups()`, …).
+- A `Time` type: `text.parse_time(format?)`, `time.now()`, `time.parse`,
+  `time.from_unix`; comparisons, `Time ± Duration`, `Time - Time`, and
+  `year month day hour minute second weekday unix date iso format age`.
+  Duration literals gain `d` and `w`.
+- XML: `text.parse_xml()` gives element records `{tag, attrs, text, children}`;
+  `el.select(path)` / `el.select_one(path)` query them with an XPath subset
+  (`a/b`, `//a`, `a[@k='v']`, `a[child]`, `a[2]`, `…/@attr`, `…/text()`);
+  `el.to_xml()` writes them back.
+- Field-access errors show the offending value: a missing field prints the
+  record (bounded, uncoloured), a "did you mean" for close keys and a
+  `.get("name")` hint; `?` on a plain value shows that value too.
 - ostack relations and exact IP/MAC searches use server-side filters and
   single GETs instead of whole listings. New kinds: keypairs, server groups,
   aggregates, availability zones, compute services, network agents,

@@ -1319,14 +1319,14 @@ fn function_used_before_definition_statement_errors() {
 #[test]
 fn with_env_applies_to_called_functions_and_is_restored() {
     let source = r#"
-        fn show() { env.get("RILL_WITH_ENV_TEST") }
+        fn read_probe() { env.get("RILL_WITH_ENV_TEST") }
         fn with_env_probe() {
             var seen = null
-            with env { RILL_WITH_ENV_TEST = "x" } { seen = show() }
+            with env { RILL_WITH_ENV_TEST = "x" } { seen = read_probe() }
             seen
         }
         let inside = with_env_probe()
-        [inside, show()]
+        [inside, read_probe()]
     "#;
     assert_eq!(run(source), Value::list(vec![Value::Str("x".into()), Value::Null]));
 }

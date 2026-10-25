@@ -106,6 +106,7 @@ pub enum TypeName {
     /// `Map` or `Map[Str, V]`; keys are always strings.
     Map(Option<Box<TypeName>>),
     Duration,
+    Time,
     Path,
     Regex,
     Error,

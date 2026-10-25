@@ -26,6 +26,8 @@ tar = "0.4"
 libc = "0.2"
 indexmap = "2"
 strsim = "0.11"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+roxmltree = "0.20"
 # The `ostack.*` namespace (feature `openstack`); Kirth's OpenStack client crate.
 ostack = { path = "../../LeafCloud/FastOpenStackCLI", optional = true, default-features = false }
 anyhow = { version = "1", optional = true }

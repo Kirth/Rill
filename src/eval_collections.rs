@@ -14,6 +14,7 @@ pub(crate) enum HashKey {
     Tuple(Vec<HashKey>),
     Map(Vec<(String, HashKey)>),
     Duration(std::time::Duration),
+    Time(chrono::DateTime<chrono::Utc>),
     Path(PathBuf),
     Regex(String),
     Error {
@@ -51,6 +52,7 @@ fn hash_key(value: &Value) -> Option<HashKey> {
             HashKey::Map(pairs)
         }
         Value::Duration(value) => HashKey::Duration(*value),
+        Value::Time(value) => HashKey::Time(*value),
         Value::Path(value) => HashKey::Path(value.clone()),
         Value::Regex(value) => HashKey::Regex(value.clone()),
         Value::Error(value) => HashKey::Error {
