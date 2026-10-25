@@ -6,5 +6,9 @@ with env { RILL_INNER = "in" } {
 }
 let r = run sh -c "echo \$\{RILL_INNER:-unset\}"
 print(r.out.trim())
+let inner = with env { RILL_INNER = "value" } { run! sh -c "echo \$RILL_INNER" }
+print(inner.trim())
+let remote = on ["env"] { run! echo prefixed }
+print(remote.trim())
 let p = path("a/b/../c.txt")
 print(p.basename(), p.extension(), p.stem(), p.parent())

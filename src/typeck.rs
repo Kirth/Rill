@@ -262,7 +262,9 @@ pub(crate) fn check_module(
     checker.check_program(program)
 }
 
-/// A checker whose scope persists across inputs, for the REPL.
+/// A checker whose scope persists across inputs, for the REPL.  Cloning
+/// gives an independent session, so a host can try an input on a copy.
+#[derive(Clone)]
 pub struct Session {
     checker: Checker,
 }
@@ -296,6 +298,28 @@ impl Session {
     pub fn names(&self) -> Vec<String> {
         self.checker.env.names().into_iter().map(str::to_string).collect()
     }
+
+    /// The receiver kind of an expression in the current scope, for looking
+    /// up which methods apply to it.  Like `type_of`, this may record
+    /// diagnostics in the session, so hosts query a clone.
+    pub fn kind_of(&mut self, expr: &Expr) -> Result<crate::methods::Kind, RillError> {
+        let ty = self.checker.check_expr(expr)?;
+        Ok(method_kind(&ty))
+    }
+
+    /// Every global binding as `(name, type, mutable)`, sorted by name.
+    pub fn binding_types(&self) -> Vec<(String, String, bool)> {
+        self.checker
+            .env
+            .scopes
+            .first()
+            .map(|root| {
+                root.iter()
+                    .map(|(name, binding)| (name.clone(), binding.ty.to_string(), binding.mutable))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +329,7 @@ enum TryKind {
     Unknown,
 }
 
+#[derive(Clone)]
 struct Checker {
     env: Env,
     return_expected: Option<Type>,
@@ -950,26 +975,6 @@ impl Checker {
                 }
                 Ok(Type::Null)
             }
-            Stmt::WithEnv { bindings, body } => {
-                for (_, expr) in bindings {
-                    let ty = self.check_expr(expr)?;
-                    ensure_assignable(&Type::Str, &ty)?;
-                }
-                self.env.push();
-                self.check_stmts(body)?;
-                self.pop_scope();
-                Ok(Type::Null)
-            }
-            Stmt::On { host, body } => {
-                let host_ty = self.check_expr(host)?;
-                if !matches!(host_ty, Type::Str | Type::List(_) | Type::Unknown) {
-                    return Err(RillError::new(format!("on needs Str or List, got {host_ty}")));
-                }
-                self.env.push();
-                self.check_stmts(body)?;
-                self.pop_scope();
-                Ok(Type::Null)
-            }
             Stmt::Return(expr) => {
                 if self.function_depth == 0 {
                     return Err(RillError::new("return outside function"));
@@ -1253,6 +1258,26 @@ impl Checker {
                 self.pop_scope();
                 Ok(ty)
             }
+            Expr::WithEnv { bindings, body } => {
+                for (_, expr) in bindings {
+                    let ty = self.check_expr(expr)?;
+                    ensure_assignable(&Type::Str, &ty)?;
+                }
+                self.env.push();
+                let ty = self.check_stmts(body)?;
+                self.pop_scope();
+                Ok(ty)
+            }
+            Expr::On { host, body } => {
+                let host_ty = self.check_expr(host)?;
+                if !matches!(host_ty, Type::Str | Type::List(_) | Type::Unknown) {
+                    return Err(RillError::new(format!("on needs Str or List, got {host_ty}")));
+                }
+                self.env.push();
+                let ty = self.check_stmts(body)?;
+                self.pop_scope();
+                Ok(ty)
+            }
             Expr::Closure { params, body, propagation } => {
                 let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let previous_loop_stack = std::mem::take(&mut self.loop_stack);
@@ -1364,6 +1389,9 @@ impl Checker {
                                 Some(Type::Function { arity: None, .. })
                             )))
                 {
+                    if let Some(function) = crate::methods::namespace_function(module, name) {
+                        return self.check_namespace_function(function, args);
+                    }
                     // Stream.tail handled specially — not in METHODS table
                     if module == "Stream" && name == "tail" {
                         for arg in args {
@@ -1382,6 +1410,38 @@ impl Checker {
             }
         }
         self.check_function_call(callee, args)
+    }
+
+    /// `ostack.servers(all_projects=true)`: a namespace function without a
+    /// receiver, validated against its table entry.
+    fn check_namespace_function(
+        &mut self,
+        function: &'static crate::methods::NamespaceFunction,
+        args: &[Expr],
+    ) -> Result<Type, RillError> {
+        let mut positional = Vec::new();
+        let mut named = Vec::new();
+        for arg in args {
+            match arg.unspanned() {
+                Expr::NamedArg { name, value } => {
+                    let ty = self.check_expr(value)?;
+                    named.push((name.clone(), method_kind(&ty)));
+                }
+                _ => {
+                    if !named.is_empty() {
+                        return Err(RillError::new(
+                            "positional arguments must come before named arguments",
+                        ));
+                    }
+                    let ty = self.check_expr(arg)?;
+                    positional.push(method_kind(&ty));
+                }
+            }
+        }
+        let named: Vec<(&str, crate::methods::Kind)> =
+            named.iter().map(|(name, kind)| (name.as_str(), *kind)).collect();
+        function.validate(&positional, &named)?;
+        Ok(resolve_method_return(function.returns, &Type::Unknown, &[]))
     }
 
     fn check_namespace_method(
@@ -1808,6 +1868,19 @@ impl Checker {
                         arity: None,
                         params: None,
                         return_type: Box::new(Type::Stream),
+                    });
+                }
+                if let Some(function) = crate::methods::namespace_function(module, name) {
+                    return Ok(Type::Function {
+                        required: Some(function.min_args),
+                        names: None,
+                        arity: Some(function.positional.len()),
+                        params: None,
+                        return_type: Box::new(resolve_method_return(
+                            function.returns,
+                            &Type::Unknown,
+                            &[],
+                        )),
                     });
                 }
                 if crate::methods::namespace_method(module, name).is_some() {
@@ -2371,6 +2444,10 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::Float => Type::Float,
         Return::Str => Type::Str,
         Return::Map => Type::map_any(),
+        Return::MapOfItem => Type::Map(Box::new(receiver.list_item())),
+        Return::ListMap => Type::List(Box::new(Type::map_any())),
+        Return::OptionMap => Type::Option(Box::new(Type::map_any())),
+        Return::MapListMap => Type::Map(Box::new(Type::List(Box::new(Type::map_any())))),
         Return::Path => Type::Path,
         Return::ProcessResult => Type::ProcessResult,
         Return::ProcessHandle => Type::ProcessHandle,
@@ -2643,10 +2720,11 @@ fn contains_implicit(expr: &Expr) -> bool {
                 contains_implicit(target) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
-            Stmt::On { host, .. } => contains_implicit(host),
             Stmt::Return(Some(expr)) => contains_implicit(expr),
             _ => false,
         }),
+        Expr::On { host, .. } => contains_implicit(host),
+        Expr::WithEnv { bindings, .. } => bindings.iter().any(|(_, expr)| contains_implicit(expr)),
         Expr::Unary { operand, .. } => contains_implicit(operand),
         Expr::Closure { .. } | Expr::Literal(_) | Expr::Ident(_) | Expr::Command(_) => false,
         Expr::Located { expr, .. } => contains_implicit(expr),
@@ -2932,7 +3010,9 @@ fn stmts_always_yield(stmts: &[Stmt]) -> bool {
 fn expr_always_yields(expr: &Expr) -> bool {
     match expr.unspanned() {
         Expr::Match { arms, .. } => arms.iter().all(|arm| expr_always_yields(&arm.expr)),
-        Expr::Block(body) => stmts_always_yield(body),
+        Expr::Block(body) | Expr::On { body, .. } | Expr::WithEnv { body, .. } => {
+            stmts_always_yield(body)
+        }
         Expr::If { then_body, else_body, .. } => {
             !else_body.is_empty() && stmts_always_yield(then_body) && stmts_always_yield(else_body)
         }

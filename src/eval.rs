@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
-use tokio_util::sync::CancellationToken;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+pub use tokio_util::sync::CancellationToken;
 
 /// Stack reserved for the evaluator thread (see `lib::run_compiled`).  Debug
 /// builds use far larger frames, so they get twice the reservation.
@@ -305,9 +305,38 @@ impl EvalError {
     }
 }
 
+/// Which standard stream a piece of script output was written to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutStream {
+    Stdout,
+    Stderr,
+}
+
+/// Receives everything `print`, `prin`, `warn` and `pretty_print` write, and
+/// the output of child processes whose inherited streams were captured (see
+/// [`IoPolicy`]).  Installed with [`Evaluator::set_output`]; without one, the
+/// evaluator writes to the real stdout and stderr.
+pub type OutputSink = Arc<dyn Fn(OutStream, &str) + Send + Sync>;
+
+/// How child processes may touch the host's terminal.  The default changes
+/// nothing; an embedding host that owns the terminal (an IDE in raw mode)
+/// turns both on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoPolicy {
+    /// Give children `/dev/null` as stdin unless the script pipes input or
+    /// asks for `stdin: inherit` explicitly, instead of the host's stdin.
+    pub null_stdin: bool,
+    /// Capture `stdout: inherit` / `stderr: inherit` streams and forward them
+    /// through the output sink instead of letting the child write to the
+    /// terminal.  The script still sees empty `out`/`err` for those streams.
+    pub capture_inherited: bool,
+}
+
 #[derive(Clone)]
 pub struct Evaluator {
     env: Env,
+    output: Option<OutputSink>,
+    io_policy: IoPolicy,
     /// The process environment seen by `env.NAME`, `set_env`, `with env`, and
     /// child processes.  Evaluator-local; the host process is never mutated.
     environment: BTreeMap<String, String>,
@@ -319,6 +348,15 @@ pub struct Evaluator {
     executor: ParallelExecutor,
     cancellation: CancellationToken,
     cancellation_active: bool,
+}
+
+/// The value of a block used as an expression: `return`, `break` and friends
+/// keep unwinding through the enclosing expression.
+fn block_value(flow: Flow) -> Result<Value, EvalError> {
+    match flow {
+        Flow::Value(value) => Ok(value),
+        flow => Err(EvalError::Control(flow)),
+    }
 }
 
 impl Evaluator {
@@ -455,6 +493,8 @@ impl Evaluator {
     ) -> Self {
         Self {
             env: Env::new(args, input),
+            output: None,
+            io_policy: IoPolicy::default(),
             environment,
             function_depth: 0,
             steps: 0,
@@ -472,6 +512,8 @@ impl Evaluator {
         env.frozen = env.scopes.len();
         Self {
             env,
+            output: self.output.clone(),
+            io_policy: self.io_policy,
             environment: self.environment.clone(),
             function_depth: self.function_depth,
             steps: 0,
@@ -479,6 +521,96 @@ impl Evaluator {
             executor: self.executor.clone(),
             cancellation,
             cancellation_active: true,
+        }
+    }
+
+    /// Route script output through `sink` instead of the process's stdio.
+    pub fn set_output(&mut self, sink: OutputSink) {
+        self.output = Some(sink);
+    }
+
+    /// Make this evaluator stop at `token`: statements poll it, `sleep` wakes
+    /// up, and child processes are killed.  Tokens are one-shot, so a host
+    /// installs a fresh one before every run.
+    pub fn set_cancellation(&mut self, token: CancellationToken) {
+        self.cancellation = token;
+        self.cancellation_active = true;
+    }
+
+    pub fn set_io_policy(&mut self, policy: IoPolicy) {
+        self.io_policy = policy;
+    }
+
+    /// An independent copy of this evaluator's state.  `clone` shares `var`
+    /// cells with the original, so a later assignment would show through;
+    /// a snapshot copies them, which is what a session that can go back to an
+    /// earlier point needs.  Closures created before the snapshot keep
+    /// referring to the cells they captured.
+    pub fn snapshot(&self) -> Self {
+        let mut copy = self.clone();
+        for scope in &mut copy.env.scopes {
+            let scope = Arc::make_mut(scope);
+            for binding in scope.values_mut() {
+                if let Slot::Cell(cell) = &binding.slot {
+                    let value = cell.read().unwrap_or_else(|error| error.into_inner()).clone();
+                    binding.slot = Slot::Cell(Arc::new(RwLock::new(value)));
+                }
+            }
+        }
+        copy
+    }
+
+    /// The current value of a name in scope.
+    pub fn binding(&self, name: &str) -> Option<Value> {
+        self.env.get(name)
+    }
+
+    /// Every global binding with its current value, sorted by name.
+    pub fn bindings(&self) -> Vec<(String, Value)> {
+        self.binding_names()
+            .into_iter()
+            .filter_map(|name| self.env.get(&name).map(|value| (name, value)))
+            .collect()
+    }
+
+    /// Write script output to the sink, or to the real stream without one.
+    fn emit(&self, stream: OutStream, text: &str) -> Result<(), RillError> {
+        use std::io::Write;
+        if let Some(sink) = &self.output {
+            sink(stream, text);
+            return Ok(());
+        }
+        let (name, result) = match stream {
+            OutStream::Stdout => {
+                let mut stdout = std::io::stdout().lock();
+                ("stdout", stdout.write_all(text.as_bytes()).and_then(|()| stdout.flush()))
+            }
+            OutStream::Stderr => {
+                let mut stderr = std::io::stderr().lock();
+                ("stderr", stderr.write_all(text.as_bytes()).and_then(|()| stderr.flush()))
+            }
+        };
+        result.map_err(|error| RillError::new(format!("failed to write {name}: {error}")))
+    }
+
+    /// Which of a command's inherited streams the policy turns into captures.
+    fn forced_capture(&self, io: &CommandIo) -> (bool, bool) {
+        if !self.io_policy.capture_inherited {
+            return (false, false);
+        }
+        (io.stdout_mode == StreamMode::Inherit, io.stderr_mode == StreamMode::Inherit)
+    }
+
+    /// Forward captured-instead-of-inherited output to the sink and hide it
+    /// from the script, which expected an inherited stream to capture nothing.
+    fn forward_forced(&self, result: &mut crate::types::ProcessResult, forced: (bool, bool)) {
+        if forced.0 {
+            let _ = self.emit(OutStream::Stdout, &String::from_utf8_lossy(&result.out));
+            result.out.clear();
+        }
+        if forced.1 {
+            let _ = self.emit(OutStream::Stderr, &String::from_utf8_lossy(&result.err));
+            result.err.clear();
         }
     }
 
@@ -567,12 +699,15 @@ impl Evaluator {
         input: Option<Vec<u8>>,
         io: &CommandIo,
     ) -> Result<crate::types::ProcessResult, RillError> {
-        let io = self.command_io_with_environment(io.clone())?;
-        if self.cancellation_active {
+        let forced = self.forced_capture(io);
+        let io = self.command_io_with_environment(io.clone(), input.is_some())?;
+        let mut result = if self.cancellation_active {
             run_command_cancellable(argv, input, &io, &self.cancellation)
         } else {
             run_command(argv, input, &io)
-        }
+        }?;
+        self.forward_forced(&mut result, forced);
+        Ok(result)
     }
 
     fn execute_pipeline(
@@ -580,16 +715,20 @@ impl Evaluator {
         argv: &[Vec<String>],
         io: &[CommandIo],
     ) -> Result<crate::types::ProcessResult, RillError> {
+        let forced = io.last().map(|last| self.forced_capture(last)).unwrap_or((false, false));
         let io = io
             .iter()
             .cloned()
-            .map(|config| self.command_io_with_environment(config))
+            .enumerate()
+            .map(|(index, config)| self.command_io_with_environment(config, index > 0))
             .collect::<Result<Vec<_>, _>>()?;
-        if self.cancellation_active {
+        let mut result = if self.cancellation_active {
             run_pipeline_cancellable(argv, &io, &self.cancellation)
         } else {
             run_pipeline(argv, &io)
-        }
+        }?;
+        self.forward_forced(&mut result, forced);
+        Ok(result)
     }
 
     fn lookup_environment_value(&self, name: &str) -> Option<Value> {
@@ -598,10 +737,28 @@ impl Evaluator {
             .or_else(|| self.environment.get(name).map(|value| Value::Str(value.clone())))
     }
 
-    fn command_io_with_environment(&self, mut io: CommandIo) -> Result<CommandIo, RillError> {
+    /// Fill in the process environment and apply the [`IoPolicy`].  `piped`
+    /// says the child's stdin is already connected to script input or to the
+    /// previous pipeline stage.
+    fn command_io_with_environment(
+        &self,
+        mut io: CommandIo,
+        piped: bool,
+    ) -> Result<CommandIo, RillError> {
         let explicit = std::mem::take(&mut io.env);
         io.env = self.environment.clone();
         io.env.extend(explicit);
+        if self.io_policy.null_stdin && !piped && io.stdin_file.is_none() && !io.stdin_inherit {
+            io.stdin_null = true;
+        }
+        if self.io_policy.capture_inherited {
+            if io.stdout_mode == StreamMode::Inherit {
+                io.stdout_mode = StreamMode::Capture;
+            }
+            if io.stderr_mode == StreamMode::Inherit {
+                io.stderr_mode = StreamMode::Capture;
+            }
+        }
         Ok(io)
     }
 
@@ -1035,50 +1192,6 @@ impl Evaluator {
                 let value = self.eval_expr(expr)?;
                 Ok(Flow::Emit(value))
             }
-            Stmt::WithEnv { bindings, body } => {
-                let values = bindings
-                    .iter()
-                    .map(|(name, expr)| Ok((name.clone(), self.eval_expr(expr)?.as_string_lossy())))
-                    .collect::<Result<Vec<_>, EvalError>>()?;
-                let saved = self.environment.clone();
-                for (name, value) in values {
-                    self.environment.insert(name, value);
-                }
-                let result = self.scoped(|evaluator| evaluator.eval_stmts(body));
-                self.environment = saved;
-                result
-            }
-            Stmt::On { host, body } => {
-                let host_val = self.eval_expr(host)?;
-                let prefix = match host_val {
-                    Value::Str(host) => {
-                        validate_remote_name("ssh host", &host)?;
-                        RemoteLayer::Ssh(host)
-                    }
-                    Value::List(items) => {
-                        if items.is_empty() {
-                            return Err(RillError::new("on needs a nonempty command prefix").into());
-                        }
-                        RemoteLayer::Exec(
-                            Arc::unwrap_or_clone(items)
-                                .into_iter()
-                                .map(|v| v.as_string_lossy())
-                                .collect(),
-                        )
-                    }
-                    other => {
-                        return Err(RillError::new(format!(
-                            "on needs Str or List[Str], got {}",
-                            other.type_name()
-                        ))
-                        .into())
-                    }
-                };
-                self.remote_prefix.push(prefix);
-                let result = self.eval_stmts(body);
-                self.remote_prefix.pop();
-                result
-            }
             Stmt::Return(expr) => {
                 let value = match expr {
                     Some(expr) => self.eval_expr(expr)?,
@@ -1273,6 +1386,12 @@ impl Evaluator {
             Expr::Field { base, name } => {
                 if let Expr::Ident(module) = base.unspanned() {
                     if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
+                        if crate::methods::namespace_function(module, name).is_some() {
+                            return Err(RillError::new(format!(
+                                "{module}.{name} must be called: {module}.{name}()"
+                            ))
+                            .into());
+                        }
                         if crate::methods::namespace_method(module, name).is_some() {
                             let call = Expr::Call {
                                 callee: Box::new(Expr::Field {
@@ -1459,6 +1578,50 @@ impl Evaluator {
                     Flow::Value(value) => Ok(value),
                     flow => Err(EvalError::Control(flow)),
                 }
+            }
+            Expr::WithEnv { bindings, body } => {
+                let values = bindings
+                    .iter()
+                    .map(|(name, expr)| Ok((name.clone(), self.eval_expr(expr)?.as_string_lossy())))
+                    .collect::<Result<Vec<_>, EvalError>>()?;
+                let saved = self.environment.clone();
+                for (name, value) in values {
+                    self.environment.insert(name, value);
+                }
+                let result = self.scoped(|evaluator| evaluator.eval_stmts(body));
+                self.environment = saved;
+                block_value(result?)
+            }
+            Expr::On { host, body } => {
+                let host_val = self.eval_expr(host)?;
+                let prefix = match host_val {
+                    Value::Str(host) => {
+                        validate_remote_name("ssh host", &host)?;
+                        RemoteLayer::Ssh(host)
+                    }
+                    Value::List(items) => {
+                        if items.is_empty() {
+                            return Err(RillError::new("on needs a nonempty command prefix").into());
+                        }
+                        RemoteLayer::Exec(
+                            Arc::unwrap_or_clone(items)
+                                .into_iter()
+                                .map(|v| v.as_string_lossy())
+                                .collect(),
+                        )
+                    }
+                    other => {
+                        return Err(RillError::new(format!(
+                            "on needs Str or List[Str], got {}",
+                            other.type_name()
+                        ))
+                        .into())
+                    }
+                };
+                self.remote_prefix.push(prefix);
+                let result = self.scoped(|evaluator| evaluator.eval_stmts(body));
+                self.remote_prefix.pop();
+                block_value(result?)
             }
             Expr::Closure { params, body, propagation } => Ok(self.make_function(
                 Function {
@@ -1866,6 +2029,9 @@ impl Evaluator {
         if let Expr::Field { base, name } = callee.unspanned() {
             if let Expr::Ident(module) = base.unspanned() {
                 if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
+                    if let Some(function) = crate::methods::namespace_function(module, name) {
+                        return self.eval_namespace_function(function, args);
+                    }
                     if let Some(call) = crate::methods::namespace_method(module, name) {
                         return self.eval_namespace_method(module, name, call, args);
                     }
@@ -2528,7 +2694,7 @@ impl Evaluator {
                 let handle = TokioProcessRuntime.spawn(ProcessSpec {
                     argv,
                     input: None,
-                    io: self.command_io_with_environment(CommandIo::default())?,
+                    io: self.command_io_with_environment(CommandIo::default(), false)?,
                     cancellation: None,
                 })?;
                 Ok(Value::ProcessHandle(handle))
@@ -2557,7 +2723,7 @@ impl Evaluator {
                         Ok(ProcessSpec {
                             argv: self.wrap_remote(argv_from_value(command, "parallel")?, false)?,
                             input: None,
-                            io: self.command_io_with_environment(CommandIo::default())?,
+                            io: self.command_io_with_environment(CommandIo::default(), false)?,
                             cancellation: self
                                 .cancellation_active
                                 .then(|| self.cancellation.child_token()),
@@ -2612,6 +2778,54 @@ impl Evaluator {
             "zip" => self.eval_zip(args),
             "enumerate" => self.eval_enumerate(args),
             "group_by" => self.eval_group_by(args),
+            "index_by" => self.eval_index_by(args),
+            "sort_by" => self.eval_sort_by(args),
+            "unique" => self.eval_unique(args),
+            "all" | "count" => self.eval_predicate_fold(name, args),
+            "sum" => self.eval_sum(args),
+            "servers"
+            | "volumes"
+            | "ports"
+            | "networks"
+            | "subnets"
+            | "images"
+            | "flavors"
+            | "hypervisors"
+            | "projects"
+            | "users"
+            | "loadbalancers"
+            | "amphorae"
+            | "list"
+            | "inventory"
+            | "floating_ips"
+            | "security_groups"
+            | "routers"
+            | "attached_volumes"
+            | "attached_servers"
+            | "project"
+            | "server"
+            | "network"
+            | "port"
+            | "hypervisor"
+            | "created_servers"
+            | "project_memberships"
+            | "keypairs"
+            | "server_groups"
+            | "aggregates"
+            | "availability_zones"
+            | "compute_services"
+            | "network_agents"
+            | "snapshots"
+            | "backups"
+            | "pools"
+            | "role_assignments"
+            | "flavor"
+            | "image"
+            | "actions"
+            | "compute_service"
+            | "quota"
+            | "volume"
+            | "members" => self.eval_ostack_map_method(name, args),
             "glob" => {
                 let pattern = self.eval_one_arg("glob", args)?.as_string_lossy();
                 let paths = simple_glob_with_lookup(&pattern, &|name| {
@@ -2914,30 +3128,22 @@ impl Evaluator {
             Builtin::Type => Ok(Value::Str(self.eval_expr(&args[0])?.type_name().to_string())),
             Builtin::PrettyPrint => {
                 let value = self.eval_expr(&args[0])?;
-                if crate::term::color_enabled() {
-                    println!("{}{}", pretty_value(&value, 0), ANSI_RESET);
+                let text = if crate::term::color_enabled() {
+                    format!("{}{}\n", pretty_value(&value, 0), ANSI_RESET)
                 } else {
-                    println!("{}", pretty_value(&value, 0));
-                }
+                    format!("{}\n", pretty_value(&value, 0))
+                };
+                self.emit(OutStream::Stdout, &text)?;
                 Ok(Value::Null)
             }
             Builtin::Print | Builtin::Prin | Builtin::Warn => {
                 for arg in args {
                     let value = self.eval_expr(arg)?;
                     self.check_cancelled()?;
-                    if implementation == Builtin::Print {
-                        println!("{value}");
-                    } else if implementation == Builtin::Prin {
-                        use std::io::Write;
-                        let mut stdout = std::io::stdout().lock();
-                        write!(stdout, "{value}").map_err(|error| {
-                            RillError::new(format!("failed to write stdout: {error}"))
-                        })?;
-                        stdout.flush().map_err(|error| {
-                            RillError::new(format!("failed to flush stdout: {error}"))
-                        })?;
-                    } else {
-                        eprintln!("{value}");
+                    match implementation {
+                        Builtin::Print => self.emit(OutStream::Stdout, &format!("{value}\n"))?,
+                        Builtin::Prin => self.emit(OutStream::Stdout, &value.to_string())?,
+                        _ => self.emit(OutStream::Stderr, &format!("{value}\n"))?,
                     }
                 }
                 Ok(Value::Null)
@@ -3249,6 +3455,280 @@ impl Evaluator {
         Ok(Value::map(map.into_iter().map(|(k, v)| (k, Value::List(v.into()))).collect()))
     }
 
+    fn eval_index_by(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
+        if args.len() != 2 {
+            return Err(RillError::new("index_by needs 1 arg").into());
+        }
+        let list = self.eval_expr(&args[0])?;
+        let Value::List(items) = list else {
+            return Err(RillError::new("index_by needs a List").into());
+        };
+        let keyer = &args[1];
+        let mut map: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        for item in Arc::unwrap_or_clone(items) {
+            self.poll_cancelled()?;
+            let key = self.apply_unary(keyer, item.clone())?.as_string_lossy();
+            map.insert(key, item);
+        }
+        Ok(Value::map(map))
+    }
+
+    fn eval_sort_by(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
+        if args.len() != 2 {
+            return Err(RillError::new("sort_by needs 1 arg").into());
+        }
+        let list = self.eval_expr(&args[0])?;
+        let Value::List(items) = list else {
+            return Err(RillError::new("sort_by needs a List").into());
+        };
+        let keyer = &args[1];
+        let mut keyed = Vec::with_capacity(items.len());
+        for item in Arc::unwrap_or_clone(items) {
+            self.poll_cancelled()?;
+            let key = self.apply_unary(keyer, item.clone())?;
+            keyed.push((key, item));
+        }
+        keyed.sort_by(|(a, _), (b, _)| order_values(a, b));
+        Ok(Value::List(keyed.into_iter().map(|(_, item)| item).collect()))
+    }
+
+    fn eval_unique(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
+        let list = self.eval_one_arg("unique", args)?;
+        let Value::List(items) = list else {
+            return Err(RillError::new("unique needs a List").into());
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for item in Arc::unwrap_or_clone(items) {
+            if seen.insert(crate::eval_data::value_to_json(&item).to_string()) {
+                out.push(item);
+            }
+        }
+        Ok(Value::List(out.into()))
+    }
+
+    /// `all(pred)` and `count(pred)`.
+    fn eval_predicate_fold(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
+        if args.len() != 2 {
+            return Err(RillError::new(format!("{name} needs 1 arg")).into());
+        }
+        let list = self.eval_expr(&args[0])?;
+        let Value::List(items) = list else {
+            return Err(RillError::new(format!("{name} needs a List")).into());
+        };
+        let pred = &args[1];
+        let mut count = 0i64;
+        for item in Arc::unwrap_or_clone(items) {
+            self.poll_cancelled()?;
+            let result = self.apply_unary(pred, item)?;
+            if is_truthy(&result)? {
+                count += 1;
+            } else if name == "all" {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(if name == "all" { Value::Bool(true) } else { Value::Int(count) })
+    }
+
+    fn eval_sum(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
+        let list = self.eval_one_arg("sum", args)?;
+        let Value::List(items) = list else {
+            return Err(RillError::new("sum needs a List").into());
+        };
+        if items.iter().all(|item| matches!(item, Value::Int(_))) {
+            let mut total: i64 = 0;
+            for item in items.iter() {
+                if let Value::Int(n) = item {
+                    total = total
+                        .checked_add(*n)
+                        .ok_or_else(|| EvalError::from(RillError::new("sum overflowed an Int")))?;
+                }
+            }
+            return Ok(Value::Int(total));
+        }
+        let mut total = 0.0;
+        for item in items.iter() {
+            total += match item {
+                Value::Int(n) => *n as f64,
+                Value::Float(f) => *f,
+                other => {
+                    return Err(RillError::new(format!(
+                        "sum needs numbers, got {}",
+                        other.type_name()
+                    ))
+                    .into())
+                }
+            };
+        }
+        Ok(Value::Float(total))
+    }
+
+    /// `ostack.servers(all_projects=true)`: a zero-receiver namespace function.
+    fn eval_namespace_function(
+        &mut self,
+        function: &'static crate::methods::NamespaceFunction,
+        args: &[Expr],
+    ) -> Result<Value, EvalError> {
+        let (positional, named) = self.eval_call_args(args)?;
+        let kinds: Vec<crate::methods::Kind> = positional.iter().map(method_kind).collect();
+        let named_kinds: Vec<(&str, crate::methods::Kind)> =
+            named.iter().map(|(name, value)| (name.as_str(), method_kind(value))).collect();
+        function.validate(&kinds, &named_kinds)?;
+        self.check_cancelled()?;
+        match function.module {
+            "ostack" => self.eval_ostack(function.name, positional, named),
+            other => {
+                Err(RillError::new(format!("{other} has no function '{}'", function.name)).into())
+            }
+        }
+    }
+
+    /// `handle.servers()` where `handle` came from `ostack.project(..)` or
+    /// `ostack.all_projects()`: the namespace function with the scope added
+    /// as a named argument.
+    /// `.servers()`, `.ports()`, `.project()` … on a map: a scoped listing on
+    /// an `ostack.project(..)` / `ostack.all_projects()` handle or a project
+    /// record, else the relation of the record's kind.
+    fn eval_ostack_map_method(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
+        let receiver = self.eval_expr(&args[0])?;
+        let Value::Map(map) = &receiver else {
+            return Err(RillError::new(format!(
+                ".{name}() needs an OpenStack record or a handle from ostack.project(name), got {}",
+                receiver.type_name()
+            ))
+            .into());
+        };
+        let marker = match map.get(crate::methods::OSTACK_MARKER) {
+            Some(Value::Str(marker)) => Some(marker.clone()),
+            _ => None,
+        };
+        let kind = crate::methods::ostack_record_kind(map);
+        let scoped = crate::methods::OSTACK_SCOPED_METHODS.contains(&name);
+        let scope = match (marker.as_deref(), kind) {
+            (Some("all"), _) => Some(("all_projects".to_string(), Value::Bool(true))),
+            (Some("project"), _) | (None, Some("project")) => match map.get("id") {
+                Some(Value::Str(id)) => Some(("project".to_string(), Value::Str(id.clone()))),
+                _ => return Err(RillError::new("ostack project handle has no id").into()),
+            },
+            _ => None,
+        };
+        if let (Some(scope), true) = (scope.clone(), scoped) {
+            let Some(function) = crate::methods::namespace_function("ostack", name) else {
+                return Err(RillError::new(format!("ostack has no function '{name}'")).into());
+            };
+            let (positional, extra) = self.eval_call_args(&args[1..])?;
+            let mut named = vec![scope];
+            named.extend(extra);
+            let kinds: Vec<crate::methods::Kind> = positional.iter().map(method_kind).collect();
+            let named_kinds: Vec<(&str, crate::methods::Kind)> =
+                named.iter().map(|(name, value)| (name.as_str(), method_kind(value))).collect();
+            function.validate(&kinds, &named_kinds)?;
+            self.check_cancelled()?;
+            return self.eval_ostack(function.name, positional, named);
+        }
+        let relation_kind = match (marker.as_deref(), kind) {
+            (Some("project"), _) => Some("project"),
+            (Some(_), _) => None,
+            (None, kind) => kind,
+        };
+        match relation_kind {
+            Some(kind) if crate::methods::ostack_relations(kind).contains(&name) => {
+                if args.len() > 1 {
+                    return Err(
+                        RillError::new(format!("{kind}.{name}() takes no arguments")).into()
+                    );
+                }
+                self.check_cancelled()?;
+                self.eval_ostack_relation(kind, name, (**map).clone())
+            }
+            Some(kind) => Err(RillError::new(format!(
+                "a {kind} has no .{name}(); it has {}",
+                crate::methods::ostack_relations(kind)
+                    .iter()
+                    .map(|m| format!(".{m}()"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ))
+            .into()),
+            None if marker.is_some() => Err(RillError::new(format!(
+                ".{name}() is not a listing; an ostack handle has {}",
+                crate::methods::OSTACK_SCOPED_METHODS
+                    .iter()
+                    .map(|m| format!(".{m}()"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ))
+            .into()),
+            None => Err(RillError::new(format!(
+                ".{name}() needs an OpenStack record or a handle from ostack.project(name)"
+            ))
+            .with_help(format!("or call ostack.{name}() for the current project"))
+            .into()),
+        }
+    }
+
+    #[cfg(feature = "openstack")]
+    fn eval_ostack_relation(
+        &mut self,
+        kind: &str,
+        method: &str,
+        record: crate::types::Map,
+    ) -> Result<Value, EvalError> {
+        let cancellation = self.cancellation.clone();
+        let lookup = |key: &str| self.lookup_environment_value(key).map(|v| v.as_string_lossy());
+        match crate::openstack::relation_call(kind, method, record, &lookup, cancellation) {
+            Ok(value) => Ok(value),
+            Err(crate::openstack::Error::Cancelled) => Err(EvalError::Cancelled),
+            Err(crate::openstack::Error::Failed(error)) => Err(error.into()),
+        }
+    }
+
+    #[cfg(not(feature = "openstack"))]
+    fn eval_ostack_relation(
+        &mut self,
+        kind: &str,
+        method: &str,
+        _record: crate::types::Map,
+    ) -> Result<Value, EvalError> {
+        Err(RillError::new(format!(
+            "{kind}.{method}() needs OpenStack support, which this rill was built without"
+        ))
+        .with_help("rebuild with `cargo build --features openstack`")
+        .into())
+    }
+
+    #[cfg(feature = "openstack")]
+    fn eval_ostack(
+        &mut self,
+        name: &'static str,
+        positional: Vec<Value>,
+        named: Vec<(String, Value)>,
+    ) -> Result<Value, EvalError> {
+        let cancellation = self.cancellation.clone();
+        let lookup = |key: &str| self.lookup_environment_value(key).map(|v| v.as_string_lossy());
+        let call =
+            crate::openstack::Call { name, positional, named, lookup_env: &lookup, cancellation };
+        match crate::openstack::call(call) {
+            Ok(value) => Ok(value),
+            Err(crate::openstack::Error::Cancelled) => Err(EvalError::Cancelled),
+            Err(crate::openstack::Error::Failed(error)) => Err(error.into()),
+        }
+    }
+
+    #[cfg(not(feature = "openstack"))]
+    fn eval_ostack(
+        &mut self,
+        name: &'static str,
+        _positional: Vec<Value>,
+        _named: Vec<(String, Value)>,
+    ) -> Result<Value, EvalError> {
+        Err(RillError::new(format!(
+            "ostack.{name} needs OpenStack support, which this rill was built without"
+        ))
+        .with_help("rebuild with `cargo build --features openstack`")
+        .into())
+    }
+
     fn eval_flat_map(&mut self, args: &[Expr]) -> Result<Value, EvalError> {
         if args.len() != 2 {
             return Err(RillError::new("flat_map needs 1 arg").into());
@@ -3486,6 +3966,12 @@ impl Evaluator {
         // stdlib module accessed as a value (e.g. `json.parse` passed to .map)
         if let Expr::Ident(module) = base.unspanned() {
             if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
+                if crate::methods::namespace_function(module, name).is_some() {
+                    return Err(RillError::new(format!(
+                        "{module}.{name} must be called: {module}.{name}()"
+                    ))
+                    .into());
+                }
                 if crate::methods::namespace_method(module, name).is_some() {
                     let call = Expr::Call {
                         callee: Box::new(Expr::Field {
@@ -3995,6 +4481,12 @@ enum ConfigStream {
     File(PathBuf),
 }
 
+/// The method-dispatch kind of a runtime value (what `value.method()` looks
+/// up), for tools that complete against live values.
+pub fn value_kind(value: &Value) -> crate::methods::Kind {
+    method_kind(value)
+}
+
 fn method_kind(value: &Value) -> crate::methods::Kind {
     use crate::methods::Kind;
     match value {
@@ -4389,6 +4881,33 @@ fn compare_values(
     }
 }
 
+/// A total order for sort keys: nulls first, then booleans, numbers, strings
+/// and durations among themselves; anything else by its text.
+fn order_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn rank(value: &Value) -> u8 {
+        match value {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Int(_) | Value::Float(_) => 2,
+            Value::Str(_) => 3,
+            Value::Duration(_) => 4,
+            _ => 5,
+        }
+    }
+    match (a, b) {
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+            let (x, y) = (as_f64(a).unwrap_or(0.0), as_f64(b).unwrap_or(0.0));
+            x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Duration(x), Value::Duration(y)) => x.cmp(y),
+        _ => rank(a).cmp(&rank(b)).then_with(|| a.as_string_lossy().cmp(&b.as_string_lossy())),
+    }
+}
+
 /// `needle in container` for lists (by value), maps (by key), and strings.
 fn contains_value(container: &Value, needle: &Value) -> Result<bool, RillError> {
     match container {
@@ -4607,10 +5126,11 @@ fn contains_implicit(expr: &Expr) -> bool {
                 contains_implicit(target) || contains_implicit(expr)
             }
             Stmt::While { cond, .. } => contains_implicit(cond),
-            Stmt::On { host, .. } => contains_implicit(host),
             Stmt::Return(Some(expr)) => contains_implicit(expr),
             _ => false,
         }),
+        Expr::On { host, .. } => contains_implicit(host),
+        Expr::WithEnv { bindings, .. } => bindings.iter().any(|(_, expr)| contains_implicit(expr)),
         Expr::Unary { operand, .. } => contains_implicit(operand),
         Expr::Closure { .. } | Expr::Literal(_) | Expr::Ident(_) | Expr::Command(_) => false,
         Expr::Located { expr, .. } => contains_implicit(expr),

@@ -53,6 +53,7 @@ sizes as real types, and a declarative `args { }` block that generates `--help`.
 ```sh
 cargo install --path .          # from a checkout
 cargo build --release           # binary at target/release/rill
+cargo build --release --features openstack   # with the ostack.* namespace (needs ../../LeafCloud/FastOpenStackCLI)
 nix run github:Kirth/Rill -- --help
 nix develop                     # dev shell with cargo, clippy, rustfmt, cargo-insta
 ```

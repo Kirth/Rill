@@ -1,0 +1,26 @@
+[
+  {
+    "id": "r-member:u1:p1",
+    "role": "member",
+    "role_id": "r-member",
+    "user": "kirth",
+    "user_id": "u1",
+    "group": null,
+    "group_id": null,
+    "project": "demo",
+    "project_id": "p1",
+    "domain_id": null
+  },
+  {
+    "id": "r-admin:u1:p2",
+    "role": "admin",
+    "role_id": "r-admin",
+    "user": "kirth",
+    "user_id": "u1",
+    "group": null,
+    "group_id": null,
+    "project": "staging",
+    "project_id": "p2",
+    "domain_id": null
+  }
+]

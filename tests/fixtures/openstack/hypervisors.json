@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1,
+    "hypervisor_hostname": "lab-compute-1.maas",
+    "hypervisor_type": "QEMU",
+    "host_ip": "10.1.0.1",
+    "state": "up",
+    "service": {
+      "host": "lab-compute-1",
+      "id": 11
+    }
+  },
+  {
+    "id": 2,
+    "hypervisor_hostname": "lab-compute-2.maas",
+    "hypervisor_type": "QEMU",
+    "host_ip": "10.1.0.2",
+    "state": "up",
+    "service": {
+      "host": "lab-compute-2",
+      "id": 12
+    }
+  }
+]

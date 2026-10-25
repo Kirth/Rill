@@ -199,8 +199,136 @@ pub fn parse(source: &str) -> Result<Program, RillError> {
     Parser::new(tokens).parse_program()
 }
 
+/// A token class for syntax highlighting.  The parser's own token kinds stay
+/// private; this is the flattened view an editor needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HighlightKind {
+    Keyword,
+    Ident,
+    TypeIdent,
+    Number,
+    Str,
+    Regex,
+    Substitution,
+    CommandWord,
+    CommandString,
+    CommandVar,
+    CommandRedirect,
+    Operator,
+    Punct,
+    Newline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HighlightToken {
+    pub kind: HighlightKind,
+    pub span: Span,
+}
+
+/// Lex `source` for highlighting.  Unlike `parse`, a lexing error does not
+/// discard the tokens before it: they are returned together with the error,
+/// so an editor can colour a buffer that is still being typed.  Expressions
+/// interpolated into strings and command arguments are lexed too; their
+/// tokens follow the enclosing string token and overlap its span.
+pub fn tokenize(source: &str) -> (Vec<HighlightToken>, Option<RillError>) {
+    let mut tokens = Vec::new();
+    let error = lex_into(source, &mut tokens).err();
+    let mut out = Vec::new();
+    for token in &tokens {
+        push_highlight(token, &mut out);
+    }
+    (out, error)
+}
+
+fn push_highlight(token: &Token, out: &mut Vec<HighlightToken>) {
+    use HighlightKind as H;
+    let kind = match &token.kind {
+        TokenKind::Ident(_) | TokenKind::Word(_) => H::Ident,
+        TokenKind::TypeIdent(_) => H::TypeIdent,
+        TokenKind::Number(_) => H::Number,
+        TokenKind::Str(_) => H::Str,
+        TokenKind::Regex(_) => H::Regex,
+        TokenKind::Substitution { .. } => H::Substitution,
+        TokenKind::CommandText(_) => H::CommandWord,
+        TokenKind::CommandString(_) => H::CommandString,
+        TokenKind::CommandVar(_)
+        | TokenKind::CommandSplat(_)
+        | TokenKind::CommandVarDefault(..)
+        | TokenKind::Dollar => H::CommandVar,
+        TokenKind::CommandRedirect(_) => H::CommandRedirect,
+        TokenKind::Let
+        | TokenKind::Use
+        | TokenKind::Args
+        | TokenKind::Input
+        | TokenKind::With
+        | TokenKind::Fn
+        | TokenKind::For
+        | TokenKind::In
+        | TokenKind::If
+        | TokenKind::Else
+        | TokenKind::Return
+        | TokenKind::Continue
+        | TokenKind::Break
+        | TokenKind::While
+        | TokenKind::Var
+        | TokenKind::Emit
+        | TokenKind::On
+        | TokenKind::Run
+        | TokenKind::MatchKw
+        | TokenKind::True
+        | TokenKind::False
+        | TokenKind::Null => H::Keyword,
+        TokenKind::Comma
+        | TokenKind::Colon
+        | TokenKind::Semi
+        | TokenKind::LParen
+        | TokenKind::RParen
+        | TokenKind::LBrace
+        | TokenKind::RBrace
+        | TokenKind::LBracket
+        | TokenKind::RBracket => H::Punct,
+        TokenKind::Newline => H::Newline,
+        TokenKind::Eof => return,
+        _ => H::Operator,
+    };
+    out.push(HighlightToken { kind, span: token.span });
+    let parts = match &token.kind {
+        TokenKind::Str(parts)
+        | TokenKind::CommandString(parts)
+        | TokenKind::CommandVarDefault(_, parts) => parts,
+        _ => return,
+    };
+    push_template_parts(parts, out);
+}
+
+fn push_template_parts(parts: &[RawPart], out: &mut Vec<HighlightToken>) {
+    for part in parts {
+        match part {
+            RawPart::Expr { source, offset } => {
+                let (nested, _) = tokenize(source);
+                out.extend(
+                    nested.into_iter().filter(|token| token.kind != HighlightKind::Newline).map(
+                        |token| HighlightToken {
+                            kind: token.kind,
+                            span: Span::new(token.span.start + offset, token.span.end + offset),
+                        },
+                    ),
+                );
+            }
+            RawPart::VarDefault(_, parts) => push_template_parts(parts, out),
+            RawPart::Text(_) | RawPart::Var(_) => {}
+        }
+    }
+}
+
 fn lex(source: &str) -> Result<Vec<Token>, RillError> {
     let mut tokens = Vec::new();
+    lex_into(source, &mut tokens)?;
+    Ok(tokens)
+}
+
+/// Lex into `tokens`; on error the tokens lexed so far are left in place.
+fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), RillError> {
     let mut chars = source.char_indices().peekable();
     let mut at_line_start = true;
     let mut command_mode = false;
@@ -414,7 +542,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
                     push(
-                        &mut tokens,
+                        tokens,
                         TokenKind::SlashEq,
                         start,
                         chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -422,7 +550,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     at_line_start = false;
                 } else {
                     push(
-                        &mut tokens,
+                        tokens,
                         TokenKind::Slash,
                         start,
                         chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -633,12 +761,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Plus
                 };
-                push(
-                    &mut tokens,
-                    kind,
-                    start,
-                    chars.peek().map_or(source.len(), |(index, _)| *index),
-                );
+                push(tokens, kind, start, chars.peek().map_or(source.len(), |(index, _)| *index));
                 at_line_start = false;
             }
             '-' => {
@@ -648,12 +771,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Minus
                 };
-                push(
-                    &mut tokens,
-                    kind,
-                    start,
-                    chars.peek().map_or(source.len(), |(index, _)| *index),
-                );
+                push(tokens, kind, start, chars.peek().map_or(source.len(), |(index, _)| *index));
                 at_line_start = false;
             }
             '*' => {
@@ -666,16 +784,11 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Star
                 };
-                push(
-                    &mut tokens,
-                    kind,
-                    start,
-                    chars.peek().map_or(source.len(), |(index, _)| *index),
-                );
+                push(tokens, kind, start, chars.peek().map_or(source.len(), |(index, _)| *index));
                 at_line_start = false;
             }
             '$' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::Dollar,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -687,12 +800,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Question
                 };
-                push(
-                    &mut tokens,
-                    kind,
-                    start,
-                    chars.peek().map_or(source.len(), |(index, _)| *index),
-                );
+                push(tokens, kind, start, chars.peek().map_or(source.len(), |(index, _)| *index));
             }
             '%' => {
                 let kind = if matches!(chars.peek(), Some((_, '='))) {
@@ -701,12 +809,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 } else {
                     TokenKind::Percent
                 };
-                push(
-                    &mut tokens,
-                    kind,
-                    start,
-                    chars.peek().map_or(source.len(), |(index, _)| *index),
-                );
+                push(tokens, kind, start, chars.peek().map_or(source.len(), |(index, _)| *index));
                 at_line_start = false;
             }
             '.' => {
@@ -726,7 +829,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     }
                 } else {
                     push(
-                        &mut tokens,
+                        tokens,
                         TokenKind::Dot,
                         start,
                         chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -734,55 +837,55 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                 }
             }
             ',' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::Comma,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             ':' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::Colon,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             '(' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::LParen,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             ')' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::RParen,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             '{' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::LBrace,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             '}' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::RBrace,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             '[' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::LBracket,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             ']' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::RBracket,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
             ),
             ';' => push(
-                &mut tokens,
+                tokens,
                 TokenKind::Semi,
                 start,
                 chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -795,7 +898,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
                     ));
                 }
                 push(
-                    &mut tokens,
+                    tokens,
                     TokenKind::Word(other.to_string()),
                     start,
                     chars.peek().map_or(source.len(), |(index, _)| *index),
@@ -805,7 +908,7 @@ fn lex(source: &str) -> Result<Vec<Token>, RillError> {
     }
 
     tokens.push(Token { kind: TokenKind::Eof, span: Span::new(source.len(), source.len()) });
-    Ok(tokens)
+    Ok(())
 }
 
 fn push(tokens: &mut Vec<Token>, kind: TokenKind, start: usize, end: usize) {
@@ -1233,8 +1336,14 @@ impl Parser {
                 self.parse_args_decl()
             }
             TokenKind::Input if self.at_input_declaration() => self.parse_input_decl(),
-            TokenKind::With => self.parse_with_env(),
-            TokenKind::On => self.parse_on(),
+            TokenKind::With => {
+                self.next();
+                Ok(Stmt::Expr(self.parse_with_env_after_keyword()?))
+            }
+            TokenKind::On => {
+                self.next();
+                Ok(Stmt::Expr(self.parse_on_after_keyword()?))
+            }
             TokenKind::Fn => self.parse_fn(),
             TokenKind::For => Ok(Stmt::Expr(self.parse_for_expr(ForMode::Sequential, None)?)),
             TokenKind::Emit => {
@@ -1483,8 +1592,8 @@ impl Parser {
         Ok(Stmt::AssignEnv { name, expr: self.parse_expr(0)? })
     }
 
-    fn parse_with_env(&mut self) -> Result<Stmt, RillError> {
-        self.expect(TokenKind::With)?;
+    /// `with env { ... } { ... }` with the `with` keyword already consumed.
+    fn parse_with_env_after_keyword(&mut self) -> Result<Expr, RillError> {
         let target = self.expect_ident()?;
         if target != "env" {
             return Err(RillError::spanned("with currently supports only env", self.peek().span));
@@ -1501,7 +1610,7 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace)?;
         let body = self.parse_block()?;
-        Ok(Stmt::WithEnv { bindings, body })
+        Ok(Expr::WithEnv { bindings, body })
     }
 
     fn parse_let(&mut self, mutable: bool) -> Result<Stmt, RillError> {
@@ -1682,11 +1791,11 @@ impl Parser {
         Ok(Expr::If { cond: Box::new(cond), pattern, then_body, else_body })
     }
 
-    fn parse_on(&mut self) -> Result<Stmt, RillError> {
-        self.expect(TokenKind::On)?;
+    /// `on host { ... }` with the `on` keyword already consumed.
+    fn parse_on_after_keyword(&mut self) -> Result<Expr, RillError> {
         let host = self.parse_expr(0)?;
         let body = self.parse_block()?;
-        Ok(Stmt::On { host: Box::new(host), body })
+        Ok(Expr::On { host: Box::new(host), body })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, RillError> {
@@ -1858,6 +1967,8 @@ impl Parser {
             TokenKind::False => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Null => Ok(Expr::Literal(Literal::Null)),
             TokenKind::If => self.parse_if_after_keyword(),
+            TokenKind::On => self.parse_on_after_keyword(),
+            TokenKind::With => self.parse_with_env_after_keyword(),
             TokenKind::OrOr => {
                 let body = if self.at(TokenKind::LBrace) {
                     self.parse_block()?
@@ -2429,6 +2540,8 @@ impl Parser {
             | TokenKind::Null
             | TokenKind::MatchKw
             | TokenKind::If
+            | TokenKind::On
+            | TokenKind::With
             | TokenKind::For => true,
             TokenKind::LBracket => spaced,
             TokenKind::Minus => {
@@ -2691,10 +2804,6 @@ fn stmts_propagate(stmts: &[Stmt]) -> bool {
         | Stmt::Return(Some(expr)) => expr_propagates(expr),
         Stmt::Assign { target, expr, .. } => expr_propagates(target) || expr_propagates(expr),
         Stmt::While { cond, body } => expr_propagates(cond) || stmts_propagate(body),
-        Stmt::WithEnv { bindings, body } => {
-            bindings.iter().any(|(_, expr)| expr_propagates(expr)) || stmts_propagate(body)
-        }
-        Stmt::On { host, body } => expr_propagates(host) || stmts_propagate(body),
         Stmt::Fn { .. }
         | Stmt::Use(_)
         | Stmt::Args(_)
@@ -2744,6 +2853,10 @@ fn expr_propagates(expr: &Expr) -> bool {
                 || workers.as_deref().is_some_and(expr_propagates)
         }
         Expr::Block(body) | Expr::Loop { body } => stmts_propagate(body),
+        Expr::WithEnv { bindings, body } => {
+            bindings.iter().any(|(_, expr)| expr_propagates(expr)) || stmts_propagate(body)
+        }
+        Expr::On { host, body } => expr_propagates(host) || stmts_propagate(body),
         Expr::If { cond, then_body, else_body, .. } => {
             expr_propagates(cond) || stmts_propagate(then_body) || stmts_propagate(else_body)
         }

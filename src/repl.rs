@@ -125,7 +125,7 @@ Bindings and functions persist for the whole session.
 
 /// A parse error at the end of the input means the user is in the middle of
 /// a block, string or expression: keep reading.
-fn is_incomplete(error: &RillError, source: &str) -> bool {
+pub fn is_incomplete(error: &RillError, source: &str) -> bool {
     let at_end = error.span.is_some_and(|span| span.start >= source.trim_end().len());
     let message = &error.message;
     (at_end && message.contains("end of file"))

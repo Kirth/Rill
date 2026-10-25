@@ -1,0 +1,13 @@
+[
+  {
+    "id": 7,
+    "name": "gpu",
+    "availability_zone": "zone-1",
+    "hosts": [
+      "lab-compute-1"
+    ],
+    "metadata": {
+      "gpu": "a100"
+    }
+  }
+]

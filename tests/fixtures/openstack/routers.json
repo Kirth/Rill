@@ -1,0 +1,12 @@
+[
+  {
+    "id": "7b7b7b7b-7b7b-47b7-87b7-7b7b7b7b7b7b",
+    "name": "demo-router",
+    "status": "ACTIVE",
+    "project_id": "p1",
+    "external_gateway_info": {
+      "network_id": "9d9d9d9d-9d9d-49d9-89d9-9d9d9d9d9d9d"
+    },
+    "routes": []
+  }
+]

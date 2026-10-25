@@ -57,6 +57,26 @@ the single-commit prototype that preceded it.
 - Place assignment: `m.a = 1`, `m["a"]["b"] += 2`, `xs[-1].name = "x"`.
 - Block expressions `{ stmts; value }` (so match arms can be blocks) and
   string keys in map literals (`{"other-key": 3}`).
+- `on host { }` and `with env { } { }` are expressions: `let user = on host
+  { run! whoami }` binds the block's last value, typed by the checker.
+- Relational list methods: `sort_by(f)`, `unique()`, `all(f)`, `count(f)`,
+  `sum()`, `index_by(f)`.
+- The `ostack.*` namespace (cargo feature `openstack`): OpenStack records
+  through the `ostack` crate, with `inventory`, `find`, `references`, a
+  result cache and fixture files for offline use. Namespace functions without
+  a receiver are a new registry (`NAMESPACE_FUNCTIONS`) next to the methods.
+- `ostack.search(text)` finds records by id, IP, MAC, name or fragment and
+  names the owning server and project; `ostack.find` accepts addresses and
+  names. Floating IPs, security groups and routers are kinds, and records
+  follow relations by kind (`port.server()`, `subnet.routers()`,
+  `hypervisor.servers()`, `server.security_groups()`, …).
+- ostack relations and exact IP/MAC searches use server-side filters and
+  single GETs instead of whole listings. New kinds: keypairs, server groups,
+  aggregates, availability zones, compute services, network agents,
+  snapshots, backups, pools, role assignments. `ostack.quota`,
+  `ostack.actions` (instance actions and events), and structured server
+  fields (`flavor_id`, `image_id`, `networks`) with `server.flavor()` /
+  `server.image()`.
 - Slices `xs[1..3]`, `xs[..n]`, `xs[n..]`, `s[1..3]`, negative bounds;
   `(0..10).step(2)`.
 - General `match` patterns: literals, tuples, lists with `..`, `some`/`none`/

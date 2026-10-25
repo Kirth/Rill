@@ -11,6 +11,11 @@ build:
 test:
     cargo test --all-targets
 
+# The suite with the OpenStack namespace compiled in (fixtures, no network)
+test-openstack:
+    cargo test --features openstack --all-targets
+    cargo clippy --features openstack --all-targets -- -D warnings
+
 # Format and lint the way CI does
 lint:
     cargo fmt --all -- --check

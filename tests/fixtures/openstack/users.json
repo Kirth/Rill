@@ -1,0 +1,9 @@
+[
+  {
+    "id": "u1",
+    "name": "kirth",
+    "enabled": true,
+    "domain_id": "default",
+    "email": "ops@example.org"
+  }
+]

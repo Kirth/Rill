@@ -4,6 +4,8 @@ pub mod eval;
 mod eval_collections;
 mod eval_data;
 pub mod methods;
+#[cfg(feature = "openstack")]
+pub mod openstack;
 pub mod parser;
 pub mod pathresolver;
 pub mod repl;
@@ -250,16 +252,6 @@ fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
                 collect_expr_imports(cond, imports);
                 collect_local_imports(body, imports);
             }
-            ast::Stmt::WithEnv { bindings, body } => {
-                for (_, expr) in bindings {
-                    collect_expr_imports(expr, imports);
-                }
-                collect_local_imports(body, imports);
-            }
-            ast::Stmt::On { host, body } => {
-                collect_expr_imports(host, imports);
-                collect_local_imports(body, imports);
-            }
             ast::Stmt::Fn { function, .. } => collect_local_imports(&function.body, imports),
             ast::Stmt::Args(group) => collect_arg_group_imports(group, imports),
             ast::Stmt::Break(Some(expr)) => collect_expr_imports(expr, imports),
@@ -349,6 +341,16 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
             collect_local_imports(body, imports);
         }
         ast::Expr::Block(body) | ast::Expr::Closure { body, .. } | ast::Expr::Loop { body } => {
+            collect_local_imports(body, imports);
+        }
+        ast::Expr::WithEnv { bindings, body } => {
+            for (_, expr) in bindings {
+                collect_expr_imports(expr, imports);
+            }
+            collect_local_imports(body, imports);
+        }
+        ast::Expr::On { host, body } => {
+            collect_expr_imports(host, imports);
             collect_local_imports(body, imports);
         }
         ast::Expr::If { cond, then_body, else_body, .. } => {
@@ -633,10 +635,6 @@ fn stmt_needs_input(stmt: &ast::Stmt) -> bool {
         }
         ast::Stmt::Break(Some(expr)) => expr_needs_input(expr),
         ast::Stmt::While { cond, body } => expr_needs_input(cond) || program_needs_input(body),
-        ast::Stmt::WithEnv { bindings, body } => {
-            bindings.iter().any(|(_, expr)| expr_needs_input(expr)) || program_needs_input(body)
-        }
-        ast::Stmt::On { host, body } => expr_needs_input(host) || program_needs_input(body),
         ast::Stmt::Fn { function, .. } => program_needs_input(&function.body),
         ast::Stmt::Return(expr) => expr.as_ref().is_some_and(expr_needs_input),
         _ => false,
@@ -686,6 +684,10 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         ast::Expr::Block(body) | ast::Expr::Closure { body, .. } | ast::Expr::Loop { body } => {
             program_needs_input(body)
         }
+        ast::Expr::WithEnv { bindings, body } => {
+            bindings.iter().any(|(_, expr)| expr_needs_input(expr)) || program_needs_input(body)
+        }
+        ast::Expr::On { host, body } => expr_needs_input(host) || program_needs_input(body),
         ast::Expr::If { cond, then_body, else_body, .. } => {
             expr_needs_input(cond)
                 || program_needs_input(then_body)

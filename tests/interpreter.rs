@@ -1332,6 +1332,43 @@ fn with_env_applies_to_called_functions_and_is_restored() {
 }
 
 #[test]
+fn with_env_and_on_blocks_yield_their_last_value() {
+    // `on` with an argv prefix runs the command through that prefix locally,
+    // so `env echo hi` stands in for an ssh hop.
+    let value = run(r#"
+let inner = with env { RILL_BLOCK_VALUE_TEST = "v" } { env.RILL_BLOCK_VALUE_TEST }
+let remote = on ["env"] { run! echo hi }
+let status = on ["env"] { run false }
+let unit = on ["env"] { run! echo hi; }
+let nested = on ["env"] { with env { RILL_BLOCK_VALUE_TEST = "w" } { run! sh -c "echo $RILL_BLOCK_VALUE_TEST" } }
+[inner, remote.trim(), status.ok, unit, nested.trim()]
+"#);
+    assert_eq!(
+        value,
+        Value::list(vec![
+            Value::Str("v".into()),
+            Value::Str("hi".into()),
+            Value::Bool(false),
+            Value::Str("hi\n".into()),
+            Value::Str("w".into()),
+        ])
+    );
+}
+
+#[test]
+fn return_inside_on_block_leaves_the_remote_prefix() {
+    let value = run(r#"
+fn probe() -> Str {
+    on ["env"] { return run! echo inside }
+}
+let first = probe()
+let after = run! echo outside
+[first.trim(), after.trim()]
+"#);
+    assert_eq!(value, Value::list(vec![Value::Str("inside".into()), Value::Str("outside".into())]));
+}
+
+#[test]
 fn set_env_is_evaluator_local_and_visible_to_children() {
     let source = r#"
         set_env("RILL_EVAL_LOCAL", "42")

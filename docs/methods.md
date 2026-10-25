@@ -69,6 +69,25 @@ Both methods stop at the first match and accept closures, named functions, or
 implicit callbacks, e.g. `lines.any(.starts_with("disk:"))`. For an empty list,
 `find` returns `none` and `any` returns `false` without calling the predicate.
 
+## Relational helpers
+
+Lists of records (maps from JSON APIs) get the usual questions answered
+without loops:
+
+```ril
+servers.sort_by(.name)                  # stable; keys compare as numbers, strings, durations; nulls first
+servers.sort_by(.created).reverse()
+servers.all(.status == "ACTIVE")        # true for an empty list
+servers.count(.status == "ERROR")
+flavors.map(.vcpus).sum()               # Int when every item is an Int, else Float; 0 for []
+ips.unique()                            # first occurrence wins; compares by value
+let by_id = servers.index_by(.id)       # Map[Str, item]; later duplicates replace earlier ones
+by_id.get(volume.attachments[0].server_id)
+```
+
+`group_by(f)` is the many-valued cousin of `index_by(f)`: both key by the
+callback's result as a string, in first-seen order.
+
 ## Tuples
 
 Tuples are fixed-size heterogeneous values with at least two elements:
@@ -116,7 +135,7 @@ Parentheses are required even for zero-argument methods.
 | Receiver | Methods |
 |---|---|
 | `Str` | `trim lines split(sep) upper lower len contains(part) starts_with ends_with repeat(n) index_of(part) replace(pattern, with, all=false) is_match(regex) glob sha256 parse_json parse_yaml parse_toml parse_csv parse_url` |
-| `List` | `map filter flat_map flatten find any first last get(i) take(n) skip(n) slice(a, b) step(n) reverse sort contains len join(sep) zip(other) enumerate group_by(f) difference symmetric_difference parallel_map parallel_filter run spawn parallel` |
+| `List` | `map filter flat_map flatten find any all(f) count(f) first last get(i) take(n) skip(n) slice(a, b) step(n) reverse sort sort_by(f) unique sum contains len join(sep) zip(other) enumerate group_by(f) index_by(f) difference symmetric_difference parallel_map parallel_filter run spawn parallel` |
 | `Map` | `get(key) keys values entries contains_key merge(other) len map parallel_map` |
 | `Option` | `is_some is_none unwrap unwrap_or unwrap_or_else expect map and_then ok_or` |
 | `Result` | `is_ok is_err ok err unwrap unwrap_or unwrap_or_else expect map map_err and_then` |
@@ -131,3 +150,102 @@ returns `null` when the key is absent. `entries()`, `zip()` and `enumerate()`
 yield tuples. `sort()`, `reverse()` and friends return new collections. Methods
 that take a callback accept closures, named functions and implicit callbacks
 such as `.map(.trim())`; closure parameter types are inferred from the receiver.
+
+## ostack namespace
+
+OpenStack, through the `ostack` crate linked into rill when it is built with
+`--features openstack` (the namespace always type-checks; calling it in a
+build without the feature raises an error that says so). Every function takes
+no receiver and returns full records as maps, with the crate's normalisation
+(`tenant_id` → `project_id`, server `flavor`/`image` as names, `addresses` as
+one string; ports carry the IPs).
+
+| Function | Returns |
+|---|---|
+| `ostack.info()` | `Map`: user, project, region, roles, catalog summary |
+| `ostack.kinds()` | `List[Str]`: `servers volumes ports networks subnets images flavors hypervisors projects users loadbalancers amphorae floating_ips security_groups routers keypairs server_groups aggregates availability_zones compute_services network_agents snapshots backups pools role_assignments` |
+| `ostack.list("servers")`, `ostack.servers()`, `ostack.volumes()`, … one per kind | `List[Map]` |
+| `ostack.show("server", id_or_name)` | `Map`; an ambiguous name is an error that lists the ids |
+| `ostack.server(id_or_name)`, `ostack.volume(..)`, `ostack.port(..)`, `ostack.floating_ip(address)`, … one per kind | the same, one record; a unique name fragment also works |
+| `ostack.get("compute", "/os-services", {binary: "nova-compute"})` | the raw response body |
+| `ostack.inventory(["servers", "ports"])` | `Map[Str, List[Map]]`, fetched in parallel (default: servers volumes ports networks subnets images flavors hypervisors projects) |
+| `ostack.find(x)` | `Option[Map]`: `some({kind: "volume", record: {...}})` for an id, or the best exact match on an IP, MAC or name; `none` otherwise |
+| `ostack.search(text)` | `List[Map]` of `{kind, field, match, record, owner, project}`: every record whose id, IP, MAC, name or host matches exactly, then name and address fragments; `owner` is the server or router behind a port or floating IP |
+| `ostack.references(id, kinds=[...])` | `List[Map]` of `{kind, field, record}` for every record whose JSON mentions the id (`attachments[0].server_id`, `device_id`, …) |
+| `ostack.project("name or id")` | a handle `Map` (the project record plus an `@ostack` marker) whose `.servers()`, `.volumes()`, … `.list(kind)` and `.inventory([kinds])` are scoped to that project |
+| `ostack.all_projects()` | a handle whose `.servers()` and `.volumes()` span every project (`all_tenants=1`) |
+| `ostack.quota(project=, usage=true)` | `List[Map]` of `{service, scope, resource, limit, in_use, reserved}` for a project (default: the token's); also `project.quota()` |
+| `ostack.actions(server, events=false, limit=)` | a server's instance actions (`action request_id user_id start_time message`), newest first; `events=true` adds each action's `events` (one request per action, `limit` 20 by default); also `server.actions()` |
+| `ostack.refresh()` | drop every cached result |
+
+```ril
+ostack.project("foobar").servers().filter(.status == "ACTIVE")
+ostack.all_projects().volumes().count(.status == "error")
+```
+
+Records know their relations. The kind is read from the record's fields, and
+the related records come from the cached inventory of the record's project:
+
+| Record | Methods |
+|---|---|
+| server | `attached_volumes ports security_groups floating_ips hypervisor flavor image server_groups actions project` |
+| volume | `attached_servers snapshots backups project` |
+| snapshot, backup | `volume project` |
+| port | `server network subnets security_groups floating_ips project` (`server()` is the router for router ports) |
+| network | `ports subnets routers project` |
+| subnet | `network ports routers project` |
+| router | `ports subnets project` |
+| floating_ip | `port server project` |
+| security_group | `ports servers project` |
+| hypervisor | `servers compute_service network_agents aggregates` (admin) |
+| aggregate | `hypervisors` |
+| server_group | `servers project` |
+| pool | `members loadbalancers project` |
+| loadbalancer | `pools project` |
+| user | `role_assignments created_servers project_memberships`: servers the user booted (any project), and the projects the user can reach directly or through a group, as handles; `user.project_memberships().flat_map(.servers())` lists what they can access |
+| project | the listings, like a handle: `servers() volumes() … inventory()`, plus `quota()` |
+
+Relations ask the APIs for exactly the related records: filtered listings
+(`ports?device_id=`, `ports?fixed_ips=subnet_id=`, `servers?host=`,
+`snapshots?volume_id=`, …) and single GETs by id, never a whole collection
+when a filter exists. When an API rejects a filter, the listing is fetched in
+the same scope and filtered locally. An exact IP or MAC given to `search` or
+`find` likewise becomes a few filtered requests instead of an inventory scan.
+
+Server records keep the friendly `flavor`, `image` and `addresses` strings and
+add `flavor_id`, `image_id` and `networks: [{network, addr, version, type,
+mac}]`, so `server.flavor()` and `server.image()` follow ids.
+
+Singular relations (`server`, `network`, `port`, `hypervisor`, `flavor`,
+`image`, `volume`, `compute_service`, `project`) return `Option[Map]`; `project()` returns a handle, so
+`server.project().unwrap().servers()` lists its neighbours. Singular getters
+fall back to a unique name fragment, so `ostack.hypervisor("compute-17")` finds
+`compute-17.example.maas`.
+
+```ril
+let hit = ostack.search("10.0.4.17", all_projects=true)[0]
+print "{hit.kind} {hit.record.id} owned by {hit.owner.name} in {hit.project.name}"
+ostack.hypervisor("compute-17").servers().map(.name)
+for s in ostack.project("foobar").servers() { print s.name, s.attached_volumes().map(.name) }
+```
+
+Handle methods take no named arguments; use the namespace form for
+`fresh=` and `query=` (`ostack.servers(project="foobar", fresh=true)`).
+
+List functions accept `all_projects=true` (servers and volumes), `project="name or id"`
+(resolved through the projects list), `query={key: value}` for raw query
+parameters, and `fresh=true` to bypass the cache.
+
+Results are cached per identity, collection and query for 120 seconds
+(`RILL_OPENSTACK_CACHE_TTL_SECS`), so repeated questions, replays and
+backtracking in eddy do not refetch. Calls give up after 60 seconds
+(`RILL_OPENSTACK_TIMEOUT_SECS`) and stop when the evaluator is cancelled.
+
+Credentials are the `OS_*` variables of the script's environment (so `with env
+{ OS_PROJECT_NAME = "x" } { ... }` switches project): password or application
+credential, `OS_REGION_NAME`, `OS_INTERFACE`. The token cache under
+`~/.cache/ostack` is shared with the CLI (`RILL_OPENSTACK_NO_AUTH_CACHE=1`
+disables it). TLS verification is off unless `OS_VERIFY_TLS=1`, as in the CLI.
+`RILL_OPENSTACK_FIXTURE=<dir>` serves `<dir>/<collection>.json` files instead of
+a cloud; see `tests/fixtures/openstack` and `examples/openstack_attached.ril`.
+

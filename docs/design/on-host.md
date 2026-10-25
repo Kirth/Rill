@@ -59,11 +59,12 @@ for line, host in stream compute_nodes { tail -f /var/log/nova/nova-compute.log 
 ### AST
 
 ```rust
-Stmt::On { host: Box<Expr>, body: Vec<Stmt> }
+Expr::On { host: Box<Expr>, body: Vec<Stmt> }
 ```
 
-Parses like an if-block without a condition: `"on" expr "{" stmts "}"`.
-Typechecks transparently — same types inside as outside.
+Parses like an if-block without a condition: `"on" expr "{" stmts "}"`, and
+like `if` it is an expression: `let user = on host { run! whoami }` binds the
+block's last value. Typechecks transparently — same types inside as outside.
 
 ### Evaluator
 
@@ -76,10 +77,10 @@ struct Evaluator {
 }
 ```
 
-Eval for `Stmt::On`:
+Eval for `Expr::On`:
 
 ```rust
-Stmt::On { host, body } => {
+Expr::On { host, body } => {
     let host = self.eval_expr(host)?.as_string_lossy();
     let prev = std::mem::replace(&mut self.remote_host, Some(host));
     let result = self.eval_stmts(body);

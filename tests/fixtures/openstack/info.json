@@ -1,0 +1,1 @@
+{"auth_url": "https://keystone.example/v3", "auth_method": "fixture", "project_name": "demo", "user_name": "kirth", "region": "zone-1"}

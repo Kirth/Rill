@@ -1,0 +1,34 @@
+[
+  {
+    "service": "compute",
+    "scope": "p1",
+    "resource": "cores",
+    "limit": 20,
+    "in_use": 5,
+    "reserved": 0
+  },
+  {
+    "service": "compute",
+    "scope": "p1",
+    "resource": "instances",
+    "limit": 10,
+    "in_use": 2,
+    "reserved": 0
+  },
+  {
+    "service": "volume",
+    "scope": "p1",
+    "resource": "gigabytes",
+    "limit": 1000,
+    "in_use": 60,
+    "reserved": 0
+  },
+  {
+    "service": "compute",
+    "scope": "p2",
+    "resource": "cores",
+    "limit": 8,
+    "in_use": 1,
+    "reserved": 0
+  }
+]

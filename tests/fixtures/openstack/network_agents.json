@@ -1,0 +1,18 @@
+[
+  {
+    "id": "4e4e4e4e-4e4e-44e4-84e4-4e4e4e4e4e4e",
+    "agent_type": "Open vSwitch agent",
+    "host": "lab-compute-1",
+    "alive": true,
+    "admin_state_up": true,
+    "binary": "neutron-openvswitch-agent"
+  },
+  {
+    "id": "5e5e5e5e-5e5e-45e5-85e5-5e5e5e5e5e5e",
+    "agent_type": "L3 agent",
+    "host": "lab-net-1",
+    "alive": false,
+    "admin_state_up": true,
+    "binary": "neutron-l3-agent"
+  }
+]

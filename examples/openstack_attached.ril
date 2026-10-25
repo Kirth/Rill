@@ -1,0 +1,35 @@
+#!/usr/bin/env rill
+# Which servers is a volume attached to, and what are their IPs?
+#
+# Needs rill built with `--features openstack` and the usual OS_* variables.
+# To try it without a cloud:
+#   RILL_OPENSTACK_FIXTURE=tests/fixtures/openstack rill examples/openstack_attached.ril web-1-data
+
+args {
+    volume: Str description="volume id or name"
+}
+
+# One round trip per collection, fetched in parallel and cached for the session.
+let inv = ostack.inventory(["servers", "volumes", "ports"])
+let servers = inv.servers.index_by(.id)
+
+let vol = ostack.show("volume", args.volume)
+let attached = vol.attachments.map(.server_id).map(|id| servers.get(id)).filter(. != null)
+print "volume {vol.name} ({vol.size} GB, {vol.status}) is attached to {attached.len()} server(s)"
+
+for server in attached {
+    let host = server["OS-EXT-SRV-ATTR:host"]
+    let ips = inv.ports
+        |> .filter(.device_id == server.id)
+        |> .flat_map(.fixed_ips)
+        |> .map(.ip_address)
+        |> .unique()
+        |> .sort_by(|ip| ip)
+    print "  {server.name} [{server.status}] on {host}: {ips.join(", ")}"
+}
+
+# Anything else in the inventory that mentions the volume's id.
+for r in ostack.references(vol.id) {
+    let name = r.record.get("name")
+    print "  referenced by {r.kind} {name} at {r.field}"
+}

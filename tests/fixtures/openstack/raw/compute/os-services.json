@@ -1,0 +1,1 @@
+{"services": [{"binary": "nova-compute", "host": "lab-compute-1", "state": "up"}]}

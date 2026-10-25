@@ -1,0 +1,11 @@
+[
+  {
+    "id": "zone-1",
+    "name": "zone-1",
+    "available": true,
+    "hosts": [
+      "lab-compute-1",
+      "lab-compute-2"
+    ]
+  }
+]

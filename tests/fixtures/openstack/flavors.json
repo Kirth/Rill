@@ -1,0 +1,1 @@
+[{"id": "f1", "name": "m1.small", "vcpus": 1, "ram": 2048, "disk": 20}, {"id": "f2", "name": "m1.large", "vcpus": 4, "ram": 8192, "disk": 80}]

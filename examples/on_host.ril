@@ -1,0 +1,64 @@
+#!/usr/bin/env rill
+# Remote execution with `on host { }`.
+#
+# Inside an `on` block every command runs on the remote side; Rill itself
+# (variables, regexes, maps, printing, file methods) keeps running locally.
+# Arguments are shell-quoted for the remote shell, so `$path` stays one argument
+# even when it contains spaces.  Hosts are placeholders; edit them before running.
+
+let web = "deploy@web-1.example.internal"
+let log_dir = "/var/log/my app"            # the space survives the ssh hop
+
+# 1. Run a few commands on one host and parse the output locally.
+on web {
+    let kernel = run! uname -r
+    let disk = run! df -P /
+    print "{web}: kernel {kernel.trim()}"
+
+    for line in disk.lines().skip(1) {
+        if line =~ /\s(?<used>\d+)%\s/ {
+            if Int(used) > 80 { warn "{web}: root filesystem is {used}% full" }
+        }
+    }
+
+    let logs = run ls -1 $log_dir
+    if logs.ok {
+        print "{logs.out.lines().len()} files in {log_dir}"
+    } else {
+        warn "no {log_dir} on {web}: {logs.err.trim()}"
+    }
+}
+
+# 2. Nest contexts: ssh to a host, then exec into a container there.
+#    `docker(name)` builds a `docker exec` prefix; layers compose innermost-out.
+on web {
+    let containers = run! docker ps --format "\{\{.Names\}\}"
+    let first = containers.lines().first()
+    match first {
+        some(name) => {
+            on docker(name) {
+                let user = run! id -un
+                print "{name} runs as {user.trim()}"
+            }
+        },
+        none => print "no containers on {web}",
+    }
+}
+
+# 3. Fan out: one `on` block per host, in parallel, collecting results.
+let hosts = ["web-1.example.internal", "web-2.example.internal", "db-1.example.internal"]
+
+let uptimes = parallel(4) for host in hosts {
+    on host {
+        let r = run uptime
+        emit (host, r)
+    }
+}
+
+for (host, r) in uptimes {
+    if r.ok {
+        print "{host}: {r.out.trim()}"
+    } else {
+        warn "{host} unreachable (status {r.status})"
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "members": [
+    {
+      "id": "8b8b8b8b-8b8b-48b8-88b8-8b8b8b8b8b8b",
+      "name": "web-1",
+      "address": "10.0.0.11",
+      "protocol_port": 80,
+      "operating_status": "ONLINE",
+      "project_id": "p1"
+    }
+  ]
+}

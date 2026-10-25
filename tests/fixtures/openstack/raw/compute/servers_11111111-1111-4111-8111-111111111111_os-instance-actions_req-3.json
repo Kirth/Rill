@@ -1,0 +1,13 @@
+{
+  "instanceAction": {
+    "request_id": "req-3",
+    "events": [
+      {
+        "event": "compute_resize_instance",
+        "result": "Success",
+        "start_time": "x",
+        "finish_time": "y"
+      }
+    ]
+  }
+}

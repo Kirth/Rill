@@ -1,0 +1,12 @@
+[
+  {
+    "id": "1b1b1b1b-1b1b-41b1-81b1-1b1b1b1b1b1b",
+    "name": "web-lb",
+    "provisioning_status": "ACTIVE",
+    "operating_status": "ONLINE",
+    "vip_address": "10.0.0.50",
+    "vip_subnet_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "provider": "amphora",
+    "project_id": "p1"
+  }
+]

@@ -1,0 +1,28 @@
+{
+  "instanceActions": [
+    {
+      "action": "create",
+      "request_id": "req-1",
+      "user_id": "u1",
+      "project_id": "p1",
+      "start_time": "2026-09-01T10:00:00.000000",
+      "message": null
+    },
+    {
+      "action": "reboot",
+      "request_id": "req-2",
+      "user_id": "u1",
+      "project_id": "p1",
+      "start_time": "2026-10-20T08:15:00.000000",
+      "message": null
+    },
+    {
+      "action": "resize",
+      "request_id": "req-3",
+      "user_id": "u2",
+      "project_id": "p1",
+      "start_time": "2026-10-01T12:00:00.000000",
+      "message": "error"
+    }
+  ]
+}

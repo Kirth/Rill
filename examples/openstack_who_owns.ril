@@ -1,0 +1,23 @@
+#!/usr/bin/env rill
+# Who owns an IP address, MAC, floating IP or name?
+#
+# Needs rill built with `--features openstack` and the usual OS_* variables;
+# admins see every project. Without a cloud:
+#   RILL_OPENSTACK_FIXTURE=tests/fixtures/openstack rill examples/openstack_who_owns.ril 10.0.0.11
+
+args {
+    query: Str description="IP address, MAC, floating IP, name or fragment"
+}
+
+let hits = ostack.search(args.query, all_projects=true)
+if hits.len() == 0 {
+    die "nothing matches {args.query}"
+}
+
+for hit in hits.take(10) {
+    let labels = [hit.record.get("name"), hit.record.get("hypervisor_hostname"), hit.record.get("floating_ip_address"), hit.record.id]
+    let name = labels.find(|v| v != null && v != "").unwrap()
+    let owner = if hit.owner == null { "" } else { " → {hit.owner.name}" }
+    let project = if hit.project == null { "" } else { " in {hit.project.name}" }
+    print "{hit.match} {hit.kind} {name} ({hit.field}){owner}{project}"
+}

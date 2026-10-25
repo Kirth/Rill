@@ -152,14 +152,6 @@ pub enum Stmt {
         name: String,
         function: Function,
     },
-    WithEnv {
-        bindings: Vec<(String, Expr)>,
-        body: Vec<Stmt>,
-    },
-    On {
-        host: Box<Expr>,
-        body: Vec<Stmt>,
-    },
     Emit(Expr),
     Return(Option<Expr>),
     Continue,
@@ -274,6 +266,18 @@ pub enum Expr {
         body: Vec<Stmt>,
     },
     Block(Vec<Stmt>),
+    /// `with env { NAME = value } { ... }`: runs the block with the extra
+    /// environment and yields the block's value.
+    WithEnv {
+        bindings: Vec<(String, Expr)>,
+        body: Vec<Stmt>,
+    },
+    /// `on host { ... }`: runs every command in the block through the remote
+    /// prefix (an ssh host or an exec argv) and yields the block's value.
+    On {
+        host: Box<Expr>,
+        body: Vec<Stmt>,
+    },
     Closure {
         params: Vec<String>,
         body: Vec<Stmt>,

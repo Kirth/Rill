@@ -1,0 +1,11 @@
+[
+  {
+    "id": "8c8c8c8c-8c8c-48c8-88c8-8c8c8c8c8c8c",
+    "floating_ip_address": "203.0.113.7",
+    "fixed_ip_address": "10.0.0.11",
+    "port_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "status": "ACTIVE",
+    "project_id": "p1",
+    "floating_network_id": "9d9d9d9d-9d9d-49d9-89d9-9d9d9d9d9d9d"
+  }
+]

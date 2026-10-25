@@ -1,0 +1,16 @@
+[
+  {
+    "id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "name": "ubuntu-24.04",
+    "status": "active",
+    "visibility": "public",
+    "size": "2.1 GiB"
+  },
+  {
+    "id": "d1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1",
+    "name": "debian-12",
+    "status": "active",
+    "visibility": "public",
+    "size": "1.1 GiB"
+  }
+]

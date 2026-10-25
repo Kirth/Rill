@@ -9,7 +9,8 @@ pub fn closest<'a>(target: &str, candidates: impl IntoIterator<Item = &'a str>) 
             continue;
         }
         let similarity = strsim::jaro_winkler(target, candidate);
-        let distance = strsim::levenshtein(target, candidate);
+        // Optimal string alignment: a transposition (`svr` for `srv`) is one edit.
+        let distance = strsim::osa_distance(target, candidate);
         let close = similarity >= 0.85 || distance <= (target.len() / 3).max(1);
         if !close {
             continue;

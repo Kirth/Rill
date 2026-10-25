@@ -147,6 +147,11 @@ impl RillError {
         self
     }
 
+    /// The secondary labelled spans, e.g. "this block was opened here".
+    pub fn labels(&self) -> &[(Span, String)] {
+        self.extras.as_ref().map(|extras| extras.secondary.as_slice()).unwrap_or(&[])
+    }
+
     pub fn from_error_value(error: &ErrorValue) -> Self {
         let mut diagnostic =
             Self::new(format!("{}: {}", error_kind_name(&error.kind), error.message))

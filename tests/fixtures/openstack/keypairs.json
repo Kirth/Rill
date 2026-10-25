@@ -1,0 +1,9 @@
+[
+  {
+    "id": "kirth",
+    "name": "kirth",
+    "type": "ssh",
+    "fingerprint": "aa:bb:cc",
+    "public_key": "ssh-ed25519 AAAA kirth"
+  }
+]

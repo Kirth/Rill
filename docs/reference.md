@@ -278,12 +278,15 @@ with `emit`.
 ```rill
 on "user@host" { run hostname }
 on host { on docker("container") { run hostname } }
+let kernel = on host { run! uname -r }          # the block's last value
 ```
 
 `on` prefixes every command in its block with `ssh host --` (argv is
 shell-quoted, so arguments survive the remote shell) or, for a list, that
 argv. `docker(name)` builds a `docker exec` prefix. Contexts nest; Rill
-evaluation and filesystem methods still run locally.
+evaluation and filesystem methods still run locally. Like `if` and `{ }`,
+`on host { }` and `with env { } { }` are expressions whose value is the last
+expression in the block.
 
 ## Files, data, environment
 
@@ -294,6 +297,7 @@ text.parse_json()  text.parse_yaml()  text.parse_toml()  text.parse_csv()  text.
 value.to_json()  value.to_json_pretty()  value.to_yaml()  value.to_toml()
 print env.HOME;  env.DEBUG = "1";  with env { DEBUG = "1" } { run env }
 250ms.sleep()
+ostack.servers().filter(.status == "ACTIVE")   # OpenStack records, see methods.md
 ```
 
 `read_text()` and `read_yaml()` return a Result; other operations raise.

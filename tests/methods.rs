@@ -457,6 +457,7 @@ fn registry_arities_conform_between_checker_and_evaluator() {
                     assert_eq!(*name, "all");
                     "all=true"
                 }
+                Argument::Bool => "true",
             })
             .collect::<Vec<_>>();
         let source = |arity: usize| {
@@ -620,4 +621,102 @@ fn namespace_apis_share_method_behavior() {
         assert!(check(source).is_err(), "{source}");
     }
     assert!(rill::run_source("yaml.read(json.parse(\"1\"))", vec![]).is_err());
+}
+
+#[test]
+fn relational_list_methods() {
+    let run = |source: &str| rill::run_source(source, Vec::new()).expect(source);
+    use rill::types::Value;
+    let strs =
+        |items: &[&str]| Value::list(items.iter().map(|s| Value::Str(s.to_string())).collect());
+
+    assert_eq!(
+        run(r#"[{n: "b", v: 2}, {n: "a", v: 3}, {n: "c", v: 1}].sort_by(.v).map(.n)"#),
+        strs(&["c", "b", "a"])
+    );
+    assert_eq!(run(r#"["b", "a", "c"].sort_by(|s| s).reverse()"#), strs(&["c", "b", "a"]));
+    // Stable on equal keys; mixed keys order by kind, nulls first.
+    assert_eq!(
+        run(r#"[{k: 1, n: "x"}, {k: 0, n: "y"}, {k: 1, n: "z"}].sort_by(.k).map(.n)"#),
+        strs(&["y", "x", "z"])
+    );
+    assert_eq!(
+        run(r#"[2, "a", null, 1.5].sort_by(|x| x)"#).to_string(),
+        run(r#"[null, 1.5, 2, "a"]"#).to_string()
+    );
+
+    assert_eq!(run(r#"[1, 2, 1, 3, 2].unique()"#), run("[1, 2, 3]"));
+    assert_eq!(run(r#"[{a: 1}, {a: 1}, {a: 2}].unique().len()"#), Value::Int(2));
+
+    assert_eq!(run("[2, 4, 6].all(. % 2 == 0)"), Value::Bool(true));
+    assert_eq!(run("[2, 3, 6].all(. % 2 == 0)"), Value::Bool(false));
+    assert_eq!(run("[].all(. > 1)"), Value::Bool(true));
+    assert_eq!(run("[1, 2, 3, 4].count(. > 2)"), Value::Int(2));
+
+    assert_eq!(run("[1, 2, 3].sum()"), Value::Int(6));
+    assert_eq!(run("[1, 2.5].sum()"), Value::Float(3.5));
+    assert_eq!(run("[].sum()"), Value::Int(0));
+    let error = rill::run_source("[1, \"x\"].sum()", Vec::new()).expect_err("sum of a string");
+    assert!(error.to_string().contains("sum needs numbers"), "{error}");
+
+    assert_eq!(
+        run(
+            r#"[{id: "a", v: 1}, {id: "b", v: 2}, {id: "a", v: 3}].index_by(.id).map(|k, r| "{k}={r.v}")"#
+        ),
+        strs(&["a=3", "b=2"])
+    );
+    let program =
+        rill::parser::parse("let m: Map[Str, Int] = [1, 2].index_by(|x| Str(x))").unwrap();
+    rill::typeck::check(&program).expect("index_by is typed by its items");
+}
+
+#[cfg(not(feature = "openstack"))]
+#[test]
+fn ostack_without_the_feature_explains_itself() {
+    let error = rill::run_source("ostack.servers()", Vec::new()).expect_err("no feature");
+    let text = error.to_string();
+    assert!(text.contains("built without"), "{text}");
+}
+
+#[test]
+fn every_method_and_builtin_is_documented_with_its_parameters() {
+    use rill::methods::{
+        builtin_doc, method_doc, namespace_params, BUILTINS, METHODS, NAMESPACE_FUNCTIONS,
+    };
+    let optional = |p: &str| p.contains('=') || p.ends_with('?');
+    let check = |name: &str, min: usize, max: usize, params: &[&str]| {
+        if max == usize::MAX {
+            assert!(params.last().is_some_and(|p| p.ends_with('…')), "{name}: variadic {params:?}");
+        } else {
+            assert_eq!(params.len(), max, "{name}: {params:?} for {min}..={max} args");
+            for (index, param) in params.iter().enumerate() {
+                assert_eq!(optional(param), index >= min, "{name}: parameter {param} optionality");
+            }
+        }
+    };
+    for method in METHODS {
+        let doc =
+            method_doc(method.name).unwrap_or_else(|| panic!("no doc for method {}", method.name));
+        assert!(!doc.summary.is_empty());
+        check(method.name, method.min_args, method.max_args, doc.params);
+    }
+    for builtin in BUILTINS {
+        let doc = builtin_doc(builtin.name)
+            .unwrap_or_else(|| panic!("no doc for builtin {}", builtin.name));
+        check(builtin.name, builtin.min_args, builtin.max_args, doc.params);
+    }
+    for function in NAMESPACE_FUNCTIONS {
+        let params = namespace_params(function);
+        let positional = params.iter().filter(|p| !p.ends_with('=')).count();
+        assert_eq!(positional, function.positional.len(), "{}: {params:?}", function.name);
+    }
+    assert_eq!(
+        rill::methods::signature("replace", method_doc("replace").unwrap().params),
+        "replace(pattern, with, all=false)"
+    );
+}
+
+#[test]
+fn suggestions_catch_transposed_letters() {
+    assert_eq!(rill::suggest::closest("svr", ["srv", "names"]), Some("srv"));
 }

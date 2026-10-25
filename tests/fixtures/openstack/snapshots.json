@@ -1,0 +1,10 @@
+[
+  {
+    "id": "6f6f6f6f-6f6f-46f6-86f6-6f6f6f6f6f6f",
+    "name": "data-snap",
+    "volume_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "status": "available",
+    "size": 50,
+    "project_id": "p1"
+  }
+]

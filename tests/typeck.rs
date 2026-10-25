@@ -87,6 +87,25 @@ with env {
 }
 
 #[test]
+fn on_and_with_env_blocks_are_expressions_typed_by_their_body() {
+    check_ok(
+        r#"
+let user: Str = on "host" { run! whoami }
+let status: ProcessResult = on ["docker", "exec", "c"] { run uptime }
+let inner: Str = with env { DEBUG = "1" } { env.DEBUG }
+let nested: Str = on "host" { with env { A = "1" } { run! id -un } }
+let unit = on "host" { run! whoami; }
+"#,
+    );
+    let err = check_err(r#"let n: Int = on "host" { run! whoami }"#);
+    assert!(err.contains("Str"), "{err}");
+    let err = check_err("let x = on 42 { run true }");
+    assert!(err.contains("on needs Str or List"), "{err}");
+    let err = check_err(r#"let x: Int = with env { A = "1" } { env.A }"#);
+    assert!(err.contains("Str"), "{err}");
+}
+
+#[test]
 fn checks_argument_and_input_declarations() {
     check_ok(
         r#"
@@ -436,4 +455,49 @@ fn for_expressions_infer_their_element_type_from_emit() {
     let error = check_err("let names = for x in [1, 2] { emit \"n{x}\" }\nnames.map(|n| n + 1)");
     assert!(error.contains("Str and Int"), "{error}");
     check_ok("let mixed = for x in [1] { if x > 0 { emit 1 } else { emit \"s\" } }\nmixed.len()");
+}
+
+#[test]
+fn ostack_namespace_functions_are_typed_without_the_feature() {
+    check_ok(
+        r#"
+let servers: List[Map] = ostack.servers()
+let one: Option[Map] = ostack.find("id")
+let inv: Map[Str, List[Map]] = ostack.inventory(["servers"])
+let who: Map = ostack.show("server", "web-1")
+let same: Map = ostack.server("web-1")
+let vol: Map = ostack.volume("data")
+let attached: List[Map] = ostack.server("web-1").attached_volumes()
+let owner: Option[Map] = vol.project()
+let hits: List[Map] = ostack.search("10.0.0.11", all_projects=true, kinds=["ports"])
+let fips: List[Map] = ostack.floating_ips()
+let dev: Option[Map] = ostack.port("p").server()
+let net: Option[Map] = ostack.port("p").network()
+let on_host: List[Map] = ostack.hypervisor("compute-17").servers()
+let routers: List[Map] = ostack.subnet("s").routers()
+let quota: List[Map] = ostack.quota(project="demo", usage=true)
+let acts: List[Map] = ostack.actions("web-1", events=true, limit=5)
+let flavor: Option[Map] = ostack.server("x").flavor()
+let snaps: List[Map] = ostack.volume("v").snapshots()
+let zones: List[Map] = ostack.availability_zones()
+let members: List[Map] = ostack.pool("p").members()
+let created: List[Map] = ostack.user("u").created_servers()
+let memberships: List[Map] = ostack.user("u").project_memberships()
+let names: List[Str] = ostack.kinds()
+let active = ostack.servers(all_projects=true, project="demo").filter(.status == "ACTIVE")
+let f = ostack.servers
+let scoped: List[Map] = ostack.project("demo").servers()
+let everywhere: Map[Str, List[Map]] = ostack.all_projects().inventory(["servers"])
+"#,
+    );
+    let err = check_err(r#"ostack.show("servers")"#);
+    assert!(err.contains("ostack.show needs 2 args, got 1"), "{err}");
+    let err = check_err("ostack.servers(bogus=true)");
+    assert!(err.contains("unknown ostack.servers argument 'bogus'"), "{err}");
+    let err = check_err("ostack.servers(fresh=1)");
+    assert!(err.contains("fresh= expects Bool"), "{err}");
+    let err = check_err("ostack.server()");
+    assert!(err.contains("ostack.server needs 1 args, got 0"), "{err}");
+    let err = check_err("ostack.servr()");
+    assert!(err.contains("ostack has no function 'servr'"), "{err}");
 }

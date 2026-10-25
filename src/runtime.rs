@@ -40,8 +40,29 @@ pub fn shell_quote_argv(argv: &[String]) -> Vec<String> {
 
 static SSH_RUNTIME_DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
-const OPENSSH_CONTROL_PATH_LIMIT: usize = 108;
+/// `sizeof(sockaddr_un.sun_path)` on Linux and the BSDs is 104 to 108 bytes;
+/// OpenSSH rejects a path that does not fit with its trailing NUL.
+const OPENSSH_CONTROL_PATH_LIMIT: usize = 104;
+/// `%C` expands to a 40-character SHA-1 hex digest.
 const OPENSSH_HASH_TOKEN_LEN: usize = 40;
+/// While binding the socket, OpenSSH appends `.XXXXXXXXXXXXXXXX` (16 random
+/// characters) to the control path and renames it into place afterwards.
+const OPENSSH_MUX_TEMP_SUFFIX_LEN: usize = 17;
+
+/// Picks the directory holding the ssh control sockets: `temp_dir` when the
+/// expanded socket path (including OpenSSH's temporary suffix) fits in
+/// `sun_path`, otherwise the short system temp root. Nested Nix shells and
+/// macOS put `TMPDIR` deep enough that the default would not fit.
+fn choose_ssh_runtime_dir(temp_dir: &std::path::Path, name: &str) -> PathBuf {
+    let candidate = temp_dir.join(name);
+    let expanded_len =
+        candidate.as_os_str().len() + 1 + OPENSSH_HASH_TOKEN_LEN + OPENSSH_MUX_TEMP_SUFFIX_LEN;
+    if expanded_len < OPENSSH_CONTROL_PATH_LIMIT {
+        candidate
+    } else {
+        PathBuf::from("/tmp").join(name)
+    }
+}
 
 fn ssh_runtime_dir() -> Result<PathBuf, RillError> {
     SSH_RUNTIME_DIR
@@ -50,17 +71,8 @@ fn ssh_runtime_dir() -> Result<PathBuf, RillError> {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_nanos())
                 .unwrap_or_default();
-            let name = format!("rill-ssh-{}-{nonce}", std::process::id());
-            let candidate = std::env::temp_dir().join(&name);
-            let expanded_candidate = candidate.join("x".repeat(OPENSSH_HASH_TOKEN_LEN));
-            let path = if expanded_candidate.to_string_lossy().len() < OPENSSH_CONTROL_PATH_LIMIT {
-                candidate
-            } else {
-                // OpenSSH uses a Unix-domain socket for ControlPath and rejects
-                // paths at 108 bytes. Nested Nix shells can make temp_dir too
-                // long, so use the short system temp root in that case.
-                std::path::PathBuf::from("/tmp").join(name)
-            };
+            let name = format!("rill-ssh-{}-{nonce:x}", std::process::id());
+            let path = choose_ssh_runtime_dir(&std::env::temp_dir(), &name);
             std::fs::create_dir(&path).map_err(|error| error.to_string())?;
 
             #[cfg(unix)]
@@ -723,8 +735,9 @@ mod tests {
 
         assert!(control_path.ends_with("/%C"));
         assert!(!control_path.contains("example.com"));
-        let expanded_control_path = control_path.replace("%C", &"x".repeat(40));
-        assert!(expanded_control_path.len() < 108);
+        let expanded_control_path =
+            control_path.replace("%C", &"x".repeat(40)) + ".XXXXXXXXXXXXXXXX";
+        assert!(expanded_control_path.len() < 104);
 
         let directory = std::path::Path::new(control_path.trim_end_matches("/%C"));
         assert!(directory.is_dir());
@@ -741,5 +754,24 @@ mod tests {
 
         let second = ssh_control_options().expect("SSH options again");
         assert_eq!(options, second);
+    }
+
+    #[test]
+    fn ssh_runtime_dir_falls_back_to_tmp_when_the_socket_path_would_not_fit() {
+        use super::choose_ssh_runtime_dir;
+        let name = "rill-ssh-1709546-18df7a8f4c3b2a1d";
+        let expanded = |dir: &std::path::Path| dir.join("x".repeat(40)).as_os_str().len() + 17;
+
+        let short = std::path::Path::new("/tmp");
+        assert_eq!(choose_ssh_runtime_dir(short, name), short.join(name));
+
+        // A nested nix shell: 99 bytes with the hash, 116 with ssh's temp suffix.
+        let nested = std::path::Path::new("/tmp/nix-shell.AkYKWK");
+        let chosen = choose_ssh_runtime_dir(nested, name);
+        assert_eq!(chosen, short.join(name));
+        assert!(expanded(&chosen) < 104);
+
+        let deep = std::path::Path::new("/var/folders/9f/abcdefghijklmnopqrstuvwxyz01234/T");
+        assert_eq!(choose_ssh_runtime_dir(deep, name), short.join(name));
     }
 }
