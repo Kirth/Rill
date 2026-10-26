@@ -9,6 +9,7 @@ pub mod methods;
 pub mod openstack;
 pub mod parser;
 pub mod pathresolver;
+pub mod records;
 pub mod repl;
 pub mod runtime;
 pub mod sql;
@@ -259,6 +260,7 @@ fn collect_local_imports(stmts: &[ast::Stmt], imports: &mut Vec<String>) {
             ast::Stmt::Args(group) => collect_arg_group_imports(group, imports),
             ast::Stmt::Break(Some(expr)) => collect_expr_imports(expr, imports),
             ast::Stmt::Return(None)
+            | ast::Stmt::TypeDecl { .. }
             | ast::Stmt::Use(_)
             | ast::Stmt::InputLines
             | ast::Stmt::Continue

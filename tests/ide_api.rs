@@ -209,3 +209,69 @@ fn a_host_defines_bindings_for_the_checker_and_the_evaluator() {
     let wrong = rill::parser::parse("limit.trim()").expect("parses");
     assert!(session.check(&wrong).is_err(), "limit is typed as Int");
 }
+
+/// Probe the expression `needle` (its first occurrence after `after`).
+fn probe(session: &mut Session, source: &str, after: &str, needle: &str) -> rill::typeck::Probe {
+    let program = rill::parser::parse(source).expect(source);
+    let from = source.find(after).expect(after);
+    let start = from + source[from..].find(needle).expect(needle);
+    let (start, needle) = (start + needle.len() - needle.trim_start().len(), needle.trim_start());
+    let span = rill::diagnostic::Span::new(start, start + needle.len());
+    session.clone().probe(&program, span).unwrap_or_else(|| panic!("no probe for {needle}"))
+}
+
+#[test]
+fn probe_sees_parameters_inside_a_function() {
+    let mut session = Session::new();
+    let source = "fn label(p: OSProject) -> Str {\n    p\n}\n";
+    let found = probe(&mut session, source, "{", "p");
+    assert_eq!(found.ty, "OSProject");
+    let record = found.record.expect("a record");
+    assert_eq!(record.ostack_kind, Some("project"));
+    let enabled = record.field("enabled").expect("enabled");
+    assert_eq!((enabled.ty.as_str(), enabled.optional), ("Bool", true));
+    assert!(record.relations.iter().any(|(m, ty)| m == "servers" && ty == "List[OSServer]"));
+    assert!(record.relations.iter().any(|(m, _)| m == "quota"));
+}
+
+#[test]
+fn probe_types_ostack_calls_lists_and_closure_params() {
+    let mut session = Session::new();
+    let found = probe(&mut session, "ostack.project(\"x\")", "", "ostack.project(\"x\")");
+    assert_eq!(found.ty, "OSProject");
+    let source = "let xs = ostack.servers()\nxs\n";
+    let found = probe(&mut session, source, "\nxs", "xs");
+    assert_eq!(found.ty, "List[OSServer]");
+    assert_eq!(found.element_record.map(|r| r.name), Some("OSServer".into()));
+    let source = "ostack.servers().map(|s| s)\n";
+    let found = probe(&mut session, source, "|s| ", " s");
+    assert_eq!(found.ty, "OSServer");
+}
+
+#[test]
+fn probe_knows_records_declared_in_the_program() {
+    let mut session = Session::new();
+    let source = "type Host {\n  # its name\n  name: Str\n}\nfn f(h: Host) { h }\n";
+    let found = probe(&mut session, source, "{ h", "h");
+    let record = found.record.expect("Host");
+    assert_eq!(record.fields[0].doc.as_deref(), Some("its name"));
+    assert!(record.relations.is_empty());
+    let mut checked = session.clone();
+    checked.check(&rill::parser::parse(source).unwrap()).unwrap();
+    assert!(checked.record_names().contains(&"Host".to_string()));
+    assert!(checked.record_info("OSServer").is_some());
+}
+
+#[test]
+fn defined_ostack_values_get_record_types() {
+    let mut session = Session::new();
+    let mut record = rill::types::Map::new();
+    for (key, value) in [("id", "s1"), ("name", "web"), ("addresses", "net=10.0.0.1")] {
+        record.insert(key.to_string(), Value::Str(value.to_string()));
+    }
+    session.define("srv", &Value::map(record.clone()));
+    session.define("all", &Value::list(vec![Value::map(record)]));
+    let ident = |name: &str| rill::ast::Expr::Ident(name.to_string());
+    assert_eq!(session.type_of(&ident("srv")).unwrap(), "OSServer");
+    assert_eq!(session.type_of(&ident("all")).unwrap(), "List[OSServer]");
+}

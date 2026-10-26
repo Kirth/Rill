@@ -1,0 +1,438 @@
+# The record types of the ostack namespace: what `ostack.servers()`,
+# `ostack.project("x")` and the relations on records return.  Fields are
+# the ones the APIs return after the ostack crate normalises them; clouds
+# and microversions add more, which stay readable with `.get("name")`.
+# Fields every record carries are required; the rest are marked `?`.
+
+type OSServer {
+    id: Str
+    name: Str
+    # ACTIVE, SHUTOFF, ERROR, BUILD, …
+    status?: Str
+    project_id?: Str
+    # the user that booted it
+    user_id?: Str
+    # the flavor's name (see flavor_id, or .flavor() for the record)
+    flavor?: Str
+    flavor_id?: Str
+    flavor_name?: Str
+    # the image's name, or its id when the image is gone
+    image?: Str
+    image_id?: Str
+    # every address as "net=ip,ip; other=ip"
+    addresses?: Str
+    # one entry per address: {network, addr, version, type, mac}
+    networks?: List[Map]
+    key_name?: Str
+    metadata?: Map
+    created?: Str
+    updated?: Str
+    "OS-EXT-AZ:availability_zone"?: Str
+    # the compute host it runs on (admin only)
+    "OS-EXT-SRV-ATTR:host"?: Str
+    "OS-EXT-SRV-ATTR:hypervisor_hostname"?: Str
+    "OS-EXT-STS:vm_state"?: Str
+    "OS-EXT-STS:task_state"?: Any
+    "OS-EXT-STS:power_state"?: Int
+    "os-extended-volumes:volumes_attached"?: List[Map]
+    security_groups?: List[Map]
+    locked?: Bool
+}
+
+type OSVolume {
+    id: Str
+    name?: Str
+    status?: Str
+    # gigabytes
+    size?: Int
+    project_id?: Str
+    volume_type?: Str
+    # one entry per server: {server_id, device, attachment_id, …}
+    attachments?: List[Map]
+    bootable?: Str
+    availability_zone?: Str
+    description?: Str
+    created_at?: Str
+    updated_at?: Str
+    snapshot_id?: Any
+    source_volid?: Any
+    metadata?: Map
+    "os-vol-host-attr:host"?: Str
+}
+
+type OSPort {
+    id: Str
+    name?: Str
+    status?: Str
+    network_id?: Str
+    # the server or router the port belongs to
+    device_id?: Str
+    # compute:<zone>, network:router_interface, network:dhcp, …
+    device_owner?: Str
+    project_id?: Str
+    mac_address?: Str
+    # one entry per address: {subnet_id, ip_address}
+    fixed_ips?: List[Map]
+    # security group ids
+    security_groups?: List[Str]
+    admin_state_up?: Bool
+    "binding:host_id"?: Str
+    "binding:vnic_type"?: Str
+    allowed_address_pairs?: List[Map]
+    port_security_enabled?: Bool
+    description?: Str
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSNetwork {
+    id: Str
+    name?: Str
+    status?: Str
+    project_id?: Str
+    shared?: Bool
+    # whether floating ips come from it
+    router_external?: Bool
+    "router:external"?: Bool
+    # subnet ids
+    subnets?: List[Str]
+    mtu?: Int
+    admin_state_up?: Bool
+    "provider:network_type"?: Str
+    "provider:physical_network"?: Any
+    "provider:segmentation_id"?: Any
+    availability_zones?: List[Str]
+    description?: Str
+}
+
+type OSSubnet {
+    id: Str
+    name?: Str
+    cidr?: Str
+    ip_version?: Int
+    network_id?: Str
+    project_id?: Str
+    gateway_ip?: Any
+    enable_dhcp?: Bool
+    dns_nameservers?: List[Str]
+    # {start, end} ranges
+    allocation_pools?: List[Map]
+    host_routes?: List[Map]
+    subnetpool_id?: Any
+    description?: Str
+}
+
+type OSImage {
+    id: Str
+    name?: Str
+    status?: Str
+    # public, private, shared or community
+    visibility?: Str
+    # human-readable, e.g. "2.2 GiB"
+    size?: Str
+    disk_format?: Str
+    container_format?: Str
+    owner?: Str
+    min_disk?: Int
+    min_ram?: Int
+    protected?: Bool
+    os_distro?: Str
+    os_version?: Str
+    tags?: List[Str]
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSFlavor {
+    id: Str
+    name: Str
+    vcpus?: Int
+    # megabytes
+    ram?: Int
+    # root disk, gigabytes
+    disk?: Int
+    swap?: Any
+    "OS-FLV-EXT-DATA:ephemeral"?: Int
+    "os-flavor-access:is_public"?: Bool
+    extra_specs?: Map
+    description?: Any
+}
+
+type OSHypervisor {
+    # an Int on older compute APIs
+    id: Any
+    hypervisor_hostname?: Str
+    hypervisor_type?: Str
+    host_ip?: Str
+    # up or down
+    state?: Str
+    # enabled or disabled
+    status?: Str
+    # {host, id, disabled_reason}
+    service?: Map
+    vcpus?: Int
+    vcpus_used?: Int
+    memory_mb?: Int
+    memory_mb_used?: Int
+    local_gb?: Int
+    local_gb_used?: Int
+    running_vms?: Int
+}
+
+# Also what `ostack.project("name")` returns: a project whose `.servers()`,
+# `.volumes()`, … and `.quota()` are scoped to it.
+type OSProject {
+    id: Str
+    name: Str
+    enabled?: Bool
+    domain_id?: Str
+    description?: Str
+    parent_id?: Str
+    is_domain?: Bool
+    tags?: List[Str]
+}
+
+type OSUser {
+    id: Str
+    name: Str
+    enabled?: Bool
+    domain_id?: Str
+    email?: Str
+    default_project_id?: Str
+    description?: Str
+    password_expires_at?: Any
+}
+
+type OSLoadbalancer {
+    id: Str
+    name?: Str
+    # ACTIVE, PENDING_UPDATE, ERROR, …
+    provisioning_status?: Str
+    # ONLINE, DEGRADED, ERROR, …
+    operating_status?: Str
+    vip_address?: Str
+    vip_subnet_id?: Str
+    vip_port_id?: Str
+    vip_network_id?: Str
+    provider?: Str
+    project_id?: Str
+    flavor_id?: Any
+    admin_state_up?: Bool
+    # {id} of each listener
+    listeners?: List[Map]
+    # {id} of each pool
+    pools?: List[Map]
+    description?: Str
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSAmphora {
+    id: Str
+    loadbalancer_id?: Any
+    compute_id?: Any
+    status?: Str
+    # MASTER, BACKUP or STANDALONE
+    role?: Any
+    lb_network_ip?: Any
+    ha_ip?: Any
+    vrrp_ip?: Any
+    cert_expiration?: Any
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSFloatingIp {
+    id: Str
+    floating_ip_address?: Str
+    # the private address it maps to, when associated
+    fixed_ip_address?: Any
+    port_id?: Any
+    router_id?: Any
+    status?: Str
+    project_id?: Str
+    floating_network_id?: Str
+    description?: Str
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSSecurityGroup {
+    id: Str
+    name?: Str
+    description?: Str
+    project_id?: Str
+    # {direction, protocol, port_range_min, port_range_max, remote_ip_prefix, …}
+    security_group_rules?: List[Map]
+    stateful?: Bool
+}
+
+type OSRouter {
+    id: Str
+    name?: Str
+    status?: Str
+    project_id?: Str
+    # {network_id, external_fixed_ips, enable_snat}; null without a gateway
+    external_gateway_info?: Any
+    routes?: List[Map]
+    admin_state_up?: Bool
+    ha?: Bool
+    distributed?: Bool
+    availability_zones?: List[Str]
+    description?: Str
+}
+
+type OSKeypair {
+    # the keypair's name
+    id: Str
+    name: Str
+    # ssh or x509
+    type?: Str
+    fingerprint?: Str
+    public_key?: Str
+    user_id?: Str
+}
+
+type OSServerGroup {
+    id: Str
+    name?: Str
+    # affinity, anti-affinity, soft-affinity, …
+    policies?: List[Str]
+    policy?: Str
+    # server ids
+    members?: List[Str]
+    project_id?: Str
+    user_id?: Str
+}
+
+type OSAggregate {
+    id: Int
+    name?: Str
+    availability_zone?: Any
+    # compute host names
+    hosts?: List[Str]
+    metadata?: Map
+    uuid?: Str
+}
+
+type OSAvailabilityZone {
+    # the zone's name
+    id: Str
+    name: Str
+    available?: Bool
+    # compute host names
+    hosts?: List[Str]
+}
+
+type OSComputeService {
+    # an Int on older compute APIs
+    id: Any
+    # nova-compute, nova-scheduler, …
+    binary?: Str
+    host?: Str
+    zone?: Str
+    # enabled or disabled
+    status?: Str
+    # up or down
+    state?: Str
+    disabled_reason?: Any
+    forced_down?: Bool
+    updated_at?: Any
+}
+
+type OSNetworkAgent {
+    id: Str
+    # Open vSwitch agent, DHCP agent, L3 agent, …
+    agent_type?: Str
+    binary?: Str
+    host?: Str
+    alive?: Bool
+    admin_state_up?: Bool
+    availability_zone?: Any
+    topic?: Str
+    heartbeat_timestamp?: Str
+}
+
+type OSSnapshot {
+    id: Str
+    name?: Str
+    volume_id?: Str
+    status?: Str
+    # gigabytes
+    size?: Int
+    project_id?: Str
+    description?: Any
+    created_at?: Str
+    updated_at?: Any
+    metadata?: Map
+}
+
+type OSBackup {
+    id: Str
+    name?: Str
+    volume_id?: Str
+    status?: Str
+    # gigabytes
+    size?: Int
+    container?: Any
+    is_incremental?: Bool
+    project_id?: Str
+    snapshot_id?: Any
+    availability_zone?: Any
+    description?: Any
+    created_at?: Str
+    updated_at?: Str
+}
+
+type OSPool {
+    id: Str
+    name?: Str
+    # HTTP, HTTPS, TCP, UDP, PROXY, …
+    protocol?: Str
+    # ROUND_ROBIN, LEAST_CONNECTIONS or SOURCE_IP
+    lb_algorithm?: Str
+    operating_status?: Str
+    provisioning_status?: Str
+    # {id} of each load balancer
+    loadbalancers?: List[Map]
+    # {id} of each member
+    members?: List[Map]
+    listeners?: List[Map]
+    healthmonitor_id?: Any
+    project_id?: Str
+    admin_state_up?: Bool
+    description?: Str
+}
+
+# A load balancer pool member, from `pool.members()`.
+type OSMember {
+    id: Str
+    name?: Str
+    address?: Str
+    protocol_port?: Int
+    subnet_id?: Any
+    weight?: Int
+    operating_status?: Str
+    provisioning_status?: Str
+    admin_state_up?: Bool
+    backup?: Bool
+    monitor_address?: Any
+    monitor_port?: Any
+    project_id?: Str
+}
+
+type OSRoleAssignment {
+    id: Str
+    # the role's name
+    role?: Str
+    role_id?: Str
+    # the user's name; null for a group assignment
+    user?: Any
+    user_id?: Any
+    group?: Any
+    group_id?: Any
+    # the project's name; null for a domain assignment
+    project?: Any
+    project_id?: Any
+    domain_id?: Any
+}

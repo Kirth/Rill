@@ -196,7 +196,9 @@ struct Token {
 
 pub fn parse(source: &str) -> Result<Program, RillError> {
     let tokens = lex(source)?;
-    Parser::new(tokens).parse_program()
+    let mut parser = Parser::new(tokens);
+    parser.source = source.to_string();
+    parser.parse_program()
 }
 
 /// A token class for syntax highlighting.  The parser's own token kinds stay
@@ -1306,11 +1308,14 @@ fn command_text_kind(text: String) -> TokenKind {
 struct Parser {
     tokens: VecDeque<Token>,
     last_end: usize,
+    /// The text being parsed, for the doc comments of record fields (the
+    /// lexer drops comments).  Empty for embedded expressions.
+    source: String,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens: VecDeque::from(tokens), last_end: 0 }
+        Self { tokens: VecDeque::from(tokens), last_end: 0, source: String::new() }
     }
 
     fn parse_program(&mut self) -> Result<Program, RillError> {
@@ -1347,6 +1352,9 @@ impl Parser {
                 Ok(Stmt::Expr(self.parse_on_after_keyword()?))
             }
             TokenKind::Fn => self.parse_fn(),
+            TokenKind::Ident(name) if name == "type" && self.at_type_declaration() => {
+                self.parse_type_decl()
+            }
             TokenKind::For => Ok(Stmt::Expr(self.parse_for_expr(ForMode::Sequential, None)?)),
             TokenKind::Emit => {
                 self.next();
@@ -1385,6 +1393,114 @@ impl Parser {
             TokenKind::Ident(_) if self.is_assignment() => self.parse_assignment(),
             _ => Ok(Stmt::Expr(self.parse_expr(0)?)),
         }
+    }
+
+    /// `type Name {`; `type` is only a keyword here, so `x.type` and a
+    /// variable called `type` keep working.
+    fn at_type_declaration(&self) -> bool {
+        matches!(self.peek_n_kind(1), TokenKind::Ident(_) | TokenKind::TypeIdent(_))
+            && matches!(self.peek_n_kind(2), TokenKind::LBrace)
+    }
+
+    fn parse_type_decl(&mut self) -> Result<Stmt, RillError> {
+        self.next();
+        let name_token = self.next();
+        let name = match name_token.kind {
+            TokenKind::Ident(name) => name,
+            TokenKind::TypeIdent(name) => {
+                return Err(RillError::spanned(
+                    format!("'{name}' is a built-in type"),
+                    name_token.span,
+                )
+                .with_help("pick another name for the record"))
+            }
+            _ => unreachable!("checked by at_type_declaration"),
+        };
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Err(RillError::spanned(
+                format!("type names start with a capital letter: '{name}'"),
+                name_token.span,
+            ));
+        }
+        self.expect(TokenKind::LBrace)?;
+        let mut fields: Vec<FieldDecl> = Vec::new();
+        self.skip_separators();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let token = self.next();
+            let field = match token.kind {
+                TokenKind::Ident(name) => name,
+                TokenKind::Str(parts) => match self.build_string(parts)? {
+                    Expr::Literal(Literal::Str(name)) => name,
+                    _ => {
+                        return Err(RillError::spanned(
+                            "field names can't be interpolated",
+                            token.span,
+                        ))
+                    }
+                },
+                other => {
+                    return Err(RillError::spanned(
+                        format!("expected a field name, found {}", other.describe()),
+                        token.span,
+                    )
+                    .with_help("quote field names that are keywords or contain symbols"))
+                }
+            };
+            if fields.iter().any(|existing| existing.name == field) {
+                return Err(RillError::spanned(
+                    format!("field '{field}' is declared twice"),
+                    token.span,
+                ));
+            }
+            let optional = self.consume(TokenKind::Question);
+            self.expect(TokenKind::Colon)?;
+            let type_name = self.parse_type_name()?;
+            let doc = self.field_doc(token.span.start, self.last_end);
+            fields.push(FieldDecl { name: field, type_name, optional, doc });
+            let separated = self.consume(TokenKind::Comma);
+            let before = self.tokens.len();
+            self.skip_separators();
+            if !separated && before == self.tokens.len() && !self.at(TokenKind::RBrace) {
+                let token = self.peek();
+                return Err(RillError::spanned(
+                    format!("expected ',' or a new line, found {}", token.kind.describe()),
+                    token.span,
+                ));
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::TypeDecl { name, fields })
+    }
+
+    /// The comment documenting a field: a `#` comment after it on its line,
+    /// or the `#` lines right above it.
+    fn field_doc(&self, start: usize, end: usize) -> Option<String> {
+        let source = self.source.as_str();
+        if source.is_empty() || end > source.len() {
+            return None;
+        }
+        let rest = &source[end..];
+        let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+        if let Some(comment) = line.trim_start_matches([',', ' ', '\t']).strip_prefix('#') {
+            let comment = comment.trim();
+            if !comment.is_empty() {
+                return Some(comment.to_string());
+            }
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+        if !source[line_start..start].trim().is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for line in source[..line_start].lines().rev() {
+            match line.trim().strip_prefix('#') {
+                Some(comment) => lines.push(comment.trim()),
+                None => break,
+            }
+        }
+        lines.reverse();
+        let doc = lines.join(" ");
+        (!doc.is_empty()).then_some(doc)
     }
 
     fn at_input_declaration(&self) -> bool {
@@ -1847,9 +1963,19 @@ impl Parser {
                 break;
             }
 
-            if self.consume(TokenKind::Dot) {
+            if self.at(TokenKind::Dot) {
+                // The receiver keeps its own span, so a host can ask about
+                // `xs.ports()` inside `xs.ports().filter(...)`.
+                let base = match left {
+                    Expr::Located { .. } => left,
+                    other => Expr::Located {
+                        expr: Box::new(other),
+                        span: Span::new(start, self.last_end),
+                    },
+                };
+                self.next();
                 let name = self.expect_ident()?;
-                left = Expr::Field { base: Box::new(left), name };
+                left = Expr::Field { base: Box::new(base), name };
                 continue;
             }
 
@@ -2621,6 +2747,7 @@ impl Parser {
         };
         let type_name = match name.as_str() {
             "Null" => TypeName::Null,
+            "Any" => TypeName::Any,
             "Bool" => TypeName::Bool,
             "Int" => TypeName::Int,
             "Float" => TypeName::Float,
@@ -2727,6 +2854,9 @@ impl Parser {
                 self.expect(TokenKind::RBracket)?;
                 TypeName::Result(Box::new(inner), error)
             }
+            other if other.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                TypeName::Named(other.to_string())
+            }
             other => return Err(RillError::spanned(format!("unknown type '{other}'"), token.span)),
         };
         if self.consume(TokenKind::LBracket) {
@@ -2810,6 +2940,7 @@ fn stmts_propagate(stmts: &[Stmt]) -> bool {
         Stmt::Assign { target, expr, .. } => expr_propagates(target) || expr_propagates(expr),
         Stmt::While { cond, body } => expr_propagates(cond) || stmts_propagate(body),
         Stmt::Fn { .. }
+        | Stmt::TypeDecl { .. }
         | Stmt::Use(_)
         | Stmt::Args(_)
         | Stmt::InputLines

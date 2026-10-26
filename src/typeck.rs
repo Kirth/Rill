@@ -29,6 +29,10 @@ enum Type {
     ProcessHandle,
     Stream,
     Db,
+    /// A declared record type (`type Name { ... }` or a built-in such as
+    /// `OSServer`): a Map whose fields the checker knows.  Records are
+    /// nominal: an `OSServer` is not an `OSProject`.
+    Record(String),
     Function {
         /// Maximum number of positional arguments.
         arity: Option<usize>,
@@ -96,6 +100,7 @@ impl fmt::Display for Type {
             Type::ProcessHandle => write!(f, "ProcessHandle"),
             Type::Stream => write!(f, "Stream"),
             Type::Db => write!(f, "Db"),
+            Type::Record(name) => write!(f, "{name}"),
             Type::Function { .. } => write!(f, "Fn"),
         }
     }
@@ -249,6 +254,7 @@ pub(crate) struct CheckedModule {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModuleExports {
     symbols: BTreeMap<String, Type>,
+    records: BTreeMap<String, crate::records::RecordDecl>,
 }
 
 pub(crate) fn check_module(
@@ -263,6 +269,9 @@ pub(crate) fn check_module(
         }
     }
     let mut checker = Checker::new(env, !is_module);
+    for import in imports {
+        checker.records.extend(import.records.clone());
+    }
     checker.check_program(program)
 }
 
@@ -298,6 +307,77 @@ impl Session {
         self.checker.env.set(name.into(), type_from_value(value));
     }
 
+    /// Check `program` against this session, as `check` does, and report
+    /// the static type of the expression spanning exactly `span`, with the
+    /// locals around it (a function's parameters, a closure's) in scope.
+    /// `None` when no such expression was checked.
+    pub fn probe(&mut self, program: &Program, span: Span) -> Option<Probe> {
+        self.checker.probe = Some((span, None));
+        let _ = self.check(program);
+        let (_, found) = self.checker.probe.take()?;
+        let ty = found?;
+        Some(self.describe(&ty))
+    }
+
+    fn describe(&self, ty: &Type) -> Probe {
+        let record_of = |ty: &Type| match ty {
+            Type::Record(name) => self.record_info(name),
+            _ => None,
+        };
+        let element = match ty {
+            Type::List(item) => (**item).clone(),
+            Type::Option(inner) => (**inner).clone(),
+            _ => Type::Unknown,
+        };
+        Probe {
+            ty: ty.to_string(),
+            kind: method_kind(ty),
+            record: record_of(ty),
+            element_record: record_of(&element),
+        }
+    }
+
+    /// A record type by name (declared in the session, or built in).
+    pub fn record_info(&self, name: &str) -> Option<crate::records::RecordInfo> {
+        let decl = self.checker.record(name)?;
+        let fields = decl
+            .fields
+            .iter()
+            .map(|field| crate::records::FieldInfo {
+                name: field.name.clone(),
+                ty: type_from_name(&field.type_name).to_string().replace("Unknown", "Any"),
+                optional: field.optional,
+                doc: field.doc.clone(),
+            })
+            .collect();
+        let ostack_kind = decl.ostack_kind();
+        let relations = ostack_kind
+            .map(|kind| {
+                crate::methods::ostack_relations(kind)
+                    .iter()
+                    .map(|method| {
+                        let returns = ostack_relation_type(method)
+                            .map(|ty| ty.to_string())
+                            .or_else(|| {
+                                crate::methods::lookup(method).map(|m| {
+                                    resolve_method_return(m.returns, &Type::map_any(), &[])
+                                        .to_string()
+                                })
+                            })
+                            .unwrap_or_default();
+                        (method.to_string(), returns)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(crate::records::RecordInfo { name: decl.name.clone(), fields, relations, ostack_kind })
+    }
+
+    /// The names of every record type in scope, sorted.
+    pub fn record_names(&self) -> Vec<String> {
+        self.checker.record_names().into_iter().map(str::to_string).collect()
+    }
+
     /// The static type of an expression in the current scope.
     pub fn type_of(&mut self, expr: &Expr) -> Result<String, RillError> {
         let ty = self.checker.check_expr(expr)?;
@@ -330,6 +410,19 @@ impl Session {
             })
             .unwrap_or_default()
     }
+}
+
+/// What `Session::probe` found out about an expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    /// The static type as written in annotations (`List[OSServer]`).
+    pub ty: String,
+    /// The receiver kind, for looking up methods.
+    pub kind: crate::methods::Kind,
+    /// The record the expression is, if it is one.
+    pub record: Option<crate::records::RecordInfo>,
+    /// The record each element (or the Option's value) is.
+    pub element_record: Option<crate::records::RecordInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +461,14 @@ struct Checker {
     /// One slot per enclosing `for` expression, collecting the common type of
     /// its `emit` values; innermost last.
     emit_types: Vec<Option<Type>>,
+    /// Record types declared in this program or imported; the built-in
+    /// ones live in `crate::records`.
+    records: BTreeMap<String, crate::records::RecordDecl>,
+    /// Span of the innermost located expression being checked.
+    expr_span: Option<Span>,
+    /// An expression whose type a host asked for (see `Session::probe`),
+    /// and its type once checked.
+    probe: Option<(Span, Option<Type>)>,
 }
 
 /// Checker state restored after a statement fails, so later statements are
@@ -401,7 +502,143 @@ impl Checker {
             current_span: None,
             warn_unused_top_level,
             emit_types: Vec::new(),
+            records: BTreeMap::new(),
+            expr_span: None,
+            probe: None,
         }
+    }
+
+    /// A record declaration by name: one in scope, or a built-in.
+    fn record(&self, name: &str) -> Option<&crate::records::RecordDecl> {
+        self.records.get(name).or_else(|| crate::records::builtin(name))
+    }
+
+    fn record_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .records
+            .keys()
+            .map(String::as_str)
+            .chain(crate::records::builtins().keys().map(String::as_str))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Reject annotations naming a record type that is not declared.
+    fn validate_type_name(&self, name: &TypeName) -> Result<(), RillError> {
+        match name {
+            TypeName::Named(record) if self.record(record).is_none() => {
+                Err(RillError::new(format!("unknown type '{record}'"))
+                    .with_optional_help(crate::suggest::did_you_mean(record, self.record_names())))
+            }
+            TypeName::List(inner) | TypeName::Option(inner) => self.validate_type_name(inner),
+            TypeName::Map(Some(inner)) => self.validate_type_name(inner),
+            TypeName::Tuple(items) => {
+                items.iter().try_for_each(|item| self.validate_type_name(item))
+            }
+            TypeName::Result(ok, error) => {
+                self.validate_type_name(ok)?;
+                error.as_deref().map_or(Ok(()), |error| self.validate_type_name(error))
+            }
+            TypeName::Function { params, return_type } => {
+                for param in params.iter().flatten() {
+                    self.validate_type_name(param)?;
+                }
+                return_type.as_deref().map_or(Ok(()), |rt| self.validate_type_name(rt))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Declare a record type; a second declaration of a name is an error.
+    fn declare_record(&mut self, name: &str, fields: &[FieldDecl]) -> Result<(), RillError> {
+        if crate::records::builtin(name).is_some() {
+            return Err(RillError::new(format!("'{name}' is a built-in type"))
+                .with_help("pick another name for the record"));
+        }
+        let decl = crate::records::RecordDecl { name: name.to_string(), fields: fields.to_vec() };
+        match self.records.get(name) {
+            Some(existing) if *existing != decl => {
+                Err(RillError::new(format!("type '{name}' is declared twice")))
+            }
+            _ => {
+                self.records.insert(name.to_string(), decl);
+                Ok(())
+            }
+        }
+    }
+
+    /// A map literal given where a record is expected must have the
+    /// record's required fields, and literal values of the declared types.
+    fn check_record_literal(&self, expected: &Type, expr: &Expr) -> Result<(), RillError> {
+        let (Type::Record(name), Expr::Map(pairs)) = (expected, expr.unspanned()) else {
+            return Ok(());
+        };
+        let Some(decl) = self.record(name) else { return Ok(()) };
+        let missing: Vec<&str> = decl
+            .fields
+            .iter()
+            .filter(|field| !field.optional && !pairs.iter().any(|(key, _)| *key == field.name))
+            .map(|field| field.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let list = missing.iter().map(|name| format!("'{name}'")).collect::<Vec<_>>();
+            return Err(RillError::new(format!(
+                "{name} needs field{} {}",
+                if missing.len() == 1 { "" } else { "s" },
+                list.join(", ")
+            )));
+        }
+        for (key, value) in pairs {
+            let (Some(field), Expr::Literal(literal)) = (decl.field(key), value.unspanned()) else {
+                continue;
+            };
+            if matches!(literal, Literal::Null) && field.optional {
+                continue;
+            }
+            ensure_assignable(&type_from_name(&field.type_name), &type_from_literal(literal))
+                .map_err(|_| {
+                    RillError::new(format!(
+                        "{name}.{key} is {}, got {}",
+                        type_from_name(&field.type_name),
+                        type_from_literal(literal)
+                    ))
+                })
+                .map_err(|error| match value.span() {
+                    Some(span) => error.with_span(span),
+                    None => error,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Check a value against the type it is given to, as `ensure_assignable`
+    /// does, plus the shape of a map literal given for a record.
+    fn ensure_fits(&self, expected: &Type, actual: &Type, expr: &Expr) -> Result<(), RillError> {
+        ensure_assignable(expected, actual)?;
+        self.check_record_literal(expected, expr)
+    }
+
+    /// The type of `field` on a record, warning when the record does not
+    /// declare it.
+    fn record_field(&mut self, record: &str, field: &str) -> Type {
+        let Some(decl) = self.record(record) else { return Type::Unknown };
+        if let Some(declared) = decl.field(field) {
+            return type_from_name(&declared.type_name);
+        }
+        let help = crate::suggest::did_you_mean(
+            field,
+            decl.fields.iter().map(|field| field.name.as_str()),
+        )
+        .unwrap_or_else(|| format!("read fields {record} does not declare with .get(\"{field}\")"));
+        let span = self.expr_span.or(self.current_span);
+        self.warn(
+            span,
+            format!("{record} has no field '{field}'"),
+            "rill::warn::unknown_field",
+            &help,
+        );
+        Type::Unknown
     }
 
     /// Collected errors as one diagnostic (the rest attached as related), or
@@ -540,6 +777,12 @@ impl Checker {
     /// Pre-bind every top-level `fn` so calls can precede definitions.
     fn hoist_top_level(&mut self, program: &Program) {
         for stmt in &program.stmts {
+            if let Stmt::TypeDecl { name, fields } = stmt.unspanned() {
+                // Reported when the declaration itself is checked.
+                let _ = self.declare_record(name, fields);
+            }
+        }
+        for stmt in &program.stmts {
             if let Stmt::Fn { name, function } = stmt.unspanned() {
                 self.env.set(
                     name.clone(),
@@ -581,8 +824,12 @@ impl Checker {
                 symbols.insert(name, ty);
             }
         }
+        let records = crate::records::declarations(&program.stmts)
+            .into_iter()
+            .map(|decl| (decl.name.clone(), decl))
+            .collect();
         let warnings = self.take_diagnostics()?;
-        Ok(CheckedModule { exports: ModuleExports { symbols }, warnings })
+        Ok(CheckedModule { exports: ModuleExports { symbols, records }, warnings })
     }
 
     /// The type of a field/index chain used as an assignment target.
@@ -591,6 +838,7 @@ impl Checker {
             Expr::Ident(name) => self.env.get(name).ok_or_else(|| self.unknown_identifier(name)),
             Expr::Field { base, name } => match self.check_place(base)? {
                 Type::Map(value) => Ok(*value),
+                Type::Record(record) => Ok(self.record_field(&record, name)),
                 Type::Unknown => Ok(Type::Unknown),
                 other => Err(RillError::new(format!("cannot assign to field '{name}' of {other}"))),
             },
@@ -602,6 +850,7 @@ impl Checker {
                         ensure_assignable(&Type::Int, &index_ty)?;
                         Ok(*item)
                     }
+                    Type::Record(_) => Ok(Type::Unknown),
                     Type::Map(value) => {
                         if !matches!(index_ty, Type::Str | Type::Int | Type::Unknown) {
                             return Err(RillError::new(format!(
@@ -769,11 +1018,14 @@ impl Checker {
                             .with_help("add `else { ... }`, or use a statement instead"));
                     }
                 }
+                if let Some(type_name) = type_name {
+                    self.validate_type_name(type_name)?;
+                }
                 let inferred = self.check_expr(expr)?;
                 let ty = if let Some(type_name) = type_name {
                     let annotated = type_from_name(type_name);
                     let span = expr.span();
-                    ensure_assignable(&annotated, &inferred).map_err(|e| match span {
+                    self.ensure_fits(&annotated, &inferred, expr).map_err(|e| match span {
                         Some(s) => e.with_span(s),
                         None => e,
                     })?;
@@ -865,7 +1117,25 @@ impl Checker {
                 Ok(Type::Null)
             }
             Stmt::InputLines => Ok(Type::Null),
+            Stmt::TypeDecl { name, fields } => {
+                if self.function_depth > 0 || self.env.scopes.len() > 1 {
+                    return Err(RillError::new("types are declared at the top level"));
+                }
+                self.declare_record(name, fields)?;
+                for field in fields {
+                    self.validate_type_name(&field.type_name)?;
+                }
+                Ok(Type::Null)
+            }
             Stmt::Fn { name, function } => {
+                for param in &function.params {
+                    if let Some(type_name) = &param.type_name {
+                        self.validate_type_name(type_name)?;
+                    }
+                }
+                if let Some(return_type) = &function.return_type {
+                    self.validate_type_name(return_type)?;
+                }
                 self.env.set(
                     name.clone(),
                     Type::Function {
@@ -1072,7 +1342,15 @@ impl Checker {
     fn check_expr(&mut self, expr: &Expr) -> Result<Type, RillError> {
         match expr {
             Expr::Located { expr, span } => {
-                self.check_expr(expr).map_err(|error| error.with_span(*span))
+                let previous = self.expr_span.replace(*span);
+                let checked = self.check_expr(expr).map_err(|error| error.with_span(*span));
+                self.expr_span = previous;
+                if let (Some((wanted, found)), Ok(ty)) = (&mut self.probe, &checked) {
+                    if wanted == span {
+                        *found = Some(ty.clone());
+                    }
+                }
+                checked
             }
             Expr::Literal(value) => Ok(type_from_literal(value)),
             Expr::Ident(name) => {
@@ -1117,6 +1395,18 @@ impl Checker {
                     let mut elements = elements.into_iter();
                     let first = elements.next().unwrap_or(Type::Unknown);
                     return Ok(elements.fold(first, common_type));
+                }
+                if let Type::List(item) = &base_ty {
+                    if matches!(index_ty, Type::Int) {
+                        return Ok((**item).clone());
+                    }
+                }
+                if let (Type::Record(record), Expr::Literal(Literal::Str(key))) =
+                    (&base_ty, index.unspanned())
+                {
+                    if let Some(field) = self.record(record).and_then(|decl| decl.field(key)) {
+                        return Ok(type_from_name(&field.type_name));
+                    }
                 }
                 Ok(Type::Unknown)
             }
@@ -1451,7 +1741,13 @@ impl Checker {
         let named: Vec<(&str, crate::methods::Kind)> =
             named.iter().map(|(name, kind)| (name.as_str(), *kind)).collect();
         function.validate(&positional, &named)?;
-        Ok(resolve_method_return(function.returns, &Type::Unknown, &[]))
+        let returns = resolve_method_return(function.returns, &Type::Unknown, &[]);
+        if function.module == "ostack" {
+            if let Some(ty) = ostack_function_type(function.name, args, &returns) {
+                return Ok(ty);
+            }
+        }
+        Ok(returns)
     }
 
     fn check_namespace_method(
@@ -1515,8 +1811,30 @@ impl Checker {
     }
 
     fn check_method(&mut self, base: &Expr, name: &str, args: &[Expr]) -> Result<Type, RillError> {
-        let receiver = self.check_expr(base)?;
+        let record = match self.check_expr(base)? {
+            Type::Record(record) => Some(record),
+            other => return self.check_method_on(other, name, args),
+        };
+        let returns = self.check_method_on(Type::map_any(), name, args)?;
+        let record = record.expect("matched above");
+        if let Some(kind) = crate::records::ostack_kind_of(&record) {
+            if crate::methods::ostack_relations(kind).contains(&name) {
+                if let Some(ty) = ostack_relation_type(name) {
+                    return Ok(ty);
+                }
+            }
+        }
+        Ok(returns)
+    }
 
+    /// Check a method call on a receiver of type `receiver`; a record is
+    /// checked as the Map it is.
+    fn check_method_on(
+        &mut self,
+        receiver: Type,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Type, RillError> {
         let kind = method_kind(&receiver);
         let method = crate::methods::lookup(name)
             .ok_or_else(|| RillError::new(format!("unknown method .{name}()")))?;
@@ -1670,7 +1988,7 @@ impl Checker {
             self.closure_param_hints = None;
             let actual = actual?;
             if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
-                ensure_assignable(expected, &actual)?;
+                self.ensure_fits(expected, &actual, arg)?;
             }
             if let Some(slot) = provided.get_mut(index) {
                 *slot = true;
@@ -1693,7 +2011,7 @@ impl Checker {
             }
             provided[index] = true;
             if let Some(expected) = params.as_ref().and_then(|p| p.get(index)) {
-                ensure_assignable(expected, &actual)?;
+                self.ensure_fits(expected, &actual, value)?;
             }
         }
         if let (Some(required), Some(names)) = (required, names) {
@@ -1919,6 +2237,7 @@ impl Checker {
                     ))),
             },
             Type::Map(value) => Ok(*value),
+            Type::Record(record) => Ok(self.record_field(&record, name)),
             Type::Unknown => Ok(Type::Unknown),
             ref ty
                 if crate::methods::lookup(name)
@@ -2360,11 +2679,29 @@ fn check_typed_call(ty: &Type, args: &[Type]) -> Result<Type, RillError> {
     }
 }
 
+/// Check an argument against its parameter's annotation at call time.  A
+/// Map given for a record declared in the program must have the record's
+/// required fields; one given for an ostack record must not be a record of
+/// another kind.
 pub(crate) fn check_value_annotation(
     value: &Value,
     annotation: &TypeName,
+    records: &BTreeMap<String, crate::records::RecordDecl>,
 ) -> Result<(), RillError> {
-    ensure_assignable(&type_from_name(annotation), &type_from_value(value))
+    ensure_assignable(&type_from_name(annotation), &type_from_value(value))?;
+    if let (TypeName::Named(name), Value::Map(map)) = (annotation, value) {
+        if let Some(decl) = records.get(name) {
+            if let Some(field) =
+                decl.fields.iter().find(|field| !field.optional && !map.contains_key(&field.name))
+            {
+                return Err(RillError::new(format!(
+                    "expected {name}, got a Map without field '{}'",
+                    field.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Names a module exports: its top-level `let` bindings and `fn`s.  Mutable
@@ -2418,7 +2755,7 @@ fn type_from_value(value: &Value) -> Type {
             items.iter().fold(Type::Unknown, |acc, item| common_type(acc, type_from_value(item))),
         )),
         Value::Tuple(items) => Type::Tuple(items.iter().map(type_from_value).collect()),
-        Value::Map(_) => Type::map_any(),
+        Value::Map(map) => ostack_record_type(map).unwrap_or_else(Type::map_any),
         Value::Duration(_) => Type::Duration,
         Value::Time(_) => Type::Time,
         Value::Path(_) => Type::Path,
@@ -2446,6 +2783,45 @@ fn type_from_value(value: &Value) -> Type {
     }
 }
 
+/// The built-in record type of a map the ostack namespace returned: a
+/// project handle by its marker, any other record by its fields.
+fn ostack_record_type(map: &crate::types::Map) -> Option<Type> {
+    let kind = match map.get(crate::methods::OSTACK_MARKER) {
+        Some(Value::Str(marker)) if marker == "project" => "project",
+        Some(_) => return None,
+        None => crate::methods::ostack_record_kind(map)?,
+    };
+    crate::records::ostack_record_name(kind).map(|name| Type::Record(name.to_string()))
+}
+
+/// The record type an `ostack` function returns: `ostack.servers()` is a
+/// `List[OSServer]`, `ostack.server(x)` and `ostack.show("server", x)` an
+/// `OSServer`.  `None` keeps the table's untyped return.
+fn ostack_function_type(name: &str, args: &[Expr], returns: &Type) -> Option<Type> {
+    let kind = match name {
+        "list" | "show" => match args.first().map(Expr::unspanned) {
+            Some(Expr::Literal(Literal::Str(kind))) => kind.as_str(),
+            _ => return None,
+        },
+        _ => name,
+    };
+    let record = Type::Record(crate::records::ostack_record_name(kind)?.to_string());
+    match returns {
+        Type::List(_) => Some(Type::List(Box::new(record))),
+        Type::Map(_) => Some(record),
+        Type::Option(_) => Some(Type::Option(Box::new(record))),
+        _ => None,
+    }
+}
+
+/// What an ostack relation or scoped listing returns (`server.ports()` is a
+/// `List[OSPort]`, `port.network()` an `Option[OSNetwork]`).
+fn ostack_relation_type(method: &str) -> Option<Type> {
+    let (record, many) = crate::records::ostack_relation(method)?;
+    let record = Type::Record(record.to_string());
+    Some(if many { Type::List(Box::new(record)) } else { Type::Option(Box::new(record)) })
+}
+
 fn method_kind(ty: &Type) -> crate::methods::Kind {
     use crate::methods::Kind;
     match ty {
@@ -2455,7 +2831,7 @@ fn method_kind(ty: &Type) -> crate::methods::Kind {
         Type::Float => Kind::Float,
         Type::List(_) => Kind::List,
         Type::Tuple(_) => Kind::Tuple,
-        Type::Map(_) => Kind::Map,
+        Type::Map(_) | Type::Record(_) => Kind::Map,
         Type::Path => Kind::Path,
         Type::Regex => Kind::Regex,
         Type::Duration => Kind::Duration,
@@ -2584,6 +2960,8 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
 fn type_from_name(name: &TypeName) -> Type {
     match name {
         TypeName::Null => Type::Null,
+        TypeName::Any => Type::Unknown,
+        TypeName::Named(record) => Type::Record(record.clone()),
         TypeName::Bool => Type::Bool,
         TypeName::Int => Type::Int,
         TypeName::Float => Type::Float,
@@ -2627,6 +3005,18 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
     match (expected, actual) {
         (Type::Float, Type::Int) => Ok(()),
         (Type::Error, Type::Str) => Ok(()),
+        // A record is a Map, and an untyped Map may be any record: records
+        // stay gradual so code written before them keeps checking.
+        (Type::Map(_), Type::Record(_)) | (Type::Record(_), Type::Map(_)) => Ok(()),
+        (Type::Record(record), Type::Str) => {
+            let error = RillError::new(format!("type mismatch: expected {record}, got Str"));
+            Err(match crate::records::ostack_kind_of(record) {
+                Some(kind) => error.with_help(format!(
+                    "pass the record itself, e.g. `ostack.{kind}(\"name or id\")`"
+                )),
+                None => error,
+            })
+        }
         (Type::List(expected), Type::List(actual)) => ensure_assignable(expected, actual),
         (Type::Map(expected), Type::Map(actual)) => ensure_assignable(expected, actual),
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
@@ -2794,6 +3184,7 @@ fn common_type(left: Type, right: Type) -> Type {
         (Type::Int, Type::Float) | (Type::Float, Type::Int) => Type::Float,
         (Type::List(left), Type::List(right)) => Type::List(Box::new(common_type(*left, *right))),
         (Type::Map(left), Type::Map(right)) => Type::Map(Box::new(common_type(*left, *right))),
+        (Type::Record(_) | Type::Map(_), Type::Record(_) | Type::Map(_)) => Type::map_any(),
         (Type::Option(left), Type::Option(right)) => {
             Type::Option(Box::new(common_type(*left, *right)))
         }

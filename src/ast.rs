@@ -94,6 +94,8 @@ pub struct ArgGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeName {
     Null,
+    /// `Any`: a value of any type; the checker does not check it.
+    Any,
     Bool,
     Int,
     Float,
@@ -119,6 +121,20 @@ pub enum TypeName {
     },
     Option(Box<TypeName>),
     Result(Box<TypeName>, Option<Box<TypeName>>),
+    /// A record type declared with `type Name { ... }`, or a built-in one
+    /// such as `OSServer`.
+    Named(String),
+}
+
+/// One field of a `type Name { ... }` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub type_name: TypeName,
+    /// Written `name?: T`: a record may leave it out.
+    pub optional: bool,
+    /// The `#` comment on the line before the field, or after it.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +169,12 @@ pub enum Stmt {
     Fn {
         name: String,
         function: Function,
+    },
+    /// `type Name { field: T, other?: U }`: a record type.  At runtime a
+    /// record is a plain Map; the declaration only informs the checker.
+    TypeDecl {
+        name: String,
+        fields: Vec<FieldDecl>,
     },
     Emit(Expr),
     Return(Option<Expr>),

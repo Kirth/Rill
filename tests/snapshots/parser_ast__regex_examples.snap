@@ -148,9 +148,15 @@ Program {
                 expr: Located {
                     expr: Call {
                         callee: Field {
-                            base: Ident(
-                                "x",
-                            ),
+                            base: Located {
+                                expr: Ident(
+                                    "x",
+                                ),
+                                span: Span {
+                                    start: 162,
+                                    end: 163,
+                                },
+                            },
                             name: "replace",
                         },
                         args: [

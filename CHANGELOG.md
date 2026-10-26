@@ -7,6 +7,22 @@ All notable changes to Rill are documented here. The format follows
 
 ### Added
 
+- Record types: `type Name { field: T, other?: U }` declares the fields a map
+  has. Records are nominal, pass as `Map`, and an untyped `Map` passes as a
+  record. Map literals are checked against the required fields. Unknown field
+  reads warn (`unknown_field`). Annotated parameters check required fields at
+  call time. `Any` is a type that is not checked.
+- Built-in `OS…` records for every ostack kind (`OSServer`, `OSProject`, …,
+  declared in `src/ostack.ril`): `ostack.servers()` is a `List[OSServer]`,
+  `ostack.project(x)` an `OSProject`, and relations are typed, e.g.
+  `server.ports()` is a `List[OSPort]`. A helper can take `p: OSProject`, and
+  passing it a name or another kind of record is a type error.
+- `Session::probe` reports the static type of one expression in the code being
+  edited, with the locals around it in scope (`p` inside `fn f(p: OSProject)`).
+  `Session::record_info` and `record_names` describe record types for
+  completion and hover.
+- Indexing a `List[T]` with an `Int` is typed `T`.
+
 - `show value` / `show(value, title)`: records print as a text table and anything else as
   the pretty value; a host that installs `Evaluator::set_show` (eddy, eddy-web)
   gets the value itself and draws a live table or tree.

@@ -354,6 +354,9 @@ pub struct Evaluator {
     executor: ParallelExecutor,
     cancellation: CancellationToken,
     cancellation_active: bool,
+    /// Record types declared by the program, for checking a Map passed to
+    /// a parameter annotated with one.
+    records: Arc<BTreeMap<String, crate::records::RecordDecl>>,
 }
 
 /// The value of a block used as an expression: `return`, `break` and friends
@@ -509,6 +512,7 @@ impl Evaluator {
             executor,
             cancellation: CancellationToken::new(),
             cancellation_active: false,
+            records: Arc::default(),
         }
     }
 
@@ -529,6 +533,7 @@ impl Evaluator {
             executor: self.executor.clone(),
             cancellation,
             cancellation_active: true,
+            records: self.records.clone(),
         }
     }
 
@@ -881,8 +886,14 @@ impl Evaluator {
     /// each other regardless of declaration order.
     fn hoist_functions(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
-            if let Stmt::Fn { name, .. } = stmt.unspanned() {
-                self.env.hoist(name);
+            match stmt.unspanned() {
+                Stmt::Fn { name, .. } => self.env.hoist(name),
+                Stmt::TypeDecl { name, fields } => {
+                    let decl =
+                        crate::records::RecordDecl { name: name.clone(), fields: fields.clone() };
+                    Arc::make_mut(&mut self.records).insert(name.clone(), decl);
+                }
+                _ => {}
             }
         }
     }
@@ -1107,6 +1118,7 @@ impl Evaluator {
                 let _ = module;
                 Ok(Flow::Value(Value::Null))
             }
+            Stmt::TypeDecl { .. } => Ok(Flow::Value(Value::Null)),
             Stmt::Let { pattern, expr, mutable, .. } => {
                 let value = self.eval_expr(expr)?;
                 match pattern {
@@ -4194,7 +4206,7 @@ impl Evaluator {
         }
         for (param, value) in params.iter().zip(&bound) {
             if let (Some(annotation), Some(value)) = (&param.type_name, value) {
-                crate::typeck::check_value_annotation(value, annotation)?;
+                crate::typeck::check_value_annotation(value, annotation, &self.records)?;
             }
         }
         self.call_function_in_env(function, bound)

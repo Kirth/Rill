@@ -100,9 +100,15 @@ Program {
                         args: [
                             Located {
                                 expr: Field {
-                                    base: Ident(
-                                        "server",
-                                    ),
+                                    base: Located {
+                                        expr: Ident(
+                                            "server",
+                                        ),
+                                        span: Span {
+                                            start: 97,
+                                            end: 103,
+                                        },
+                                    },
                                     name: "ip",
                                 },
                                 span: Span {

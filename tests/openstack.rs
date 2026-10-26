@@ -517,3 +517,34 @@ fn users_know_what_they_created_and_where_they_belong() {
     assert!(error.contains("a user has no .servers()"), "{error}");
     assert!(error.contains(".created_servers()"), "{error}");
 }
+
+#[test]
+fn record_parameters_take_records_of_their_kind() {
+    let source = r#"
+fn label(p: OSProject) -> Str { "{p.name} ({p.id})" }
+label(ostack.project("demo"))
+"#;
+    assert_eq!(string(&run(source)), "demo (p1)");
+    // An untyped Map holding a server still is not a project.
+    let error = run_err(
+        r#"
+fn label(p: OSProject) -> Str { p.name }
+let servers: List[Map] = ostack.servers()
+label(servers[0])
+"#,
+    );
+    assert!(error.contains("expected OSProject, got OSServer"), "{error}");
+}
+
+#[test]
+fn declared_records_need_their_required_fields_at_runtime() {
+    let error = run_err(
+        r#"
+type Owner { name: Str, email: Str }
+fn mail(o: Owner) -> Str { o.email }
+let people: List[Map] = [{name: "kirth"}]
+mail(people[0])
+"#,
+    );
+    assert!(error.contains("expected Owner, got a Map without field 'email'"), "{error}");
+}

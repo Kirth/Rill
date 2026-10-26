@@ -113,9 +113,15 @@ Program {
                                 If {
                                     cond: Located {
                                         expr: Field {
-                                            base: Ident(
-                                                "result",
-                                            ),
+                                            base: Located {
+                                                expr: Ident(
+                                                    "result",
+                                                ),
+                                                span: Span {
+                                                    start: 105,
+                                                    end: 111,
+                                                },
+                                            },
                                             name: "ok",
                                         },
                                         span: Span {
@@ -146,11 +152,23 @@ Program {
                                                                             Located {
                                                                                 expr: Call {
                                                                                     callee: Field {
-                                                                                        base: Field {
-                                                                                            base: Ident(
-                                                                                                "result",
-                                                                                            ),
-                                                                                            name: "out",
+                                                                                        base: Located {
+                                                                                            expr: Field {
+                                                                                                base: Located {
+                                                                                                    expr: Ident(
+                                                                                                        "result",
+                                                                                                    ),
+                                                                                                    span: Span {
+                                                                                                        start: 140,
+                                                                                                        end: 146,
+                                                                                                    },
+                                                                                                },
+                                                                                                name: "out",
+                                                                                            },
+                                                                                            span: Span {
+                                                                                                start: 140,
+                                                                                                end: 150,
+                                                                                            },
                                                                                         },
                                                                                         name: "trim",
                                                                                     },
@@ -204,9 +222,15 @@ Program {
                                                                         Expr(
                                                                             Located {
                                                                                 expr: Field {
-                                                                                    base: Ident(
-                                                                                        "result",
-                                                                                    ),
+                                                                                    base: Located {
+                                                                                        expr: Ident(
+                                                                                            "result",
+                                                                                        ),
+                                                                                        span: Span {
+                                                                                            start: 202,
+                                                                                            end: 208,
+                                                                                        },
+                                                                                    },
                                                                                     name: "err",
                                                                                 },
                                                                                 span: Span {

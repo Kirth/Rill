@@ -46,9 +46,57 @@ print(total)                # 6
 `Null`, `Bool`, `Int`, `Float`, `Str`, `Bytes`, `List[T]`, `Tuple[A, B, ...]`,
 `Map[Str, V]` (or just `Map`), `Path`, `Duration`, `Time`, `Regex`, `Error`,
 `ProcessResult`, `ProcessHandle`, `Db`, `Option[T]` (or `T?`), `Result[T, E]` (or
-`Result[T]`), `Fn`, `Fn(A, B) -> R` (also written `Fn[A, B] -> R`).
+`Result[T]`), `Fn`, `Fn(A, B) -> R` (also written `Fn[A, B] -> R`), `Any`
+(not checked), and record types.
 
-Map keys are always strings. There are no user-defined structs.
+Map keys are always strings.
+
+### Records
+
+A record type names the fields a map is expected to have. At runtime a record
+is still a plain `Map`; the declaration informs the checker, completion and
+hover.
+
+```
+type Member {
+    # the user's name
+    user: Str
+    role: Str
+    since?: Time          # `?`: the field may be missing
+    "OS-EXT:zone"?: Str   # quote names that are not identifiers
+}
+
+fn label(m: Member) -> Str { "{m.user} ({m.role})" }
+label({user: "kirth", role: "admin"})
+```
+
+- Records are nominal: an `OSServer` is not an `OSProject`, though both have
+  an `id`. A record passes wherever a `Map` is expected, and an untyped `Map`
+  passes where a record is expected.
+- A map literal given for a record must have its required fields, and literal
+  values must have the declared types.
+- Reading a field the record does not declare warns (`unknown_field`), with a
+  suggestion; use `.get("name")` for fields some records leave out.
+- When a function is called, a `Map` passed to a record parameter must have
+  the record's required fields.
+- Types are declared at the top level, may be used before their declaration,
+  and are exported from modules.
+
+The `ostack` namespace returns built-in records: `ostack.servers()` is a
+`List[OSServer]`, `ostack.project("demo")` an `OSProject`, `server.ports()` a
+`List[OSPort]`, `port.network()` an `Option[OSNetwork]`. There is one per kind
+(`OSVolume`, `OSFloatingIp`, `OSRoleAssignment`, …), declared in
+`src/ostack.ril`. A helper can take the record itself:
+
+```
+fn owners(p: OSProject) -> List[Str] {
+    p.role_assignments().map(.user)
+}
+owners(ostack.project("demo"))     # not owners("demo"): that is a type error
+```
+
+At runtime, a value passed to an `OS…` parameter that is visibly a record of
+another kind (an `OSServer` given for an `OSProject`) is an error.
 
 Literals: `null`, `true`, `42`, `1.5`, `"text"`, `r"raw"`, `[1, 2]`,
 `{name: "alice", "other-key": 3}`, `("localhost", 8080)`, `/regex/`,
