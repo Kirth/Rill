@@ -36,8 +36,9 @@ fn lists_full_records_and_types_them_for_the_checker() {
     assert_eq!(run("ostack.servers().len()"), Value::Int(3));
     assert_eq!(run("ostack.list(\"volumes\").len()"), Value::Int(2));
     // Full records: the trimmed CLI columns would not have `attachments`.
-    let value =
-        run(r#"ostack.volumes().filter(.status == "in-use").map(.attachments[0].server_id)"#);
+    let value = run(
+        r#"ostack.volumes().filter(.status.unwrap_or("") == "in-use").map(.attachments.unwrap_or([])[0].server_id)"#,
+    );
     assert_eq!(value, Value::list(vec![Value::Str("11111111-1111-4111-8111-111111111111".into())]));
     // The checker knows the shape, so a typed binding and map methods pass.
     let program = rill::parser::parse(
@@ -74,7 +75,7 @@ fn show_resolves_ids_and_names_and_reports_ambiguity() {
         Value::Str("22222222-2222-4222-8222-222222222222".into())
     );
     assert_eq!(
-        run(r#"ostack.volume("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").name"#),
+        run(r#"ostack.volume("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").name.unwrap()"#),
         Value::Str("web-1-data".into())
     );
     assert_eq!(run(r#"ostack.hypervisor("lab-compute-2").id"#), Value::Int(2));
@@ -204,11 +205,11 @@ fn project_handles_scope_their_queries() {
 #[test]
 fn record_relations_follow_attachments_ports_and_projects() {
     let names = run(
-        r#"ostack.server("11111111-1111-4111-8111-111111111111").attached_volumes().map(.name)"#,
+        r#"ostack.server("11111111-1111-4111-8111-111111111111").attached_volumes().map(.name.unwrap())"#,
     );
     assert_eq!(names, Value::list(vec![Value::Str("web-1-data".into())]));
     assert_eq!(run(r#"ostack.server("db-1").attached_volumes().len()"#), Value::Int(0));
-    let ips = run(r#"ostack.server("db-1").ports().map(.fixed_ips[0].ip_address)"#);
+    let ips = run(r#"ostack.server("db-1").ports().map(.fixed_ips.unwrap_or([])[0].ip_address)"#);
     assert_eq!(ips, Value::list(vec![Value::Str("10.0.0.12".into())]));
     let servers = run(r#"ostack.volume("web-1-data").attached_servers().map(.name)"#);
     assert_eq!(servers, Value::list(vec![Value::Str("web-1".into())]));
@@ -217,7 +218,7 @@ fn record_relations_follow_attachments_ports_and_projects() {
     // Through a project handle and a loop, as written at the keyboard.
     let value = run(r#"
 var names = []
-for s in ostack.project("demo").servers() { names += s.attached_volumes().map(.name) }
+for s in ostack.project("demo").servers() { names += s.attached_volumes().map(.name.unwrap()) }
 names"#);
     assert_eq!(value, Value::list(vec![Value::Str("web-1-data".into())]));
     let error = run_err(r#"({a: 1}).attached_volumes()"#);
@@ -231,17 +232,17 @@ fn strs(items: &[&str]) -> Value {
 #[test]
 fn new_network_kinds_list_and_show() {
     assert_eq!(run("ostack.floating_ips().len()"), Value::Int(1));
-    assert_eq!(run("ostack.security_groups().map(.name)"), strs(&["default", "web"]));
-    assert_eq!(run("ostack.routers()[0].name"), Value::Str("demo-router".into()));
+    assert_eq!(run("ostack.security_groups().map(.name.unwrap())"), strs(&["default", "web"]));
+    assert_eq!(run("ostack.routers()[0].name.unwrap()"), Value::Str("demo-router".into()));
     assert_eq!(
-        run(r#"ostack.floating_ip("203.0.113.7").port_id"#),
+        run(r#"ostack.floating_ip("203.0.113.7").port_id.unwrap()"#),
         Value::Str("cccccccc-cccc-4ccc-8ccc-cccccccccccc".into())
     );
     assert_eq!(
-        run(r#"ostack.security_group("web").description"#),
+        run(r#"ostack.security_group("web").description.unwrap()"#),
         Value::Str("http and https".into())
     );
-    assert_eq!(run(r#"ostack.router("demo-router").status"#), Value::Str("ACTIVE".into()));
+    assert_eq!(run(r#"ostack.router("demo-router").status.unwrap()"#), Value::Str("ACTIVE".into()));
     assert_eq!(run(r#"ostack.list("floating-ips").len()"#), Value::Int(1));
 }
 
@@ -289,17 +290,23 @@ fn find_accepts_addresses_and_names() {
 #[test]
 fn relations_between_network_records() {
     let web = r#"ostack.server("11111111-1111-4111-8111-111111111111")"#;
-    assert_eq!(run(&format!("{web}.security_groups().map(.name)")), strs(&["default", "web"]));
     assert_eq!(
-        run(&format!("{web}.floating_ips().map(.floating_ip_address)")),
+        run(&format!("{web}.security_groups().map(.name.unwrap())")),
+        strs(&["default", "web"])
+    );
+    assert_eq!(
+        run(&format!("{web}.floating_ips().map(.floating_ip_address.unwrap())")),
         strs(&["203.0.113.7"])
     );
     assert_eq!(run(&format!("{web}.hypervisor().unwrap().id")), Value::Int(1));
 
     let port = r#"ostack.port("cccccccc-cccc-4ccc-8ccc-cccccccccccc")"#;
     assert_eq!(run(&format!("{port}.server().unwrap().name")), Value::Str("web-1".into()));
-    assert_eq!(run(&format!("{port}.network().unwrap().name")), Value::Str("internal".into()));
-    assert_eq!(run(&format!("{port}.subnets().map(.cidr)")), strs(&["10.0.0.0/24"]));
+    assert_eq!(
+        run(&format!("{port}.network().unwrap().name.unwrap()")),
+        Value::Str("internal".into())
+    );
+    assert_eq!(run(&format!("{port}.subnets().map(.cidr.unwrap())")), strs(&["10.0.0.0/24"]));
     assert_eq!(run(&format!("{port}.security_groups().len()")), Value::Int(2));
     assert_eq!(run(&format!("{port}.floating_ips().len()")), Value::Int(1));
     // A router interface port's device is the router.
@@ -310,15 +317,21 @@ fn relations_between_network_records() {
 
     let net = r#"ostack.network("internal")"#;
     assert_eq!(run(&format!("{net}.ports().len()")), Value::Int(3));
-    assert_eq!(run(&format!("{net}.subnets().map(.name)")), strs(&["internal-v4"]));
-    assert_eq!(run(&format!("{net}.routers().map(.name)")), strs(&["demo-router"]));
+    assert_eq!(run(&format!("{net}.subnets().map(.name.unwrap())")), strs(&["internal-v4"]));
+    assert_eq!(run(&format!("{net}.routers().map(.name.unwrap())")), strs(&["demo-router"]));
 
     let subnet = r#"ostack.subnet("internal-v4")"#;
-    assert_eq!(run(&format!("{subnet}.routers().map(.name)")), strs(&["demo-router"]));
-    assert_eq!(run(&format!("{subnet}.network().unwrap().name")), Value::Str("internal".into()));
+    assert_eq!(run(&format!("{subnet}.routers().map(.name.unwrap())")), strs(&["demo-router"]));
+    assert_eq!(
+        run(&format!("{subnet}.network().unwrap().name.unwrap()")),
+        Value::Str("internal".into())
+    );
     assert_eq!(run(&format!("{subnet}.ports().len()")), Value::Int(3));
 
-    assert_eq!(run(r#"ostack.router("demo-router").subnets().map(.name)"#), strs(&["internal-v4"]));
+    assert_eq!(
+        run(r#"ostack.router("demo-router").subnets().map(.name.unwrap())"#),
+        strs(&["internal-v4"])
+    );
     assert_eq!(
         run(r#"ostack.floating_ip("203.0.113.7").server().unwrap().name"#),
         Value::Str("web-1".into())
@@ -336,7 +349,7 @@ fn hypervisors_list_their_servers_and_match_by_fragment() {
     assert!(error.contains("matches 2 hypervisors"), "{error}");
     // By id it is a single show; by numeric id too.
     assert_eq!(
-        run(r#"ostack.hypervisor("2").hypervisor_hostname"#),
+        run(r#"ostack.hypervisor("2").hypervisor_hostname.unwrap()"#),
         Value::Str("lab-compute-2.maas".into())
     );
     // A server name that does not exist is still "not found".
@@ -419,51 +432,83 @@ fn relations_ask_for_filtered_listings() {
 #[test]
 fn admin_kinds_list_show_and_relate() {
     assert_eq!(run("ostack.keypairs()[0].id"), Value::Str("kirth".into()));
-    assert_eq!(run(r#"ostack.keypair("kirth").fingerprint"#), Value::Str("aa:bb:cc".into()));
+    assert_eq!(
+        run(r#"ostack.keypair("kirth").fingerprint.unwrap()"#),
+        Value::Str("aa:bb:cc".into())
+    );
     assert_eq!(run("ostack.server_groups()[0].servers().map(.name)"), strs(&["web-1"]));
     assert_eq!(
-        run(r#"ostack.server("11111111-1111-4111-8111-111111111111").server_groups().map(.name)"#),
+        run(
+            r#"ostack.server("11111111-1111-4111-8111-111111111111").server_groups().map(.name.unwrap())"#
+        ),
         strs(&["web-anti"])
     );
     assert_eq!(
         run(r#"ostack.aggregate("gpu").hypervisors().map(.id)"#),
         Value::list(vec![Value::Int(1)])
     );
-    assert_eq!(run(r#"ostack.hypervisor("compute-1").aggregates().map(.name)"#), strs(&["gpu"]));
-    assert_eq!(run(r#"ostack.availability_zone("zone-1").hosts.len()"#), Value::Int(2));
     assert_eq!(
-        run(r#"ostack.hypervisor("compute-2").compute_service().unwrap().status"#),
+        run(r#"ostack.hypervisor("compute-1").aggregates().map(.name.unwrap())"#),
+        strs(&["gpu"])
+    );
+    assert_eq!(run(r#"ostack.availability_zone("zone-1").hosts.unwrap().len()"#), Value::Int(2));
+    assert_eq!(
+        run(r#"ostack.hypervisor("compute-2").compute_service().unwrap().status.unwrap()"#),
         Value::Str("disabled".into())
     );
     assert_eq!(
-        run(r#"ostack.hypervisor("compute-1").network_agents().map(.agent_type)"#),
+        run(r#"ostack.hypervisor("compute-1").network_agents().map(.agent_type.unwrap())"#),
         strs(&["Open vSwitch agent"])
     );
-    assert_eq!(run(r#"ostack.network_agents().count(.alive == false)"#), Value::Int(1));
-    let vol = r#"ostack.volume("web-1-data")"#;
-    assert_eq!(run(&format!("{vol}.snapshots().map(.name)")), strs(&["data-snap"]));
-    assert_eq!(run(&format!("{vol}.backups().map(.name)")), strs(&["data-nightly"]));
     assert_eq!(
-        run(r#"ostack.snapshot("data-snap").volume().unwrap().name"#),
+        run(r#"ostack.network_agents().count(.alive.unwrap_or(false) == false)"#),
+        Value::Int(1)
+    );
+    let vol = r#"ostack.volume("web-1-data")"#;
+    assert_eq!(run(&format!("{vol}.snapshots().map(.name.unwrap())")), strs(&["data-snap"]));
+    assert_eq!(run(&format!("{vol}.backups().map(.name.unwrap())")), strs(&["data-nightly"]));
+    assert_eq!(
+        run(r#"ostack.snapshot("data-snap").volume().unwrap().name.unwrap()"#),
         Value::Str("web-1-data".into())
     );
-    assert_eq!(run(r#"ostack.backup("data-nightly").volume().unwrap().size"#), Value::Int(50));
-    assert_eq!(run(r#"ostack.pool("web-pool").members().map(.address)"#), strs(&["10.0.0.11"]));
-    assert_eq!(run(r#"ostack.pool("web-pool").loadbalancers().map(.name)"#), strs(&["web-lb"]));
-    assert_eq!(run(r#"ostack.loadbalancers()[0].pools().map(.name)"#), strs(&["web-pool"]));
     assert_eq!(
-        run(r#"ostack.users()[0].role_assignments().map(.role)"#),
+        run(r#"ostack.backup("data-nightly").volume().unwrap().size.unwrap()"#),
+        Value::Int(50)
+    );
+    assert_eq!(
+        run(r#"ostack.pool("web-pool").members().map(.address.unwrap())"#),
+        strs(&["10.0.0.11"])
+    );
+    assert_eq!(
+        run(r#"ostack.pool("web-pool").loadbalancers().map(.name.unwrap())"#),
+        strs(&["web-lb"])
+    );
+    assert_eq!(
+        run(r#"ostack.loadbalancers()[0].pools().map(.name.unwrap())"#),
+        strs(&["web-pool"])
+    );
+    assert_eq!(
+        run(r#"ostack.users()[0].role_assignments().map(.role.unwrap())"#),
         strs(&["member", "admin"])
     );
-    assert_eq!(run(r#"ostack.project("staging").role_assignments().map(.role)"#), strs(&["admin"]));
+    assert_eq!(
+        run(r#"ostack.project("staging").role_assignments().map(.role.unwrap())"#),
+        strs(&["admin"])
+    );
 }
 
 #[test]
 fn structured_servers_follow_flavor_and_image() {
     let web = r#"ostack.server("11111111-1111-4111-8111-111111111111")"#;
-    assert_eq!(run(&format!("{web}.flavor().unwrap().vcpus")), Value::Int(1));
-    assert_eq!(run(&format!("{web}.image().unwrap().name")), Value::Str("ubuntu-24.04".into()));
-    assert_eq!(run(&format!("{web}.networks[0].mac")), Value::Str("fa:16:3e:00:00:11".into()));
+    assert_eq!(run(&format!("{web}.flavor().unwrap().vcpus.unwrap()")), Value::Int(1));
+    assert_eq!(
+        run(&format!("{web}.image().unwrap().name.unwrap()")),
+        Value::Str("ubuntu-24.04".into())
+    );
+    assert_eq!(
+        run(&format!("{web}.networks.unwrap_or([])[0].mac")),
+        Value::Str("fa:16:3e:00:00:11".into())
+    );
     assert_eq!(
         run(r#"ostack.server("db-1").flavor().unwrap().name"#),
         Value::Str("m1.large".into())
@@ -526,15 +571,19 @@ fn label(p: OSProject) -> Str { "{p.name} ({p.id})" }
 label(ostack.project("demo"))
 "#;
     assert_eq!(string(&run(source)), "demo (p1)");
-    // An untyped Map holding a server still is not a project.
+    // Known record identities are checked statically. Erasing to Map is an
+    // explicit shape-validation boundary, without a guessed runtime identity.
     let error = run_err(
-        r#"
-fn label(p: OSProject) -> Str { p.name }
-let servers: List[Map] = ostack.servers()
-label(servers[0])
-"#,
+        r#"fn label(p: OSProject) -> Str { p.name }
+label(ostack.server("db-1"))"#,
     );
     assert!(error.contains("expected OSProject, got OSServer"), "{error}");
+    assert_eq!(
+        run(r#"fn label(p: OSProject) -> Str { p.name }
+let servers: List[Map] = ostack.servers()
+label(servers[0])"#),
+        Value::Str("web-1".into())
+    );
 }
 
 #[test]
@@ -547,5 +596,14 @@ let people: List[Map] = [{name: "kirth"}]
 mail(people[0])
 "#,
     );
-    assert!(error.contains("expected Owner, got a Map without field 'email'"), "{error}");
+    assert!(error.contains("value.email: required field is missing (expected Owner)"), "{error}");
+}
+
+#[test]
+fn fixture_records_satisfy_their_builtin_declarations() {
+    for (_, plural, record) in rill::records::OSTACK_RECORDS {
+        if std::path::Path::new(&fixture_dir()).join(format!("{plural}.json")).is_file() {
+            run(&format!("let rows: List[{record}] = ostack.list(\"{plural}\")\nrows.len()"));
+        }
+    }
 }

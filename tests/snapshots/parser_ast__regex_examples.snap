@@ -11,6 +11,7 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Literal(
                         Str(
                             "user=bob status=200",
@@ -32,6 +33,7 @@ Program {
             stmt: Expr(
                 If {
                     cond: Located {
+                        checks: CheckCell,
                         expr: RegexMatch {
                             value: Ident(
                                 "line",
@@ -48,16 +50,19 @@ Program {
                         Located {
                             stmt: Expr(
                                 Located {
+                                    checks: CheckCell,
                                     expr: Call {
                                         callee: Ident(
                                             "print",
                                         ),
                                         args: [
                                             Located {
+                                                checks: CheckCell,
                                                 expr: Interpolated(
                                                     [
                                                         Expr(
                                                             Located {
+                                                                checks: CheckCell,
                                                                 expr: Ident(
                                                                     "user",
                                                                 ),
@@ -72,6 +77,7 @@ Program {
                                                         ),
                                                         Expr(
                                                             Located {
+                                                                checks: CheckCell,
                                                                 expr: Ident(
                                                                     "status",
                                                                 ),
@@ -117,6 +123,7 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: RegexSubstitution {
                         value: Literal(
                             Str(
@@ -146,9 +153,12 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Call {
                         callee: Field {
+                            checks: CheckCell,
                             base: Located {
+                                checks: CheckCell,
                                 expr: Ident(
                                     "x",
                                 ),
@@ -161,6 +171,7 @@ Program {
                         },
                         args: [
                             Located {
+                                checks: CheckCell,
                                 expr: Literal(
                                     Regex(
                                         "bar",
@@ -172,6 +183,7 @@ Program {
                                 },
                             },
                             Located {
+                                checks: CheckCell,
                                 expr: Literal(
                                     Str(
                                         "baz",
@@ -185,6 +197,7 @@ Program {
                             NamedArg {
                                 name: "all",
                                 value: Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Bool(
                                             true,
@@ -213,12 +226,14 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Call {
                         callee: Ident(
                             "print",
                         ),
                         args: [
                             Located {
+                                checks: CheckCell,
                                 expr: Ident(
                                     "y",
                                 ),

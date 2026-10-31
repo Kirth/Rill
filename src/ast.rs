@@ -212,9 +212,49 @@ pub enum ForMode {
     Race,
 }
 
+/// Decisions made by the checker and consumed by the evaluator. Clones own
+/// independent metadata, so speculative IDE checks cannot change live code.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExprChecks {
+    pub(crate) inferred: Option<crate::typeck::Type>,
+    pub annotation: Option<TypeName>,
+    pub mutation_root: Option<TypeName>,
+    pub records: std::sync::Arc<std::collections::BTreeMap<String, crate::records::RecordDecl>>,
+    pub optional_read: bool,
+}
+
+#[derive(Default)]
+pub struct CheckCell(Box<std::sync::RwLock<ExprChecks>>);
+
+impl std::fmt::Debug for CheckCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CheckCell")
+    }
+}
+
+impl CheckCell {
+    pub fn get(&self) -> ExprChecks {
+        self.0.read().unwrap().clone()
+    }
+    pub fn update(&self, f: impl FnOnce(&mut ExprChecks)) {
+        f(&mut self.0.write().unwrap());
+    }
+}
+impl Clone for CheckCell {
+    fn clone(&self) -> Self {
+        Self(Box::new(std::sync::RwLock::new(self.get())))
+    }
+}
+impl PartialEq for CheckCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Located {
+        checks: CheckCell,
         expr: Box<Expr>,
         span: Span,
     },
@@ -228,6 +268,7 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     Field {
+        checks: CheckCell,
         base: Box<Expr>,
         name: String,
     },
@@ -268,6 +309,7 @@ pub enum Expr {
         body: Vec<Stmt>,
     },
     Index {
+        checks: CheckCell,
         base: Box<Expr>,
         index: Box<Expr>,
     },
@@ -312,7 +354,10 @@ pub enum Expr {
         operand: Box<Expr>,
     },
     Implicit,
-    ImplicitField(String),
+    ImplicitField {
+        name: String,
+        checks: CheckCell,
+    },
     Try(Box<Expr>),
     /// A string literal with `{expr}`, `$name`, or `${name:-default}` parts,
     /// resolved at parse time.

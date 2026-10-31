@@ -9,9 +9,12 @@ All notable changes to Rill are documented here. The format follows
 
 - Record types: `type Name { field: T, other?: U }` declares the fields a map
   has. Records are nominal, pass as `Map`, and an untyped `Map` passes as a
-  record. Map literals are checked against the required fields. Unknown field
-  reads warn (`unknown_field`). Annotated parameters check required fields at
-  call time. `Any` is a type that is not checked.
+  record through recursive validation. All field expressions are checked,
+  including nested construction, arguments, defaults, returns and mutation.
+  Optional field reads return `Option[T]`; unknown direct field reads are
+  errors. Conversions to typed maps enforce their value type. Runtime checking
+  uses declared shapes and never guesses OpenStack identity from map keys.
+  Conflicting imported record names are errors. `Any` is not checked.
 - Built-in `OS…` records for every ostack kind (`OSServer`, `OSProject`, …,
   declared in `src/ostack.ril`): `ostack.servers()` is a `List[OSServer]`,
   `ostack.project(x)` an `OSProject`, and relations are typed, e.g.

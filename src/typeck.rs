@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Type {
+pub(crate) enum Type {
     Unknown,
     Null,
     Bool,
@@ -110,6 +110,7 @@ impl fmt::Display for Type {
 struct TypeBinding {
     ty: Type,
     mutable: bool,
+    annotated: bool,
     /// Set once the binding is read; drives the unused-variable warning.
     used: Cell<bool>,
     /// Where a `let`/`var` declared it, when an unused binding should warn.
@@ -118,7 +119,7 @@ struct TypeBinding {
 
 impl TypeBinding {
     fn new(ty: Type, mutable: bool) -> Self {
-        Self { ty, mutable, used: Cell::new(false), declared: None }
+        Self { ty, mutable, annotated: false, used: Cell::new(false), declared: None }
     }
 }
 
@@ -255,6 +256,7 @@ pub(crate) struct CheckedModule {
 pub(crate) struct ModuleExports {
     symbols: BTreeMap<String, Type>,
     records: BTreeMap<String, crate::records::RecordDecl>,
+    origins: BTreeMap<String, std::sync::Arc<()>>,
 }
 
 pub(crate) fn check_module(
@@ -270,7 +272,17 @@ pub(crate) fn check_module(
     }
     let mut checker = Checker::new(env, !is_module);
     for import in imports {
-        checker.records.extend(import.records.clone());
+        for (name, origin) in &import.origins {
+            if let Some(existing) = checker.import_origins.get(name) {
+                if !std::sync::Arc::ptr_eq(existing, origin) {
+                    return Err(RillError::new(format!(
+                        "conflicting imported record type '{name}'"
+                    )));
+                }
+            }
+            checker.import_origins.insert(name.clone(), origin.clone());
+        }
+        std::sync::Arc::make_mut(&mut checker.records).extend(import.records.clone());
     }
     checker.check_program(program)
 }
@@ -463,7 +475,8 @@ struct Checker {
     emit_types: Vec<Option<Type>>,
     /// Record types declared in this program or imported; the built-in
     /// ones live in `crate::records`.
-    records: BTreeMap<String, crate::records::RecordDecl>,
+    records: std::sync::Arc<BTreeMap<String, crate::records::RecordDecl>>,
+    import_origins: BTreeMap<String, std::sync::Arc<()>>,
     /// Span of the innermost located expression being checked.
     expr_span: Option<Span>,
     /// An expression whose type a host asked for (see `Session::probe`),
@@ -502,7 +515,8 @@ impl Checker {
             current_span: None,
             warn_unused_top_level,
             emit_types: Vec::new(),
-            records: BTreeMap::new(),
+            records: Default::default(),
+            import_origins: BTreeMap::new(),
             expr_span: None,
             probe: None,
         }
@@ -552,6 +566,11 @@ impl Checker {
 
     /// Declare a record type; a second declaration of a name is an error.
     fn declare_record(&mut self, name: &str, fields: &[FieldDecl]) -> Result<(), RillError> {
+        if self.import_origins.contains_key(name) {
+            return Err(RillError::new(format!(
+                "record type '{name}' conflicts with an imported declaration"
+            )));
+        }
         if crate::records::builtin(name).is_some() {
             return Err(RillError::new(format!("'{name}' is a built-in type"))
                 .with_help("pick another name for the record"));
@@ -562,83 +581,237 @@ impl Checker {
                 Err(RillError::new(format!("type '{name}' is declared twice")))
             }
             _ => {
-                self.records.insert(name.to_string(), decl);
+                std::sync::Arc::make_mut(&mut self.records).insert(name.to_string(), decl);
                 Ok(())
             }
         }
     }
 
-    /// A map literal given where a record is expected must have the
-    /// record's required fields, and literal values of the declared types.
-    fn check_record_literal(&self, expected: &Type, expr: &Expr) -> Result<(), RillError> {
-        let (Type::Record(name), Expr::Map(pairs)) = (expected, expr.unspanned()) else {
-            return Ok(());
-        };
-        let Some(decl) = self.record(name) else { return Ok(()) };
-        let missing: Vec<&str> = decl
-            .fields
-            .iter()
-            .filter(|field| !field.optional && !pairs.iter().any(|(key, _)| *key == field.name))
-            .map(|field| field.name.as_str())
-            .collect();
-        if !missing.is_empty() {
-            let list = missing.iter().map(|name| format!("'{name}'")).collect::<Vec<_>>();
-            return Err(RillError::new(format!(
-                "{name} needs field{} {}",
-                if missing.len() == 1 { "" } else { "s" },
-                list.join(", ")
-            )));
-        }
-        for (key, value) in pairs {
-            let (Some(field), Expr::Literal(literal)) = (decl.field(key), value.unspanned()) else {
-                continue;
-            };
-            if matches!(literal, Literal::Null) && field.optional {
-                continue;
-            }
-            ensure_assignable(&type_from_name(&field.type_name), &type_from_literal(literal))
-                .map_err(|_| {
-                    RillError::new(format!(
-                        "{name}.{key} is {}, got {}",
-                        type_from_name(&field.type_name),
-                        type_from_literal(literal)
-                    ))
-                })
-                .map_err(|error| match value.span() {
-                    Some(span) => error.with_span(span),
-                    None => error,
-                })?;
+    /// Check expressions in their expected context instead of checking only
+    /// primitive literals. Runtime metadata covers values whose shape is dynamic.
+    fn ensure_fits(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        expr: &Expr,
+    ) -> Result<(), RillError> {
+        ensure_assignable(expected, actual)?;
+        self.check_context(expected, actual, expr)?;
+        if let Expr::Located { checks, .. } = expr {
+            checks.update(|checks| {
+                checks.annotation = Some(annotation_from_type(expected));
+                checks.records = self.records.clone();
+            });
         }
         Ok(())
     }
 
-    /// Check a value against the type it is given to, as `ensure_assignable`
-    /// does, plus the shape of a map literal given for a record.
-    fn ensure_fits(&self, expected: &Type, actual: &Type, expr: &Expr) -> Result<(), RillError> {
-        ensure_assignable(expected, actual)?;
-        self.check_record_literal(expected, expr)
+    fn expression_type(&mut self, expr: &Expr) -> Result<Type, RillError> {
+        if let Expr::Located { checks, .. } = expr {
+            if let Some(ty) = checks.get().inferred {
+                return Ok(ty);
+            }
+        }
+        self.check_expr(expr)
     }
 
-    /// The type of `field` on a record, warning when the record does not
-    /// declare it.
-    fn record_field(&mut self, record: &str, field: &str) -> Type {
-        let Some(decl) = self.record(record) else { return Type::Unknown };
-        if let Some(declared) = decl.field(field) {
-            return type_from_name(&declared.type_name);
+    fn check_context(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        expr: &Expr,
+    ) -> Result<(), RillError> {
+        match (expected, expr.unspanned()) {
+            (Type::Record(name), Expr::Map(pairs)) => {
+                let Some(decl) = self.record(name).cloned() else { return Ok(()) };
+                for field in &decl.fields {
+                    let value = pairs.iter().find(|(key, _)| key == &field.name);
+                    match value {
+                        None if !field.optional => {
+                            return Err(RillError::new(format!(
+                                "{name} needs field '{}'",
+                                field.name
+                            )))
+                        }
+                        Some((_, value)) => {
+                            let actual = self.expression_type(value)?;
+                            self.ensure_fits(&type_from_name(&field.type_name), &actual, value)
+                                .map_err(|mut error| {
+                                    error.message =
+                                        format!("{name}.{}: {}", field.name, error.message);
+                                    if let Some(span) = value.span() {
+                                        error = error.with_span(span);
+                                    }
+                                    error
+                                })?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (Type::List(inner), Expr::List(items)) => {
+                for item in items {
+                    let ty = self.expression_type(item)?;
+                    self.ensure_fits(inner, &ty, item)?;
+                }
+            }
+            (Type::Tuple(types), Expr::Tuple(items)) => {
+                for (ty, item) in types.iter().zip(items) {
+                    let actual = self.expression_type(item)?;
+                    self.ensure_fits(ty, &actual, item)?;
+                }
+            }
+            (Type::Map(inner), Expr::Map(pairs)) => {
+                for (_, item) in pairs {
+                    let ty = self.expression_type(item)?;
+                    self.ensure_fits(inner, &ty, item)?;
+                }
+            }
+            (_, Expr::If { then_body, else_body, .. }) => {
+                self.check_tail(expected, then_body)?;
+                self.check_tail(expected, else_body)?;
+            }
+            (_, Expr::Block(stmts)) => self.check_tail(expected, stmts)?,
+            (_, Expr::Match { arms, .. }) => {
+                for arm in arms {
+                    let ty = self.expression_type(&arm.expr)?;
+                    self.ensure_fits(expected, &ty, &arm.expr)?;
+                }
+            }
+            (Type::Option(inner), Expr::Call { callee, args }) if matches!(callee.unspanned(), Expr::Ident(name) if name == "some") => {
+                if let Some(value) = args.first() {
+                    let ty = self.expression_type(value)?;
+                    self.ensure_fits(inner, &ty, value)?;
+                }
+            }
+            (Type::Result(ok, error), Expr::Call { callee, args }) => {
+                if let Expr::Ident(name) = callee.unspanned() {
+                    let inner = match name.as_str() {
+                        "ok" => Some(ok),
+                        "err" => Some(error),
+                        _ => None,
+                    };
+                    if let (Some(inner), Some(value)) = (inner, args.first()) {
+                        let ty = self.expression_type(value)?;
+                        self.ensure_fits(inner, &ty, value)?;
+                    }
+                }
+            }
+            _ => {}
         }
-        let help = crate::suggest::did_you_mean(
-            field,
-            decl.fields.iter().map(|field| field.name.as_str()),
-        )
-        .unwrap_or_else(|| format!("read fields {record} does not declare with .get(\"{field}\")"));
-        let span = self.expr_span.or(self.current_span);
-        self.warn(
-            span,
-            format!("{record} has no field '{field}'"),
-            "rill::warn::unknown_field",
-            &help,
-        );
-        Type::Unknown
+        self.check_record_map_conversion(expected, actual)
+    }
+
+    fn check_record_map_conversion(&self, expected: &Type, actual: &Type) -> Result<(), RillError> {
+        match (expected, actual) {
+            (Type::Map(inner), Type::Record(name)) => {
+                if let Some(decl) = self.record(name) {
+                    for field in &decl.fields {
+                        let actual = type_from_name(&field.type_name);
+                        ensure_assignable(inner, &actual)?;
+                        self.check_record_map_conversion(inner, &actual)?;
+                    }
+                }
+            }
+            (Type::List(e), Type::List(a))
+            | (Type::Option(e), Type::Option(a))
+            | (Type::Map(e), Type::Map(a)) => self.check_record_map_conversion(e, a)?,
+            (Type::Tuple(es), Type::Tuple(as_)) => {
+                for (e, a) in es.iter().zip(as_) {
+                    self.check_record_map_conversion(e, a)?;
+                }
+            }
+            (Type::Result(e, ee), Type::Result(a, ae)) => {
+                self.check_record_map_conversion(e, a)?;
+                self.check_record_map_conversion(ee, ae)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_tail(&mut self, expected: &Type, stmts: &[Stmt]) -> Result<(), RillError> {
+        self.check_tail_context(expected, stmts, false)
+    }
+
+    fn check_return_tail(&mut self, expected: &Type, stmts: &[Stmt]) -> Result<(), RillError> {
+        self.check_tail_context(expected, stmts, true)
+    }
+
+    fn check_tail_context(
+        &mut self,
+        expected: &Type,
+        stmts: &[Stmt],
+        returning: bool,
+    ) -> Result<(), RillError> {
+        if stmts.iter().take(stmts.len().saturating_sub(1)).any(|stmt| terminator(stmt).is_some()) {
+            return Ok(());
+        }
+        if let Some(stmt) = stmts.last() {
+            if let Stmt::Expr(expr) | Stmt::Return(Some(expr)) = stmt.unspanned() {
+                let actual = self.expression_type(expr)?;
+                if returning {
+                    self.ensure_return_fits(expected, &actual, expr)?;
+                } else {
+                    self.ensure_fits(expected, &actual, expr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_return_fits(
+        &mut self,
+        expected: &Type,
+        actual: &Type,
+        expr: &Expr,
+    ) -> Result<(), RillError> {
+        // Functions implicitly wrap successful Option/Result returns. Each
+        // branch may already carry its wrapper, so check branches separately.
+        if matches!(expected, Type::Option(_) | Type::Result(..)) {
+            ensure_function_return(expected, actual)?;
+            match expr.unspanned() {
+                Expr::If { then_body, else_body, .. } => {
+                    self.check_return_tail(expected, then_body)?;
+                    self.check_return_tail(expected, else_body)?;
+                    return Ok(());
+                }
+                Expr::Block(stmts) => return self.check_return_tail(expected, stmts),
+                Expr::Match { arms, .. } => {
+                    for arm in arms {
+                        let ty = self.expression_type(&arm.expr)?;
+                        self.ensure_return_fits(expected, &ty, &arm.expr)?;
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+            if actual.is_unknown() {
+                // Dynamic values may already be wrapped. Validate after the
+                // evaluator applies the function's declared return wrapper.
+                return Ok(());
+            }
+        }
+        let expected = match (expected, actual) {
+            (Type::Option(inner), actual) if !matches!(actual, Type::Option(_)) => &**inner,
+            (Type::Result(inner, _), actual) if !matches!(actual, Type::Result(..)) => &**inner,
+            _ => expected,
+        };
+        self.ensure_fits(expected, actual, expr)
+    }
+
+    fn record_field(&self, record: &str, field: &str, optional: bool) -> Result<Type, RillError> {
+        let Some(decl) = self.record(record) else { return Ok(Type::Unknown) };
+        if let Some(declared) = decl.field(field) {
+            let ty = type_from_name(&declared.type_name);
+            return Ok(if optional && declared.optional { Type::Option(Box::new(ty)) } else { ty });
+        }
+        Err(RillError::new(format!("{record} has no field '{field}'")).with_optional_help(
+            crate::suggest::did_you_mean(
+                field,
+                decl.fields.iter().map(|field| field.name.as_str()),
+            ),
+        ))
     }
 
     /// Collected errors as one diagnostic (the rest attached as related), or
@@ -824,25 +997,26 @@ impl Checker {
                 symbols.insert(name, ty);
             }
         }
-        let records = crate::records::declarations(&program.stmts)
-            .into_iter()
-            .map(|decl| (decl.name.clone(), decl))
-            .collect();
+        let records = (*self.records).clone();
         let warnings = self.take_diagnostics()?;
-        Ok(CheckedModule { exports: ModuleExports { symbols, records }, warnings })
+        let mut origins = self.import_origins.clone();
+        for name in records.keys() {
+            origins.entry(name.clone()).or_insert_with(|| std::sync::Arc::new(()));
+        }
+        Ok(CheckedModule { exports: ModuleExports { symbols, records, origins }, warnings })
     }
 
     /// The type of a field/index chain used as an assignment target.
     fn check_place(&mut self, place: &Expr) -> Result<Type, RillError> {
         match place.unspanned() {
             Expr::Ident(name) => self.env.get(name).ok_or_else(|| self.unknown_identifier(name)),
-            Expr::Field { base, name } => match self.check_place(base)? {
+            Expr::Field { base, name, .. } => match self.check_place(base)? {
                 Type::Map(value) => Ok(*value),
-                Type::Record(record) => Ok(self.record_field(&record, name)),
+                Type::Record(record) => self.record_field(&record, name, false),
                 Type::Unknown => Ok(Type::Unknown),
                 other => Err(RillError::new(format!("cannot assign to field '{name}' of {other}"))),
             },
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, .. } => {
                 let base_ty = self.check_place(base)?;
                 let index_ty = self.check_expr(index)?;
                 match base_ty {
@@ -850,7 +1024,14 @@ impl Checker {
                         ensure_assignable(&Type::Int, &index_ty)?;
                         Ok(*item)
                     }
-                    Type::Record(_) => Ok(Type::Unknown),
+                    Type::Record(record) => {
+                        if let Expr::Literal(Literal::Str(key)) = index.unspanned() {
+                            self.record_field(&record, key, false)
+                        } else {
+                            ensure_assignable(&Type::Str, &index_ty)?;
+                            Ok(Type::Unknown)
+                        }
+                    }
                     Type::Map(value) => {
                         if !matches!(index_ty, Type::Str | Type::Int | Type::Unknown) {
                             return Err(RillError::new(format!(
@@ -882,12 +1063,12 @@ impl Checker {
             let Some(default) = &param.default else { continue };
             let default_ty = self.check_expr(default)?;
             if let Some(annotation) = &param.type_name {
-                ensure_assignable(&type_from_name(annotation), &default_ty).map_err(|error| {
-                    match default.span() {
+                self.ensure_fits(&type_from_name(annotation), &default_ty, default).map_err(
+                    |error| match default.span() {
                         Some(span) => error.with_span(span),
                         None => error,
-                    }
-                })?;
+                    },
+                )?;
             }
         }
         Ok(())
@@ -1034,6 +1215,15 @@ impl Checker {
                     inferred
                 };
                 self.bind_pattern(pattern, ty, *mutable, declared)?;
+                if type_name.is_some() {
+                    if let LetPattern::Ident(name) = pattern {
+                        if let Some(binding) =
+                            self.env.scopes.last_mut().and_then(|scope| scope.get_mut(name))
+                        {
+                            binding.annotated = true;
+                        }
+                    }
+                }
                 Ok(Type::Null)
             }
             Stmt::AssignEnv { name: _, expr } => {
@@ -1071,21 +1261,54 @@ impl Checker {
                             .unwrap_or_else(|| format!("declare it first with `var {root} = ...`")),
                     ));
                 };
+                let annotated = self
+                    .env
+                    .scopes
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&root))
+                    .is_some_and(|b| b.annotated);
+                if let Expr::Located { checks, .. } = target {
+                    checks.update(|checks| {
+                        checks.mutation_root = if annotated || contains_record_type(&current) {
+                            Some(annotation_from_type(&current))
+                        } else {
+                            None
+                        };
+                        checks.records = self.records.clone();
+                    });
+                }
                 if !matches!(target.unspanned(), Expr::Ident(_)) {
                     let target_ty = self.check_place(target)?;
                     let value_ty = self.check_expr(expr)?;
                     let assigned = compound_assignment_type(*op, &target_ty, &value_ty)?;
                     if !target_ty.is_unknown() {
                         ensure_assignable(&target_ty, &assigned)?;
+                        if *op == AssignOp::Assign {
+                            self.ensure_fits(&target_ty, &assigned, expr)?;
+                        }
                     }
                     return Ok(Type::Null);
                 }
                 let value_ty = self.check_expr(expr)?;
                 let assigned = compound_assignment_type(*op, &current, &value_ty)?;
+                if annotated {
+                    self.ensure_fits(&current, &assigned, expr)?;
+                }
+                if *op == AssignOp::Assign
+                    && !matches!(current, Type::Null | Type::Unknown)
+                    && ensure_assignable(&current, &assigned).is_ok()
+                {
+                    self.ensure_fits(&current, &assigned, expr)?;
+                }
                 if matches!(current, Type::Null | Type::Unknown)
                     || ensure_assignable(&current, &assigned).is_ok()
                 {
-                    if !assigned.is_unknown() && current != assigned {
+                    if !assigned.is_unknown()
+                        && current != assigned
+                        && !annotated
+                        && !contains_record_type(&current)
+                    {
                         self.env.retype(&root, common_type(current, assigned));
                     }
                 } else if ensure_assignable(&assigned, &current).is_ok() {
@@ -1180,6 +1403,7 @@ impl Checker {
                     .and_then(|body_ty| {
                     if let Some(return_type) = &function.return_type {
                         let declared = type_from_name(return_type);
+                        self.check_return_tail(&declared, &function.body)?;
                         let last_span = function.body.last().and_then(|s| match s.unspanned() {
                             Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Emit(e) => e.span(),
                             Stmt::Let { expr, .. } => expr.span(),
@@ -1263,8 +1487,11 @@ impl Checker {
                     Some(expr) => (self.check_expr(expr)?, expr.span()),
                     None => (Type::Null, None),
                 };
-                if let Some(expected) = &self.return_expected {
-                    ensure_function_return(expected, &value_ty).map_err(|e| match span {
+                if let Some(expected) = self.return_expected.clone() {
+                    if let Some(expr) = expr {
+                        self.ensure_return_fits(&expected, &value_ty, expr)?;
+                    }
+                    ensure_function_return(&expected, &value_ty).map_err(|e| match span {
                         Some(s) => e.with_span(s),
                         None => e,
                     })?;
@@ -1341,10 +1568,20 @@ impl Checker {
 
     fn check_expr(&mut self, expr: &Expr) -> Result<Type, RillError> {
         match expr {
-            Expr::Located { expr, span } => {
+            Expr::Located { expr, span, checks } => {
                 let previous = self.expr_span.replace(*span);
                 let checked = self.check_expr(expr).map_err(|error| error.with_span(*span));
                 self.expr_span = previous;
+                if let Ok(ty) = &checked {
+                    checks.update(|c| {
+                        c.inferred = Some(ty.clone());
+                        if contains_record_type(ty) && matches!(expr.unspanned(), Expr::Call { .. })
+                        {
+                            c.annotation = Some(annotation_from_type(ty));
+                            c.records = self.records.clone();
+                        }
+                    });
+                }
                 if let (Some((wanted, found)), Ok(ty)) = (&mut self.probe, &checked) {
                     if wanted == span {
                         *found = Some(ty.clone());
@@ -1383,7 +1620,8 @@ impl Checker {
                 Ok(Type::Map(Box::new(value_ty)))
             }
             Expr::Call { callee, args } => self.check_call(callee, args),
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, checks } => {
+                checks.update(|c| c.optional_read = false);
                 let base_ty = self.check_expr(base)?;
                 let index_ty = self.check_expr(index)?;
                 if let Type::Tuple(elements) = base_ty {
@@ -1396,6 +1634,10 @@ impl Checker {
                     let first = elements.next().unwrap_or(Type::Unknown);
                     return Ok(elements.fold(first, common_type));
                 }
+                if matches!(base_ty, Type::Option(_) | Type::Result(..)) {
+                    return Err(RillError::new(format!("cannot index {base_ty}"))
+                        .with_help("unwrap it first with `?`, `.unwrap_or(...)`, or a match"));
+                }
                 if let Type::List(item) = &base_ty {
                     if matches!(index_ty, Type::Int) {
                         return Ok((**item).clone());
@@ -1405,8 +1647,12 @@ impl Checker {
                     (&base_ty, index.unspanned())
                 {
                     if let Some(field) = self.record(record).and_then(|decl| decl.field(key)) {
-                        return Ok(type_from_name(&field.type_name));
+                        let optional = field.optional;
+                        let ty = type_from_name(&field.type_name);
+                        checks.update(|c| c.optional_read = optional);
+                        return Ok(if optional { Type::Option(Box::new(ty)) } else { ty });
                     }
+                    return self.record_field(record, key, true);
                 }
                 Ok(Type::Unknown)
             }
@@ -1427,7 +1673,7 @@ impl Checker {
                     other => Err(RillError::new(format!("cannot slice {other}"))),
                 }
             }
-            Expr::Field { base, name } => self.check_field(base, name),
+            Expr::Field { base, name, checks } => self.check_field(base, name, checks),
             Expr::Binary { op, left, right } => self.check_binary(*op, left, right),
             Expr::Pipe { kind, left, right } => self.check_pipe(*kind, left, right),
             Expr::Command(command) => {
@@ -1628,7 +1874,7 @@ impl Checker {
                 }
             }
             Expr::Implicit => Ok(self.env.get("it").unwrap_or(Type::Unknown)),
-            Expr::ImplicitField(_) => Ok(Type::Unknown),
+            Expr::ImplicitField { name, checks } => self.check_field(&Expr::Implicit, name, checks),
             Expr::Interpolated(parts) => {
                 self.check_parts(parts)?;
                 Ok(Type::Str)
@@ -1673,13 +1919,17 @@ impl Checker {
                 }
             }
         }
-        if let Expr::ImplicitField(name) = callee.unspanned() {
+        if let Expr::ImplicitField { name, .. } = callee.unspanned() {
             return self.check_call(
-                &Expr::Field { base: Box::new(Expr::Implicit), name: name.clone() },
+                &Expr::Field {
+                    checks: Default::default(),
+                    base: Box::new(Expr::Implicit),
+                    name: name.clone(),
+                },
                 args,
             );
         }
-        if let Expr::Field { base, name } = callee.unspanned() {
+        if let Expr::Field { base, name, .. } = callee.unspanned() {
             if let Expr::Ident(module) = base.unspanned() {
                 if crate::methods::is_namespace(module)
                     && (self.env.get(module).is_none()
@@ -2186,7 +2436,13 @@ impl Checker {
         }
     }
 
-    fn check_field(&mut self, base: &Expr, name: &str) -> Result<Type, RillError> {
+    fn check_field(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        checks: &CheckCell,
+    ) -> Result<Type, RillError> {
+        checks.update(|c| c.optional_read = false);
         if let Expr::Ident(module) = base.unspanned() {
             if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
                 if module == "Stream" && name == "tail" {
@@ -2237,7 +2493,12 @@ impl Checker {
                     ))),
             },
             Type::Map(value) => Ok(*value),
-            Type::Record(record) => Ok(self.record_field(&record, name)),
+            Type::Record(record) => {
+                let optional =
+                    self.record(&record).and_then(|r| r.field(name)).is_some_and(|f| f.optional);
+                checks.update(|c| c.optional_read = optional);
+                self.record_field(&record, name, true)
+            }
             Type::Unknown => Ok(Type::Unknown),
             ref ty
                 if crate::methods::lookup(name)
@@ -2679,29 +2940,133 @@ fn check_typed_call(ty: &Type, args: &[Type]) -> Result<Type, RillError> {
     }
 }
 
-/// Check an argument against its parameter's annotation at call time.  A
-/// Map given for a record declared in the program must have the record's
-/// required fields; one given for an ostack record must not be a record of
-/// another kind.
+/// Validate a typed boundary recursively. Records have static nominal identity;
+/// runtime maps are checked by shape without guessing identity from their keys.
 pub(crate) fn check_value_annotation(
     value: &Value,
     annotation: &TypeName,
     records: &BTreeMap<String, crate::records::RecordDecl>,
 ) -> Result<(), RillError> {
-    ensure_assignable(&type_from_name(annotation), &type_from_value(value))?;
-    if let (TypeName::Named(name), Value::Map(map)) = (annotation, value) {
-        if let Some(decl) = records.get(name) {
-            if let Some(field) =
-                decl.fields.iter().find(|field| !field.optional && !map.contains_key(&field.name))
-            {
-                return Err(RillError::new(format!(
-                    "expected {name}, got a Map without field '{}'",
-                    field.name
-                )));
+    validate_value(value, &type_from_name(annotation), records, "value")
+}
+
+fn validate_value(
+    value: &Value,
+    expected: &Type,
+    records: &BTreeMap<String, crate::records::RecordDecl>,
+    path: &str,
+) -> Result<(), RillError> {
+    let mismatch =
+        || RillError::new(format!("{path}: expected {expected}, got {}", value.type_name()));
+    match (expected, value) {
+        (Type::Unknown, _) => Ok(()),
+        (Type::Record(name), Value::Map(map)) => {
+            let decl = records
+                .get(name)
+                .or_else(|| crate::records::builtin(name))
+                .ok_or_else(|| RillError::new(format!("unknown type '{name}'")))?;
+            for field in &decl.fields {
+                let field_path = format!("{path}.{}", field.name);
+                match map.get(&field.name) {
+                    Some(value) => validate_value(
+                        value,
+                        &type_from_name(&field.type_name),
+                        records,
+                        &field_path,
+                    )?,
+                    None if !field.optional => {
+                        return Err(RillError::new(format!(
+                            "{field_path}: required field is missing (expected {name})"
+                        )))
+                    }
+                    None => {}
+                }
             }
+            Ok(())
         }
+        (Type::Map(inner), Value::Map(map)) => {
+            for (key, value) in map.iter() {
+                validate_value(value, inner, records, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        (Type::List(inner), Value::List(items)) => {
+            for (index, value) in items.iter().enumerate() {
+                validate_value(value, inner, records, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        (Type::Tuple(types), Value::Tuple(items)) if types.len() == items.len() => {
+            for (index, (ty, value)) in types.iter().zip(items.iter()).enumerate() {
+                validate_value(value, ty, records, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        (Type::Option(inner), Value::Option(value)) => {
+            if let Some(value) = value {
+                validate_value(value, inner, records, path)?;
+            }
+            Ok(())
+        }
+        (Type::Result(ok, error), Value::Result(value)) => match value {
+            Ok(value) => validate_value(value, ok, records, path),
+            Err(value) => validate_value(value, error, records, path),
+        },
+        (
+            Type::Record(_)
+            | Type::Map(_)
+            | Type::List(_)
+            | Type::Tuple(_)
+            | Type::Option(_)
+            | Type::Result(..),
+            _,
+        ) => Err(mismatch()),
+        _ => ensure_assignable(expected, &type_from_value(value)).map_err(|_| mismatch()),
     }
-    Ok(())
+}
+
+/// Keep checker metadata independent of the private inference representation.
+fn contains_record_type(ty: &Type) -> bool {
+    match ty {
+        Type::Record(_) => true,
+        Type::List(inner) | Type::Map(inner) | Type::Option(inner) => contains_record_type(inner),
+        Type::Tuple(items) => items.iter().any(contains_record_type),
+        Type::Result(ok, error) => contains_record_type(ok) || contains_record_type(error),
+        _ => false,
+    }
+}
+
+fn annotation_from_type(ty: &Type) -> TypeName {
+    match ty {
+        Type::Unknown | Type::Stream => TypeName::Any,
+        Type::Null => TypeName::Null,
+        Type::Bool => TypeName::Bool,
+        Type::Int => TypeName::Int,
+        Type::Float => TypeName::Float,
+        Type::Str => TypeName::Str,
+        Type::Bytes => TypeName::Bytes,
+        Type::Duration => TypeName::Duration,
+        Type::Time => TypeName::Time,
+        Type::Path => TypeName::Path,
+        Type::Regex => TypeName::Regex,
+        Type::Error => TypeName::Error,
+        Type::Db => TypeName::Db,
+        Type::ProcessResult => TypeName::ProcessResult,
+        Type::ProcessHandle => TypeName::ProcessHandle,
+        Type::Record(name) => TypeName::Named(name.clone()),
+        Type::List(inner) => TypeName::List(Box::new(annotation_from_type(inner))),
+        Type::Map(inner) => TypeName::Map(Some(Box::new(annotation_from_type(inner)))),
+        Type::Tuple(items) => TypeName::Tuple(items.iter().map(annotation_from_type).collect()),
+        Type::Option(inner) => TypeName::Option(Box::new(annotation_from_type(inner))),
+        Type::Result(ok, error) => TypeName::Result(
+            Box::new(annotation_from_type(ok)),
+            Some(Box::new(annotation_from_type(error))),
+        ),
+        Type::Function { params, return_type, .. } => TypeName::Function {
+            params: params.as_ref().map(|params| params.iter().map(annotation_from_type).collect()),
+            return_type: Some(Box::new(annotation_from_type(return_type))),
+        },
+    }
 }
 
 /// Names a module exports: its top-level `let` bindings and `fn`s.  Mutable
@@ -2755,7 +3120,7 @@ fn type_from_value(value: &Value) -> Type {
             items.iter().fold(Type::Unknown, |acc, item| common_type(acc, type_from_value(item))),
         )),
         Value::Tuple(items) => Type::Tuple(items.iter().map(type_from_value).collect()),
-        Value::Map(map) => ostack_record_type(map).unwrap_or_else(Type::map_any),
+        Value::Map(_) => Type::map_any(),
         Value::Duration(_) => Type::Duration,
         Value::Time(_) => Type::Time,
         Value::Path(_) => Type::Path,
@@ -2781,17 +3146,6 @@ fn type_from_value(value: &Value) -> Type {
             return_type: Box::new(Type::Unknown),
         },
     }
-}
-
-/// The built-in record type of a map the ostack namespace returned: a
-/// project handle by its marker, any other record by its fields.
-fn ostack_record_type(map: &crate::types::Map) -> Option<Type> {
-    let kind = match map.get(crate::methods::OSTACK_MARKER) {
-        Some(Value::Str(marker)) if marker == "project" => "project",
-        Some(_) => return None,
-        None => crate::methods::ostack_record_kind(map)?,
-    };
-    crate::records::ostack_record_name(kind).map(|name| Type::Record(name.to_string()))
 }
 
 /// The record type an `ostack` function returns: `ostack.servers()` is a
@@ -2874,6 +3228,10 @@ fn resolve_method_return(resolver: crate::methods::Return, receiver: &Type, args
         Return::Join => match receiver {
             Type::List(_) | Type::Unknown => Type::Str,
             _ => Type::Path,
+        },
+        Return::FlatMapped => match args.first().map(function_return) {
+            Some(Type::List(inner)) => Type::List(inner),
+            _ => Type::List(Box::new(Type::Unknown)),
         },
         Return::CallbackList => {
             Type::List(Box::new(args.first().map(function_return).unwrap_or(Type::Unknown)))
@@ -3005,8 +3363,8 @@ fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), RillError> {
     match (expected, actual) {
         (Type::Float, Type::Int) => Ok(()),
         (Type::Error, Type::Str) => Ok(()),
-        // A record is a Map, and an untyped Map may be any record: records
-        // stay gradual so code written before them keeps checking.
+        // Shape compatibility is contextual (see ensure_fits). Dynamic maps
+        // crossing typed boundaries are recursively validated at runtime.
         (Type::Map(_), Type::Record(_)) | (Type::Record(_), Type::Map(_)) => Ok(()),
         (Type::Record(record), Type::Str) => {
             let error = RillError::new(format!("type mismatch: expected {record}, got Str"));
@@ -3125,7 +3483,7 @@ fn ensure_function_return(expected: &Type, actual: &Type) -> Result<(), RillErro
 
 fn contains_implicit(expr: &Expr) -> bool {
     match expr.unspanned() {
-        Expr::Implicit | Expr::ImplicitField(_) => true,
+        Expr::Implicit | Expr::ImplicitField { .. } => true,
         Expr::List(items) => items.iter().any(contains_implicit),
         Expr::Tuple(items) => items.iter().any(contains_implicit),
         Expr::Map(pairs) => pairs.iter().any(|(_, value)| contains_implicit(value)),
@@ -3133,7 +3491,7 @@ fn contains_implicit(expr: &Expr) -> bool {
             contains_implicit(callee) || args.iter().any(contains_implicit)
         }
         Expr::Field { base, .. } => contains_implicit(base),
-        Expr::Index { base, index } => contains_implicit(base) || contains_implicit(index),
+        Expr::Index { base, index, .. } => contains_implicit(base) || contains_implicit(index),
         Expr::Slice { base, start, end, .. } => {
             contains_implicit(base)
                 || start.as_deref().is_some_and(contains_implicit)

@@ -318,7 +318,7 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
         | ast::Expr::Unary { operand: value, .. }
         | ast::Expr::Try(value)
         | ast::Expr::NamedArg { value, .. } => collect_expr_imports(value, imports),
-        ast::Expr::Index { base, index } => {
+        ast::Expr::Index { base, index, .. } => {
             collect_expr_imports(base, imports);
             collect_expr_imports(index, imports);
         }
@@ -367,7 +367,7 @@ fn collect_expr_imports(expr: &ast::Expr, imports: &mut Vec<String>) {
         ast::Expr::Literal(_)
         | ast::Expr::Ident(_)
         | ast::Expr::Implicit
-        | ast::Expr::ImplicitField(_) => {}
+        | ast::Expr::ImplicitField { .. } => {}
     }
 }
 
@@ -679,7 +679,7 @@ fn expr_needs_input(expr: &ast::Expr) -> bool {
         | ast::Expr::Try(value)
         | ast::Expr::Unary { operand: value, .. } => expr_needs_input(value),
         ast::Expr::For { iter, body, .. } => expr_needs_input(iter) || program_needs_input(body),
-        ast::Expr::Index { base, index } => expr_needs_input(base) || expr_needs_input(index),
+        ast::Expr::Index { base, index, .. } => expr_needs_input(base) || expr_needs_input(index),
         ast::Expr::Slice { base, start, end, .. } => {
             expr_needs_input(base)
                 || start.as_deref().is_some_and(expr_needs_input)

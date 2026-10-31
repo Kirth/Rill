@@ -19,6 +19,7 @@ Program {
                             type_name: None,
                             default: Some(
                                 Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Int(
                                             2,
@@ -39,8 +40,10 @@ Program {
                         Located {
                             stmt: Expr(
                                 Located {
+                                    checks: CheckCell,
                                     expr: Match {
                                         value: Located {
+                                            checks: CheckCell,
                                             expr: Ident(
                                                 "x",
                                             ),
@@ -67,6 +70,7 @@ Program {
                                                 ),
                                                 guard: None,
                                                 expr: Located {
+                                                    checks: CheckCell,
                                                     expr: Literal(
                                                         Str(
                                                             "small",
@@ -91,12 +95,14 @@ Program {
                                                 ),
                                                 guard: Some(
                                                     Located {
+                                                        checks: CheckCell,
                                                         expr: Binary {
                                                             op: Gt,
                                                             left: Ident(
                                                                 "a",
                                                             ),
                                                             right: Located {
+                                                                checks: CheckCell,
                                                                 expr: Ident(
                                                                     "b",
                                                                 ),
@@ -113,6 +119,7 @@ Program {
                                                     },
                                                 ),
                                                 expr: Located {
+                                                    checks: CheckCell,
                                                     expr: Literal(
                                                         Str(
                                                             "pair",
@@ -135,6 +142,7 @@ Program {
                                                 },
                                                 guard: None,
                                                 expr: Located {
+                                                    checks: CheckCell,
                                                     expr: Interpolated(
                                                         [
                                                             Text(
@@ -142,6 +150,7 @@ Program {
                                                             ),
                                                             Expr(
                                                                 Located {
+                                                                    checks: CheckCell,
                                                                     expr: Ident(
                                                                         "first",
                                                                     ),
@@ -167,6 +176,7 @@ Program {
                                                 ),
                                                 guard: None,
                                                 expr: Located {
+                                                    checks: CheckCell,
                                                     expr: Literal(
                                                         Str(
                                                             "some",
@@ -182,6 +192,7 @@ Program {
                                                 pattern: Wildcard,
                                                 guard: None,
                                                 expr: Located {
+                                                    checks: CheckCell,
                                                     expr: Literal(
                                                         Str(
                                                             "other",
@@ -224,17 +235,20 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Closure {
                         params: [],
                         body: [
                             Expr(
                                 Located {
+                                    checks: CheckCell,
                                     expr: Call {
                                         callee: Ident(
                                             "classify",
                                         ),
                                         args: [
                                             Located {
+                                                checks: CheckCell,
                                                 expr: Literal(
                                                     Int(
                                                         1,
@@ -273,12 +287,14 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Call {
                         callee: Ident(
                             "print",
                         ),
                         args: [
                             Located {
+                                checks: CheckCell,
                                 expr: Call {
                                     callee: Ident(
                                         "f",

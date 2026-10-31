@@ -11,9 +11,11 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: List(
                         [
                             Located {
+                                checks: CheckCell,
                                 expr: Literal(
                                     Str(
                                         "server1",
@@ -25,6 +27,7 @@ Program {
                                 },
                             },
                             Located {
+                                checks: CheckCell,
                                 expr: Literal(
                                     Str(
                                         "server2",
@@ -58,6 +61,7 @@ Program {
                         "host",
                     ),
                     iter: Located {
+                        checks: CheckCell,
                         expr: Ident(
                             "hosts",
                         ),
@@ -74,6 +78,7 @@ Program {
                                 ),
                                 type_name: None,
                                 expr: Located {
+                                    checks: CheckCell,
                                     expr: Command(
                                         CommandExpr {
                                             argv: [
@@ -112,8 +117,11 @@ Program {
                             stmt: Expr(
                                 If {
                                     cond: Located {
+                                        checks: CheckCell,
                                         expr: Field {
+                                            checks: CheckCell,
                                             base: Located {
+                                                checks: CheckCell,
                                                 expr: Ident(
                                                     "result",
                                                 ),
@@ -134,12 +142,14 @@ Program {
                                         Located {
                                             stmt: Expr(
                                                 Located {
+                                                    checks: CheckCell,
                                                     expr: Call {
                                                         callee: Ident(
                                                             "print",
                                                         ),
                                                         args: [
                                                             Located {
+                                                                checks: CheckCell,
                                                                 expr: Interpolated(
                                                                     [
                                                                         Var(
@@ -150,11 +160,16 @@ Program {
                                                                         ),
                                                                         Expr(
                                                                             Located {
+                                                                                checks: CheckCell,
                                                                                 expr: Call {
                                                                                     callee: Field {
+                                                                                        checks: CheckCell,
                                                                                         base: Located {
+                                                                                            checks: CheckCell,
                                                                                             expr: Field {
+                                                                                                checks: CheckCell,
                                                                                                 base: Located {
+                                                                                                    checks: CheckCell,
                                                                                                     expr: Ident(
                                                                                                         "result",
                                                                                                     ),
@@ -205,12 +220,14 @@ Program {
                                         Located {
                                             stmt: Expr(
                                                 Located {
+                                                    checks: CheckCell,
                                                     expr: Call {
                                                         callee: Ident(
                                                             "warn",
                                                         ),
                                                         args: [
                                                             Located {
+                                                                checks: CheckCell,
                                                                 expr: Interpolated(
                                                                     [
                                                                         Var(
@@ -221,8 +238,11 @@ Program {
                                                                         ),
                                                                         Expr(
                                                                             Located {
+                                                                                checks: CheckCell,
                                                                                 expr: Field {
+                                                                                    checks: CheckCell,
                                                                                     base: Located {
+                                                                                        checks: CheckCell,
                                                                                         expr: Ident(
                                                                                             "result",
                                                                                         ),

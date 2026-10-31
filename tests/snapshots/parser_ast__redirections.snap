@@ -7,6 +7,7 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Command(
                         CommandExpr {
                             argv: [
@@ -44,6 +45,7 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Command(
                         CommandExpr {
                             argv: [
@@ -81,6 +83,7 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Command(
                         CommandExpr {
                             argv: [
@@ -118,6 +121,7 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Command(
                         CommandExpr {
                             argv: [

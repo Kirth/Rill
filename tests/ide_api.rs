@@ -263,7 +263,7 @@ fn probe_knows_records_declared_in_the_program() {
 }
 
 #[test]
-fn defined_ostack_values_get_record_types() {
+fn host_defined_maps_do_not_guess_openstack_types() {
     let mut session = Session::new();
     let mut record = rill::types::Map::new();
     for (key, value) in [("id", "s1"), ("name", "web"), ("addresses", "net=10.0.0.1")] {
@@ -272,6 +272,20 @@ fn defined_ostack_values_get_record_types() {
     session.define("srv", &Value::map(record.clone()));
     session.define("all", &Value::list(vec![Value::map(record)]));
     let ident = |name: &str| rill::ast::Expr::Ident(name.to_string());
-    assert_eq!(session.type_of(&ident("srv")).unwrap(), "OSServer");
-    assert_eq!(session.type_of(&ident("all")).unwrap(), "List[OSServer]");
+    assert_eq!(session.type_of(&ident("srv")).unwrap(), "Map");
+    assert_eq!(session.type_of(&ident("all")).unwrap(), "List[Map]");
+}
+
+#[test]
+fn optional_record_probes_report_option_and_cloned_metadata_is_independent() {
+    let source = "type Count { n?: Int }\nlet c: Count = {}\nc.n";
+    let found = probe(&mut Session::new(), source, "let c", "c.n");
+    assert_eq!(found.ty, "Option[Int]");
+    let program = rill::parser::parse(source).unwrap();
+    let copy = program.clone();
+    Session::new().check(&copy).unwrap();
+    // Checking a speculative clone must not change the original AST's cells.
+    assert_ne!(program, copy);
+    Session::new().check(&program).unwrap();
+    assert_eq!(program, copy);
 }

@@ -1684,17 +1684,24 @@ impl Parser {
         loop {
             if self.consume(TokenKind::Dot) {
                 let name = self.expect_ident()?;
-                target = Expr::Field { base: Box::new(target), name };
+                target = Expr::Field { checks: Default::default(), base: Box::new(target), name };
             } else if self.consume(TokenKind::LBracket) {
                 let index = self.parse_expr(0)?;
                 self.expect(TokenKind::RBracket)?;
-                target = Expr::Index { base: Box::new(target), index: Box::new(index) };
+                target = Expr::Index {
+                    checks: Default::default(),
+                    base: Box::new(target),
+                    index: Box::new(index),
+                };
             } else {
                 break;
             }
         }
-        let target =
-            Expr::Located { expr: Box::new(target), span: Span::new(start, self.last_end) };
+        let target = Expr::Located {
+            checks: Default::default(),
+            expr: Box::new(target),
+            span: Span::new(start, self.last_end),
+        };
         let op = self.parse_assign_op()?;
         self.skip_newlines();
         let expr = self.parse_expr(0)?;
@@ -1863,6 +1870,7 @@ impl Parser {
             self.parse_expr(0)?
         } else if !destructuring && matches!(pattern, LetPattern::Ident(_)) {
             Expr::Field {
+                checks: Default::default(),
                 base: Box::new(Expr::Ident("input".to_string())),
                 name: "lines".to_string(),
             }
@@ -1897,7 +1905,11 @@ impl Parser {
                 let nested = self.parse_if()?;
                 let span = Span::new(start, self.last_end);
                 vec![Stmt::Located {
-                    stmt: Box::new(Stmt::Expr(Expr::Located { expr: Box::new(nested), span })),
+                    stmt: Box::new(Stmt::Expr(Expr::Located {
+                        checks: Default::default(),
+                        expr: Box::new(nested),
+                        span,
+                    })),
                     span,
                 }]
             } else {
@@ -1969,13 +1981,14 @@ impl Parser {
                 let base = match left {
                     Expr::Located { .. } => left,
                     other => Expr::Located {
+                        checks: Default::default(),
                         expr: Box::new(other),
                         span: Span::new(start, self.last_end),
                     },
                 };
                 self.next();
                 let name = self.expect_ident()?;
-                left = Expr::Field { base: Box::new(base), name };
+                left = Expr::Field { checks: Default::default(), base: Box::new(base), name };
                 continue;
             }
 
@@ -2066,7 +2079,11 @@ impl Parser {
                 let bound = bound.expect("a non-range index has a bound");
                 let index = self.parse_infix(bound, 0, index_start)?;
                 self.expect(TokenKind::RBracket)?;
-                left = Expr::Index { base: Box::new(left), index: Box::new(index) };
+                left = Expr::Index {
+                    checks: Default::default(),
+                    base: Box::new(left),
+                    index: Box::new(index),
+                };
                 continue;
             }
             let right = self.parse_expr(rbp)?;
@@ -2080,7 +2097,11 @@ impl Parser {
                 ParsedOp::Match | ParsedOp::Index => unreachable!(),
             };
         }
-        Ok(Expr::Located { expr: Box::new(left), span: Span::new(start, self.last_end) })
+        Ok(Expr::Located {
+            checks: Default::default(),
+            expr: Box::new(left),
+            span: Span::new(start, self.last_end),
+        })
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, RillError> {
@@ -2155,6 +2176,7 @@ impl Parser {
                     self.parse_expr(0)?
                 } else if !destructuring && matches!(pattern, LetPattern::Ident(_)) {
                     Expr::Field {
+                        checks: Default::default(),
                         base: Box::new(Expr::Ident("input".to_string())),
                         name: "lines".to_string(),
                     }
@@ -2197,7 +2219,7 @@ impl Parser {
             TokenKind::Dot => {
                 if let TokenKind::Ident(name) = self.peek_kind() {
                     self.next();
-                    Ok(Expr::ImplicitField(name))
+                    Ok(Expr::ImplicitField { name, checks: Default::default() })
                 } else {
                     Ok(Expr::Implicit)
                 }
@@ -2964,7 +2986,7 @@ fn expr_propagates(expr: &Expr) -> bool {
         Expr::Map(pairs) => pairs.iter().any(|(_, value)| expr_propagates(value)),
         Expr::Call { callee, args } => expr_propagates(callee) || args.iter().any(expr_propagates),
         Expr::Field { base, .. } => expr_propagates(base),
-        Expr::Index { base, index } => expr_propagates(base) || expr_propagates(index),
+        Expr::Index { base, index, .. } => expr_propagates(base) || expr_propagates(index),
         Expr::Slice { base, start, end, .. } => {
             expr_propagates(base)
                 || start.as_deref().is_some_and(expr_propagates)
@@ -3002,7 +3024,7 @@ fn expr_propagates(expr: &Expr) -> bool {
         | Expr::Literal(_)
         | Expr::Ident(_)
         | Expr::Implicit
-        | Expr::ImplicitField(_) => false,
+        | Expr::ImplicitField { .. } => false,
     }
 }
 

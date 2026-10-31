@@ -7,6 +7,7 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Pipe {
                         kind: Value,
                         left: Pipe {
@@ -33,6 +34,7 @@ Program {
                                     },
                                 ),
                                 right: Located {
+                                    checks: CheckCell,
                                     expr: Command(
                                         CommandExpr {
                                             argv: [
@@ -59,10 +61,12 @@ Program {
                                 },
                             },
                             right: Located {
+                                checks: CheckCell,
                                 expr: Call {
-                                    callee: ImplicitField(
-                                        "lines",
-                                    ),
+                                    callee: ImplicitField {
+                                        name: "lines",
+                                        checks: CheckCell,
+                                    },
                                     args: [],
                                 },
                                 span: Span {
@@ -72,12 +76,15 @@ Program {
                             },
                         },
                         right: Located {
+                            checks: CheckCell,
                             expr: Call {
-                                callee: ImplicitField(
-                                    "take",
-                                ),
+                                callee: ImplicitField {
+                                    name: "take",
+                                    checks: CheckCell,
+                                },
                                 args: [
                                     Located {
+                                        checks: CheckCell,
                                         expr: Literal(
                                             Int(
                                                 20,

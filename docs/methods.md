@@ -183,8 +183,8 @@ one string; ports carry the IPs).
 | `ostack.refresh()` | drop every cached result |
 
 ```ril
-ostack.project("foobar").servers().filter(.status == "ACTIVE")
-ostack.all_projects().volumes().count(.status == "error")
+ostack.project("foobar").servers().filter(.status.unwrap_or("") == "ACTIVE")
+ostack.all_projects().volumes().count(.status.unwrap_or("") == "error")
 ```
 
 Records know their relations. The kind is read from the record's fields, and

@@ -14,8 +14,8 @@ let inv = ostack.inventory(["servers", "volumes", "ports"])
 let servers = inv.servers.index_by(.id)
 
 let vol = ostack.show("volume", args.volume)
-let attached = vol.attachments.map(.server_id).map(|id| servers.get(id)).filter(. != null)
-print "volume {vol.name} ({vol.size} GB, {vol.status}) is attached to {attached.len()} server(s)"
+let attached = vol.attachments.unwrap_or([]).map(.server_id).map(|id| servers.get(id)).filter(. != null)
+print "volume {vol.name.unwrap_or("-")} ({vol.size.unwrap_or(0)} GB, {vol.status.unwrap_or("-")}) is attached to {attached.len()} server(s)"
 
 for server in attached {
     let host = server["OS-EXT-SRV-ATTR:host"]

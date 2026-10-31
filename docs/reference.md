@@ -70,17 +70,39 @@ fn label(m: Member) -> Str { "{m.user} ({m.role})" }
 label({user: "kirth", role: "admin"})
 ```
 
-- Records are nominal: an `OSServer` is not an `OSProject`, though both have
-  an `id`. A record passes wherever a `Map` is expected, and an untyped `Map`
-  passes where a record is expected.
-- A map literal given for a record must have its required fields, and literal
-  values must have the declared types.
-- Reading a field the record does not declare warns (`unknown_field`), with a
-  suggestion; use `.get("name")` for fields some records leave out.
-- When a function is called, a `Map` passed to a record parameter must have
-  the record's required fields.
+- Records are nominal in the checker: a known `OSServer` is not an
+  `OSProject`, even if their fields overlap. A plain `Map` can acquire a record
+  type through a checked annotation. Runtime values remain maps; erasing a
+  record to `Map` erases its nominal identity.
+- A map literal given for a record must contain every required field. Every
+  field expression is checked, including variables, calls and nested values;
+  extra fields are permitted. The same rules apply to arguments, defaults,
+  returns and assignment.
+- Dynamic maps are validated recursively at typed boundaries, including
+  record-valued calls. Validation checks required fields and present values,
+  with errors identifying paths such as `value.items[2].n`. It never guesses
+  a record's identity from its keys.
+- Reading `field?: T` with `.field` or `["field"]` returns `Option[T]`:
+  `none` when absent, `some(value)` when present. Use `.unwrap_or(...)`, `?`
+  or a match before using the value. Optionality permits absence, not an
+  arbitrary `null`; a present value must satisfy `T`.
+- Fields are stored as ordinary map values, so serialization is unchanged.
+  `.get("name")` keeps the ordinary map behavior (a raw value, or `null` when
+  missing) and can read extra fields. Undeclared direct field reads are errors.
+- Dot and literal-key writes check the declared field type. Dynamic-key writes
+  validate the updated record before committing it. Reassignment preserves an
+  explicitly annotated variable's type.
+- A record passes as `Map`; conversion to `Map[Str, V]` additionally requires
+  every value, including extra fields, to satisfy `V`.
 - Types are declared at the top level, may be used before their declaration,
-  and are exported from modules.
+  and are exported from modules. Independently declared imported types with
+  the same name conflict; repeated imports of the same declaration are valid.
+
+```
+type Count { n?: Int }
+let c: Count = {}
+let n: Int = c.n.unwrap_or(0)
+```
 
 The `ostack` namespace returns built-in records: `ostack.servers()` is a
 `List[OSServer]`, `ostack.project("demo")` an `OSProject`, `server.ports()` a
@@ -90,13 +112,15 @@ The `ostack` namespace returns built-in records: `ostack.servers()` is a
 
 ```
 fn owners(p: OSProject) -> List[Str] {
-    p.role_assignments().map(.user)
+    p.role_assignments().map(|r| Str(r.user.unwrap_or("-")))
 }
 owners(ostack.project("demo"))     # not owners("demo"): that is a type error
 ```
 
-At runtime, a value passed to an `OS…` parameter that is visibly a record of
-another kind (an `OSServer` given for an `OSProject`) is an error.
+Known OpenStack record kinds are checked statically. A plain map passed to an
+`OS…` parameter is validated against that declaration's fields, just like a
+user-defined record. Ordinary maps with keys such as `id` and `email` never
+acquire an OpenStack type automatically.
 
 Literals: `null`, `true`, `42`, `1.5`, `"text"`, `r"raw"`, `[1, 2]`,
 `{name: "alice", "other-key": 3}`, `("localhost", 8080)`, `/regex/`,
@@ -345,7 +369,7 @@ text.parse_json()  text.parse_yaml()  text.parse_toml()  text.parse_csv()  text.
 value.to_json()  value.to_json_pretty()  value.to_yaml()  value.to_toml()
 print env.HOME;  env.DEBUG = "1";  with env { DEBUG = "1" } { run env }
 250ms.sleep()
-ostack.servers().filter(.status == "ACTIVE")   # OpenStack records, see methods.md
+ostack.servers().filter(.status.unwrap_or("") == "ACTIVE")   # OpenStack records, see methods.md
 let db = sql.connect("postgres://me@localhost/app")
 db.query("select * from users where name = $name")   # $name is a bind parameter, see methods.md
 ```

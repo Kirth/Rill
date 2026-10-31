@@ -11,11 +11,13 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Map(
                         [
                             (
                                 "name",
                                 Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Str(
                                             "compute-01",
@@ -30,6 +32,7 @@ Program {
                             (
                                 "ip",
                                 Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Str(
                                             "10.0.0.12",
@@ -44,9 +47,11 @@ Program {
                             (
                                 "tags",
                                 Located {
+                                    checks: CheckCell,
                                     expr: List(
                                         [
                                             Located {
+                                                checks: CheckCell,
                                                 expr: Literal(
                                                     Str(
                                                         "gpu",
@@ -58,6 +63,7 @@ Program {
                                                 },
                                             },
                                             Located {
+                                                checks: CheckCell,
                                                 expr: Literal(
                                                     Str(
                                                         "prod",
@@ -93,14 +99,18 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Call {
                         callee: Ident(
                             "print",
                         ),
                         args: [
                             Located {
+                                checks: CheckCell,
                                 expr: Field {
+                                    checks: CheckCell,
                                     base: Located {
+                                        checks: CheckCell,
                                         expr: Ident(
                                             "server",
                                         ),

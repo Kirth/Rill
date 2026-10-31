@@ -365,6 +365,7 @@ pub enum Return {
     OptionalReceiverItem,
     Join,
     CallbackList,
+    FlatMapped,
     ListUnknown,
     ListTupleUnknown,
     /// `List[Tuple[Str, V]]` from a Map.
@@ -1073,7 +1074,7 @@ pub static METHODS: &[Method] = &[
         [List],
         1,
         [Argument::Function],
-        Return::CallbackList,
+        Return::FlatMapped,
         Target::Builtin(BuiltinMethod::FlatMap)
     ),
     method!(
@@ -2529,7 +2530,7 @@ pub fn methods_for(kind: Kind) -> Vec<&'static str> {
 pub fn is_method_pipeline(expr: &Expr) -> bool {
     match expr.unspanned() {
         Expr::Call { callee, .. } => match callee.unspanned() {
-            Expr::ImplicitField(_) => true,
+            Expr::ImplicitField { .. } => true,
             Expr::Field { base, .. } => is_method_pipeline(base),
             _ => false,
         },
@@ -2540,5 +2541,5 @@ pub fn is_method_pipeline(expr: &Expr) -> bool {
 
 pub fn is_lines_consumer(expr: &Expr) -> bool {
     matches!(expr.unspanned(), Expr::Call { callee, args }
-        if args.is_empty() && matches!(callee.unspanned(), Expr::ImplicitField(name) if name == "lines"))
+        if args.is_empty() && matches!(callee.unspanned(), Expr::ImplicitField { name, .. } if name == "lines"))
 }

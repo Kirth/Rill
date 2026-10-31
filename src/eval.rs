@@ -819,6 +819,9 @@ impl Evaluator {
         names
     }
 
+    /// Evaluate an AST checked by `typeck::check` or `typeck::Session::check`.
+    /// Check the same AST before evaluation: its metadata implements typed
+    /// optional-field reads and mutation validation.
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, RillError> {
         self.eval_program_with_imports(program, Vec::new())
     }
@@ -1123,8 +1126,11 @@ impl Evaluator {
                 Ok(Flow::Value(Value::Null))
             }
             Stmt::TypeDecl { .. } => Ok(Flow::Value(Value::Null)),
-            Stmt::Let { pattern, expr, mutable, .. } => {
+            Stmt::Let { pattern, expr, mutable, type_name } => {
                 let value = self.eval_expr(expr)?;
+                if let Some(annotation) = type_name {
+                    crate::typeck::check_value_annotation(&value, annotation, &self.records)?;
+                }
                 match pattern {
                     LetPattern::Ident(name) => self.env.bind(name.clone(), value, *mutable),
                     LetPattern::List(names) => {
@@ -1206,8 +1212,28 @@ impl Evaluator {
                 let rhs = self.eval_expr(expr)?;
                 let op = *op;
                 let (root, steps) = self.resolve_place(target)?;
-                let updated =
-                    self.env.update(root, |value| assign_place(value, &steps, op, rhs))?;
+                let contract = match target {
+                    Expr::Located { checks, .. } => Some(checks.get()),
+                    _ => None,
+                };
+                let updated = self.env.update(root, |value| {
+                    if contract.as_ref().and_then(|c| c.mutation_root.as_ref()).is_none() {
+                        return assign_place(value, &steps, op, rhs);
+                    }
+                    let mut candidate = value.clone();
+                    assign_place(&mut candidate, &steps, op, rhs)?;
+                    if let Some(checks) = &contract {
+                        if let Some(annotation) = &checks.mutation_root {
+                            crate::typeck::check_value_annotation(
+                                &candidate,
+                                annotation,
+                                &checks.records,
+                            )?;
+                        }
+                    }
+                    *value = candidate;
+                    Ok(())
+                })?;
                 if !updated {
                     return Err(EvalError::Runtime(Box::new(RillError::new(format!(
                         "assignment to undeclared variable '{root}'"
@@ -1262,8 +1288,16 @@ impl Evaluator {
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, EvalError> {
         // Small wrapper for the same reason as `eval_stmt`.
         match expr {
-            Expr::Located { expr, span } => {
-                self.eval_expr_inner(expr).map_err(|error| match error {
+            Expr::Located { expr, span, checks } => {
+                let result = (|| {
+                    let value = self.eval_expr_inner(expr)?;
+                    let checks = checks.get();
+                    if let Some(annotation) = &checks.annotation {
+                        crate::typeck::check_value_annotation(&value, annotation, &checks.records)?;
+                    }
+                    Ok(value)
+                })();
+                result.map_err(|error| match error {
                     EvalError::Runtime(error) => {
                         EvalError::Runtime(Box::new(error.with_span(*span)))
                     }
@@ -1309,9 +1343,14 @@ impl Evaluator {
                 Ok(Value::Map(map.into()))
             }
             Expr::Call { callee, args } => self.eval_call(callee, args),
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, checks } => {
                 let base_val = self.eval_expr(base)?;
                 let idx_val = self.eval_expr(index)?;
+                if checks.get().optional_read {
+                    if let (Value::Map(map), Value::Str(key)) = (&base_val, &idx_val) {
+                        return Ok(Value::Option(map.get(key).cloned().map(Box::new)));
+                    }
+                }
                 match base_val {
                     Value::List(items) => {
                         let idx = match idx_val {
@@ -1418,7 +1457,14 @@ impl Evaluator {
                     }
                 }
             }
-            Expr::Field { base, name } => {
+            Expr::Field { base, name, checks } => {
+                if checks.get().optional_read {
+                    let value = self.eval_expr(base)?;
+                    if let Value::Map(map) = value {
+                        return Ok(Value::Option(map.get(name).cloned().map(Box::new)));
+                    }
+                    return Err(RillError::new("optional field access needs a Map").into());
+                }
                 if let Expr::Ident(module) = base.unspanned() {
                     if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
                         if crate::methods::namespace_function(module, name).is_some() {
@@ -1430,6 +1476,7 @@ impl Evaluator {
                         if crate::methods::namespace_method(module, name).is_some() {
                             let call = Expr::Call {
                                 callee: Box::new(Expr::Field {
+                                    checks: Default::default(),
                                     base: Box::new(Expr::Ident(module.to_string())),
                                     name: name.clone(),
                                 }),
@@ -1690,11 +1737,17 @@ impl Evaluator {
                 .env
                 .get("it")
                 .ok_or_else(|| RillError::new("implicit argument used outside a callback"))?),
-            Expr::ImplicitField(name) => {
+            Expr::ImplicitField { name, checks } => {
                 let value = self
                     .env
                     .get("it")
                     .ok_or_else(|| RillError::new("implicit argument used outside a callback"))?;
+                if checks.get().optional_read {
+                    if let Value::Map(map) = value {
+                        return Ok(Value::Option(map.get(name).cloned().map(Box::new)));
+                    }
+                    return Err(RillError::new("optional field access needs a Map").into());
+                }
                 Ok(field_value(value, name)?)
             }
         }
@@ -1938,12 +1991,12 @@ impl Evaluator {
     ) -> Result<(&'a str, Vec<PlaceStep>), EvalError> {
         match place.unspanned() {
             Expr::Ident(name) => Ok((name.as_str(), Vec::new())),
-            Expr::Field { base, name } => {
+            Expr::Field { base, name, .. } => {
                 let (root, mut steps) = self.resolve_place(base)?;
                 steps.push(PlaceStep::Field(name.clone()));
                 Ok((root, steps))
             }
-            Expr::Index { base, index } => {
+            Expr::Index { base, index, .. } => {
                 let (root, mut steps) = self.resolve_place(base)?;
                 let key = self.eval_expr(index)?;
                 steps.push(PlaceStep::Index { key, literal: constant_int_expr(index) });
@@ -2059,13 +2112,17 @@ impl Evaluator {
                 }
             }
         }
-        if let Expr::ImplicitField(name) = callee.unspanned() {
+        if let Expr::ImplicitField { name, .. } = callee.unspanned() {
             return self.eval_call(
-                &Expr::Field { base: Box::new(Expr::Implicit), name: name.clone() },
+                &Expr::Field {
+                    checks: Default::default(),
+                    base: Box::new(Expr::Implicit),
+                    name: name.clone(),
+                },
                 args,
             );
         }
-        if let Expr::Field { base, name } = callee.unspanned() {
+        if let Expr::Field { base, name, .. } = callee.unspanned() {
             if let Expr::Ident(module) = base.unspanned() {
                 if crate::methods::is_namespace(module) && self.env.get(module).is_none() {
                     if let Some(function) = crate::methods::namespace_function(module, name) {
@@ -4241,6 +4298,14 @@ impl Evaluator {
                     break;
                 }
             };
+            if let Some(annotation) = &param.type_name {
+                if let Err(error) =
+                    crate::typeck::check_value_annotation(&value, annotation, &self.records)
+                {
+                    bind_result = Err(error.into());
+                    break;
+                }
+            }
             // Parameters are immutable, like `let`: no shared cell is needed.
             self.env.bind(param.name.clone(), value, false);
         }
@@ -4253,13 +4318,19 @@ impl Evaluator {
         self.env.pop();
         self.function_depth -= 1;
         let flow = flow_result?;
-        match flow {
-            Flow::Value(value) | Flow::Return(value) => Ok(wrap_declared_result(function, value)),
+        let value = match flow {
+            Flow::Value(value) | Flow::Return(value) => {
+                Ok::<Value, EvalError>(wrap_declared_result(function, value))
+            }
             Flow::Propagate(value) => Ok(propagated_value(value)),
             Flow::Break(_) => Err(RillError::new("break outside loop").into()),
             Flow::Continue => Err(RillError::new("continue outside loop").into()),
             Flow::Emit(_) => Err(RillError::new("emit outside for expression").into()),
+        }?;
+        if let Some(annotation) = &function.return_type {
+            crate::typeck::check_value_annotation(&value, annotation, &self.records)?;
         }
+        Ok(value)
     }
 
     fn call_callable(&mut self, value: Value, args: Vec<Value>) -> Result<Value, EvalError> {
@@ -4332,6 +4403,7 @@ impl Evaluator {
                 if crate::methods::namespace_method(module, name).is_some() {
                     let call = Expr::Call {
                         callee: Box::new(Expr::Field {
+                            checks: Default::default(),
                             base: Box::new(Expr::Ident(module.to_string())),
                             name: name.to_string(),
                         }),
@@ -5735,7 +5807,7 @@ fn collect_byte_pipeline_commands<'a>(expr: &'a Expr, commands: &mut Vec<&'a Com
 
 fn contains_implicit(expr: &Expr) -> bool {
     match expr.unspanned() {
-        Expr::Implicit | Expr::ImplicitField(_) => true,
+        Expr::Implicit | Expr::ImplicitField { .. } => true,
         Expr::List(items) => items.iter().any(contains_implicit),
         Expr::Tuple(items) => items.iter().any(contains_implicit),
         Expr::Map(pairs) => pairs.iter().any(|(_, value)| contains_implicit(value)),
@@ -5743,7 +5815,7 @@ fn contains_implicit(expr: &Expr) -> bool {
             contains_implicit(callee) || args.iter().any(contains_implicit)
         }
         Expr::Field { base, .. } => contains_implicit(base),
-        Expr::Index { base, index } => contains_implicit(base) || contains_implicit(index),
+        Expr::Index { base, index, .. } => contains_implicit(base) || contains_implicit(index),
         Expr::Slice { base, start, end, .. } => {
             contains_implicit(base)
                 || start.as_deref().is_some_and(contains_implicit)

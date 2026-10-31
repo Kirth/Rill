@@ -1,6 +1,6 @@
 //! Record types: maps with a declared shape (`type Name { field: T }`).
-//! At runtime a record is a plain Map; the declaration informs the checker,
-//! completion and hover.  The ostack kinds come as built-in records,
+//! At runtime a record is a plain Map; typed boundaries validate its declared
+//! shape. Optional reads produce Options without changing the stored values.  The ostack kinds come as built-in records,
 //! declared in Rill in `ostack.ril`.
 
 use crate::ast::{FieldDecl, Stmt, TypeName};

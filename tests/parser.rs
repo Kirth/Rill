@@ -43,7 +43,7 @@ fn byte_pipeline_preserves_command_boundaries() {
     };
 
     assert!(matches!(right.unspanned(), Expr::Call { callee, args }
-        if args.is_empty() && matches!(callee.unspanned(), Expr::ImplicitField(name) if name == "lines")));
+        if args.is_empty() && matches!(callee.unspanned(), Expr::ImplicitField { name, .. } if name == "lines")));
     let Expr::Pipe { kind: PipeKind::Byte, left, right } = left.unspanned() else {
         panic!("expected inner byte pipe");
     };

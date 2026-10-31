@@ -11,11 +11,13 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Binary {
                         op: Add,
                         left: Unary {
                             op: Neg,
                             operand: Located {
+                                checks: CheckCell,
                                 expr: Binary {
                                     op: Pow,
                                     left: Literal(
@@ -24,6 +26,7 @@ Program {
                                         ),
                                     ),
                                     right: Located {
+                                        checks: CheckCell,
                                         expr: Literal(
                                             Int(
                                                 2,
@@ -42,6 +45,7 @@ Program {
                             },
                         },
                         right: Located {
+                            checks: CheckCell,
                             expr: Binary {
                                 op: Mul,
                                 left: Binary {
@@ -52,6 +56,7 @@ Program {
                                         ),
                                     ),
                                     right: Located {
+                                        checks: CheckCell,
                                         expr: Literal(
                                             Int(
                                                 3,
@@ -64,6 +69,7 @@ Program {
                                     },
                                 },
                                 right: Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Int(
                                             2,
@@ -100,6 +106,7 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Binary {
                         op: Coalesce,
                         left: Call {
@@ -108,6 +115,7 @@ Program {
                             ),
                             args: [
                                 Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Int(
                                             1,
@@ -121,6 +129,7 @@ Program {
                             ],
                         },
                         right: Located {
+                            checks: CheckCell,
                             expr: Binary {
                                 op: Range,
                                 left: Literal(
@@ -129,6 +138,7 @@ Program {
                                     ),
                                 ),
                                 right: Located {
+                                    checks: CheckCell,
                                     expr: Literal(
                                         Int(
                                             10,
@@ -165,6 +175,7 @@ Program {
                 ),
                 type_name: None,
                 expr: Located {
+                    checks: CheckCell,
                     expr: Binary {
                         op: And,
                         left: Binary {
@@ -175,9 +186,11 @@ Program {
                                 ),
                             ),
                             right: Located {
+                                checks: CheckCell,
                                 expr: List(
                                     [
                                         Located {
+                                            checks: CheckCell,
                                             expr: Literal(
                                                 Int(
                                                     1,
@@ -189,6 +202,7 @@ Program {
                                             },
                                         },
                                         Located {
+                                            checks: CheckCell,
                                             expr: Literal(
                                                 Int(
                                                     2,
@@ -208,10 +222,13 @@ Program {
                             },
                         },
                         right: Located {
+                            checks: CheckCell,
                             expr: Unary {
                                 op: Not,
                                 operand: Located {
+                                    checks: CheckCell,
                                     expr: Located {
+                                        checks: CheckCell,
                                         expr: Binary {
                                             op: NotIn,
                                             left: Literal(
@@ -220,9 +237,11 @@ Program {
                                                 ),
                                             ),
                                             right: Located {
+                                                checks: CheckCell,
                                                 expr: List(
                                                     [
                                                         Located {
+                                                            checks: CheckCell,
                                                             expr: Literal(
                                                                 Int(
                                                                     1,
@@ -273,12 +292,14 @@ Program {
         Located {
             stmt: Expr(
                 Located {
+                    checks: CheckCell,
                     expr: Call {
                         callee: Ident(
                             "print",
                         ),
                         args: [
                             Located {
+                                checks: CheckCell,
                                 expr: Ident(
                                     "v",
                                 ),
@@ -288,6 +309,7 @@ Program {
                                 },
                             },
                             Located {
+                                checks: CheckCell,
                                 expr: Ident(
                                     "w",
                                 ),
@@ -297,6 +319,7 @@ Program {
                                 },
                             },
                             Located {
+                                checks: CheckCell,
                                 expr: Ident(
                                     "inside",
                                 ),
