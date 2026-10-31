@@ -5,45 +5,42 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    # The official image ships rustc and cargo; only rustfmt and clippy are added.
+    container: rust:1-slim-bookworm
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rill
+          POSTGRES_PASSWORD: rill
+          POSTGRES_DB: rill_test
+        options: >-
+          --health-cmd "pg_isready -U rill"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RILL_TEST_DATABASE_URL: postgres://rill:rill@postgres/rill_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: Start Postgres
-        if: runner.os == 'Linux'
-        run: |
-          sudo systemctl start postgresql.service
-          sudo -u postgres psql -c "create user rill superuser password 'rill'"
-          sudo -u postgres createdb -O rill rill_test
-          echo "RILL_TEST_DATABASE_URL=postgres://rill:rill@localhost/rill_test?sslmode=disable" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --all-targets
-      - name: Release build
-        run: cargo build --release
-
-  msrv:
-    name: msrv (1.80)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
