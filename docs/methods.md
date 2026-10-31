@@ -155,9 +155,11 @@ such as `.map(.trim())`; closure parameter types are inferred from the receiver.
 
 ## ostack namespace
 
-OpenStack, through the `ostack` crate linked into rill when it is built with
-`--features openstack` (the namespace always type-checks; calling it in a
-build without the feature raises an error that says so). Every function takes
+OpenStack, through the `ostack` crate. The namespace always type-checks; the
+runtime is the `ostack-rill/` crate, which registers itself through
+`rill::ostack_backend` and builds a `rill` binary with it (`cd ostack-rill &&
+cargo build --release`). Calling it from a plain build raises an error that
+says so. Every function takes
 no receiver and returns full records as maps, with the crate's normalisation
 (`tenant_id` → `project_id`, server `flavor`/`image` as names, `addresses` as
 one string; ports carry the IPs).

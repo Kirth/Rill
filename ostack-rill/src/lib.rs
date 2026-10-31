@@ -1,5 +1,11 @@
 //! The `ostack.*` namespace: OpenStack through Kirth's `ostack` crate.
 //!
+//! Rill's core declares and type-checks the namespace; this crate is the
+//! runtime behind it, plugged in through `rill::ostack_backend` by
+//! [`register`].  It lives outside the core crate because `ostack` is a local
+//! path dependency (`../../LeafCloud/FastOpenStackCLI`), which would break
+//! every build of rill on a machine without that checkout.
+//!
 //! Calls are read-only.  Records are full (every field the API returned, with
 //! ostack's normalisation of names), converted once to Rill values and kept in
 //! a process-wide cache so a session that asks the same question twice, or an
@@ -10,13 +16,13 @@
 //! `RILL_OPENSTACK_FIXTURE=<dir>` serves `<dir>/<collection>.json` files
 //! instead of a cloud, for tests and demos.
 
-use crate::blocking::env_secs;
-use crate::diagnostic::RillError;
-use crate::eval::CancellationToken;
-use crate::eval_data::json_to_value;
-use crate::methods::{ostack_record_kind, OSTACK_KINDS, OSTACK_MARKER};
-use crate::types::{ErrorKind, Map, Value};
 use ostack::{AuthConfig, OpenStackClient, ResourceKind};
+use rill::blocking::env_secs;
+use rill::diagnostic::RillError;
+use rill::eval::CancellationToken;
+use rill::methods::{ostack_record_kind, OSTACK_KINDS, OSTACK_MARKER};
+use rill::ostack_backend::json_to_value;
+use rill::types::{ErrorKind, Map, Value};
 use serde_json::Value as Json;
 use std::collections::HashMap;
 use std::future::Future;
@@ -29,17 +35,32 @@ type Record = serde_json::Map<String, Json>;
 type Query = Vec<(String, String)>;
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
-/// One `ostack.name(...)` call from the evaluator.
-pub struct Call<'a> {
-    pub name: &'static str,
-    pub positional: Vec<Value>,
-    pub named: Vec<(String, Value)>,
-    /// The evaluator's environment (`OS_*`, `RILL_OPENSTACK_*`).
-    pub lookup_env: &'a dyn Fn(&str) -> Option<String>,
-    pub cancellation: CancellationToken,
+pub use rill::ostack_backend::{Call, Error};
+
+/// The [`rill::ostack_backend::Backend`] this crate provides.
+pub struct OstackBackend;
+
+impl rill::ostack_backend::Backend for OstackBackend {
+    fn call(&self, call: Call<'_>) -> Result<Value, Error> {
+        call_ostack(call)
+    }
+
+    fn relation_call(
+        &self,
+        kind: &str,
+        method: &str,
+        record: Map,
+        lookup_env: &dyn Fn(&str) -> Option<String>,
+        cancellation: CancellationToken,
+    ) -> Result<Value, Error> {
+        relation_call(kind, method, record, lookup_env, cancellation)
+    }
 }
 
-pub use crate::blocking::Error;
+/// Install [`OstackBackend`] for this process; later calls are no-ops.
+pub fn register() {
+    rill::ostack_backend::register(Box::new(OstackBackend));
+}
 
 const DEFAULT_KINDS: &[&str] = &[
     "servers",
@@ -57,7 +78,7 @@ const DEFAULT_KINDS: &[&str] = &[
 ];
 
 /// Entry point used by the evaluator.
-pub fn call(call: Call<'_>) -> Result<Value, Error> {
+pub fn call_ostack(call: Call<'_>) -> Result<Value, Error> {
     let Call { name, positional, named, lookup_env, cancellation } = call;
     let args = Args { positional, named };
     match name {
@@ -327,7 +348,7 @@ fn kind_arg(value: Option<&Value>) -> Result<ResourceKind, RillError> {
     };
     ResourceKind::from_name(name).ok_or_else(|| {
         RillError::new(format!("ostack: unknown kind '{name}'")).with_help(
-            match crate::suggest::did_you_mean(name, OSTACK_KINDS.iter().copied()) {
+            match rill::suggest::did_you_mean(name, OSTACK_KINDS.iter().copied()) {
                 Some(hint) => hint,
                 None => format!("kinds: {}", OSTACK_KINDS.join(", ")),
             },
@@ -348,12 +369,12 @@ fn pairs(map: &Map) -> Vec<(String, String)> {
 
 // ---------------------------------------------------------------- runtime
 
-/// Run `future` on the shared runtime (see [`crate::blocking::run`]).
+/// Run `future` on the shared runtime (see [`rill::blocking::run`]).
 fn run<T: Send + 'static>(
     future: impl Future<Output = anyhow::Result<T>> + Send + 'static,
     cancellation: &CancellationToken,
 ) -> Result<T, Error> {
-    crate::blocking::run(
+    rill::blocking::run(
         async move { future.await.map_err(rill_error) },
         cancellation,
         env_secs("RILL_OPENSTACK_TIMEOUT_SECS", 60),

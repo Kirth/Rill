@@ -1,7 +1,7 @@
 #!/usr/bin/env rill
 # Who owns an IP address, MAC, floating IP or name?
 #
-# Needs rill built with `--features openstack` and the usual OS_* variables;
+# Needs the rill from ostack-rill/ (see README) and the usual OS_* variables;
 # admins see every project. Without a cloud:
 #   RILL_OPENSTACK_FIXTURE=tests/fixtures/openstack rill examples/openstack_who_owns.ril 10.0.0.11
 

@@ -1,11 +1,11 @@
 //! The `ostack.*` namespace against JSON fixtures (no network).
-#![cfg(feature = "openstack")]
 
 use rill::types::Value;
 use std::collections::BTreeMap;
 
 fn fixture_dir() -> String {
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/openstack").to_string()
+    ostack_rill::register();
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/openstack").to_string()
 }
 
 fn env() -> BTreeMap<String, String> {
@@ -135,6 +135,7 @@ fn results_are_cached_until_fresh_or_refresh() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("flavors.json");
     std::fs::write(&file, r#"[{"id": "f1", "name": "one"}]"#).unwrap();
+    ostack_rill::register();
     let mut env = rill::eval::process_environment();
     env.insert("RILL_OPENSTACK_FIXTURE".to_string(), dir.display().to_string());
     let run = |source: &str| {
@@ -393,7 +394,7 @@ fn relations_ask_for_filtered_listings() {
         run(r#"ostack.subnet("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").routers().len()"#),
         Value::Int(1)
     );
-    let log = rill::openstack::fixture_requests(&dir);
+    let log = ostack_rill::fixture_requests(&dir);
     assert!(
         log.contains(&"list ports device_id=22222222-2222-4222-8222-222222222222".to_string()),
         "{log:?}"
@@ -407,9 +408,9 @@ fn relations_ask_for_filtered_listings() {
     assert!(!log.iter().any(|l| l == "list servers "), "{log:?}");
 
     // An exact address is a handful of filtered requests, not an inventory.
-    let before = rill::openstack::fixture_requests(&dir).len();
+    let before = ostack_rill::fixture_requests(&dir).len();
     assert_eq!(run(r#"ostack.search("10.0.0.12")[0].record.name"#), Value::Str("db-1".into()));
-    let new: Vec<String> = rill::openstack::fixture_requests(&dir)[before..].to_vec();
+    let new: Vec<String> = ostack_rill::fixture_requests(&dir)[before..].to_vec();
     assert!(new.iter().any(|l| l.starts_with("list servers ip=")), "{new:?}");
     assert!(new.iter().any(|l| l == "list ports fixed_ips=ip_address=10.0.0.12"), "{new:?}");
     assert!(!new.iter().any(|l| l == "list volumes " || l == "list networks "), "{new:?}");

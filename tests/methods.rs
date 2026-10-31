@@ -675,9 +675,8 @@ fn relational_list_methods() {
     rill::typeck::check(&program).expect("index_by is typed by its items");
 }
 
-#[cfg(not(feature = "openstack"))]
 #[test]
-fn ostack_without_the_feature_explains_itself() {
+fn ostack_without_a_backend_explains_itself() {
     let error = rill::run_source("ostack.servers()", Vec::new()).expect_err("no feature");
     let text = error.to_string();
     assert!(text.contains("built without"), "{text}");

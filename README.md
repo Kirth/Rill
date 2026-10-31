@@ -53,12 +53,19 @@ sizes as real types, and a declarative `args { }` block that generates `--help`.
 ```sh
 cargo install --path .          # from a checkout
 cargo build --release           # binary at target/release/rill
-cargo build --release --features openstack   # with the ostack.* namespace (needs ../../LeafCloud/FastOpenStackCLI)
 nix run github:Kirth/Rill -- --help
 nix develop                     # dev shell with cargo, clippy, rustfmt, cargo-insta
 ```
 
 Rust 1.80 or newer.
+
+The `ostack.*` namespace (OpenStack) always type-checks, but calling it needs
+a rill with the OpenStack runtime linked in. That runtime lives in
+`ostack-rill/`, a separate crate outside this package, because it depends on
+the `ostack` client by path (`../../LeafCloud/FastOpenStackCLI`). The core
+crate has no path dependencies, so `cargo build` and the flake work anywhere;
+where that checkout exists, `cd ostack-rill && cargo build --release` builds
+`ostack-rill/target/release/rill`, the same CLI with `ostack.*` enabled.
 
 ## Usage
 

@@ -1,0 +1,39 @@
+# The ostack.* runtime for rill, and a `rill` binary with it registered.
+#
+# Not a member of rill's package or workspace: `ostack` is a path dependency
+# on Kirth's FastOpenStackCLI checkout, and keeping it out of the root
+# Cargo.toml is what lets rill build anywhere.  Build here, where that
+# checkout exists:  cd ostack-rill && cargo build --release
+[package]
+name = "ostack-rill"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "The ostack.* namespace for Rill, backed by the ostack OpenStack client"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "ostack_rill"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rill"
+path = "src/bin/rill.rs"
+
+[dependencies]
+rill = { path = ".." }
+ostack = { path = "../../../LeafCloud/FastOpenStackCLI", default-features = false }
+anyhow = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt"] }
+# rill's front end (../src/main.rs, compiled into our binary) uses libc.
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Its own workspace root, so cargo does not look for one in the parent.
+[workspace]

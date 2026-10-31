@@ -44,6 +44,12 @@ the single-commit prototype that preceded it.
 
 ### Breaking changes
 
+- The `openstack` cargo feature is gone. Rill's core crate no longer depends
+  on the `ostack` client (a local path dependency that broke `cargo build` and
+  `nix build` on every other machine); the `ostack.*` runtime moved to the
+  separate `ostack-rill/` crate, which plugs in through the new
+  `rill::ostack_backend` API and builds its own `rill` binary. The namespace
+  still type-checks in every build.
 - **Scoping.** Named functions are lexically scoped and hoisted within their
   block; they no longer see the caller's variables (dynamic scoping is gone).
   `var` bindings are shared cells, so closures and functions can mutate an

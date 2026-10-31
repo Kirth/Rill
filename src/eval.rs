@@ -26,6 +26,10 @@ const MAX_RANGE_LEN: i64 = 32 << 20;
 /// Largest string `repeat` may produce, in bytes.
 const MAX_REPEAT_BYTES: usize = 1 << 30;
 
+/// Where the `ostack.*` runtime comes from (see `ostack_backend`).
+const OSTACK_BUILD_HELP: &str =
+    "build the ostack-enabled rill from ostack-rill/ (`cargo build --release` there)";
+
 fn max_call_depth() -> usize {
     static LIMIT: OnceLock<usize> = OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -3782,34 +3786,26 @@ impl Evaluator {
         }
     }
 
-    #[cfg(feature = "openstack")]
     fn eval_ostack_relation(
         &mut self,
         kind: &str,
         method: &str,
         record: crate::types::Map,
     ) -> Result<Value, EvalError> {
+        let Some(backend) = crate::ostack_backend::backend() else {
+            return Err(RillError::new(format!(
+                "{kind}.{method}() needs OpenStack support, which this rill was built without"
+            ))
+            .with_help(OSTACK_BUILD_HELP)
+            .into());
+        };
         let cancellation = self.cancellation.clone();
         let lookup = |key: &str| self.lookup_environment_value(key).map(|v| v.as_string_lossy());
-        match crate::openstack::relation_call(kind, method, record, &lookup, cancellation) {
+        match backend.relation_call(kind, method, record, &lookup, cancellation) {
             Ok(value) => Ok(value),
-            Err(crate::openstack::Error::Cancelled) => Err(EvalError::Cancelled),
-            Err(crate::openstack::Error::Failed(error)) => Err(error.into()),
+            Err(crate::ostack_backend::Error::Cancelled) => Err(EvalError::Cancelled),
+            Err(crate::ostack_backend::Error::Failed(error)) => Err(error.into()),
         }
-    }
-
-    #[cfg(not(feature = "openstack"))]
-    fn eval_ostack_relation(
-        &mut self,
-        kind: &str,
-        method: &str,
-        _record: crate::types::Map,
-    ) -> Result<Value, EvalError> {
-        Err(RillError::new(format!(
-            "{kind}.{method}() needs OpenStack support, which this rill was built without"
-        ))
-        .with_help("rebuild with `cargo build --features openstack`")
-        .into())
     }
 
     fn eval_time_method(&mut self, name: &str, args: &[Expr]) -> Result<Value, EvalError> {
@@ -3843,36 +3839,33 @@ impl Evaluator {
         })
     }
 
-    #[cfg(feature = "openstack")]
     fn eval_ostack(
         &mut self,
         name: &'static str,
         positional: Vec<Value>,
         named: Vec<(String, Value)>,
     ) -> Result<Value, EvalError> {
+        let Some(backend) = crate::ostack_backend::backend() else {
+            return Err(RillError::new(format!(
+                "ostack.{name} needs OpenStack support, which this rill was built without"
+            ))
+            .with_help(OSTACK_BUILD_HELP)
+            .into());
+        };
         let cancellation = self.cancellation.clone();
         let lookup = |key: &str| self.lookup_environment_value(key).map(|v| v.as_string_lossy());
-        let call =
-            crate::openstack::Call { name, positional, named, lookup_env: &lookup, cancellation };
-        match crate::openstack::call(call) {
+        let call = crate::ostack_backend::Call {
+            name,
+            positional,
+            named,
+            lookup_env: &lookup,
+            cancellation,
+        };
+        match backend.call(call) {
             Ok(value) => Ok(value),
-            Err(crate::openstack::Error::Cancelled) => Err(EvalError::Cancelled),
-            Err(crate::openstack::Error::Failed(error)) => Err(error.into()),
+            Err(crate::ostack_backend::Error::Cancelled) => Err(EvalError::Cancelled),
+            Err(crate::ostack_backend::Error::Failed(error)) => Err(error.into()),
         }
-    }
-
-    #[cfg(not(feature = "openstack"))]
-    fn eval_ostack(
-        &mut self,
-        name: &'static str,
-        _positional: Vec<Value>,
-        _named: Vec<(String, Value)>,
-    ) -> Result<Value, EvalError> {
-        Err(RillError::new(format!(
-            "ostack.{name} needs OpenStack support, which this rill was built without"
-        ))
-        .with_help("rebuild with `cargo build --features openstack`")
-        .into())
     }
 
     /// The SQL text and parameters of `db.query(q, params?)`.  A literal

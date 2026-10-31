@@ -1,7 +1,7 @@
 #!/usr/bin/env rill
 # Which servers is a volume attached to, and what are their IPs?
 #
-# Needs rill built with `--features openstack` and the usual OS_* variables.
+# Needs the rill from ostack-rill/ (see README) and the usual OS_* variables.
 # To try it without a cloud:
 #   RILL_OPENSTACK_FIXTURE=tests/fixtures/openstack rill examples/openstack_attached.ril web-1-data
 

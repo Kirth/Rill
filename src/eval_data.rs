@@ -1,5 +1,5 @@
 use crate::types::Value;
-pub(crate) fn json_to_value(value: serde_json::Value) -> Value {
+pub fn json_to_value(value: serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(value) => Value::Bool(value),

@@ -53,7 +53,8 @@ enum Command {
     Version,
 }
 
-fn main() -> ExitCode {
+/// `pub` so `ostack-rill/` can reuse this front end with its backend registered.
+pub fn main() -> ExitCode {
     // Die quietly when stdout closes (`rill script | head`), like other Unix tools.
     // SAFETY: resetting a signal disposition before any other thread exists.
     unsafe {

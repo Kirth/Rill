@@ -5,8 +5,7 @@ pub mod eval;
 mod eval_collections;
 mod eval_data;
 pub mod methods;
-#[cfg(feature = "openstack")]
-pub mod openstack;
+pub mod ostack_backend;
 pub mod parser;
 pub mod pathresolver;
 pub mod records;

@@ -11,10 +11,10 @@ build:
 test:
     cargo test --all-targets
 
-# The suite with the OpenStack namespace compiled in (fixtures, no network)
+# The ostack.* runtime in ostack-rill/ (fixtures, no network; needs ../../LeafCloud/FastOpenStackCLI)
 test-openstack:
-    cargo test --features openstack --all-targets
-    cargo clippy --features openstack --all-targets -- -D warnings
+    cd ostack-rill && cargo test --all-targets
+    cd ostack-rill && cargo clippy --all-targets -- -D warnings
 
 # The sql.* tests against a throwaway Postgres in target/pg (needs initdb/pg_ctl)
 test-sql:
